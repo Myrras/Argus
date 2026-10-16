@@ -123,6 +123,7 @@ describe("AI pass wrappers", () => {
       lastDoneRound: null,
       droppedFindings: 0,
       droppedVerdicts: 0,
+      readOnlyGuaranteed: true,
     };
     events.emit("ai:state", state);
     expect(seen).toEqual([state]);

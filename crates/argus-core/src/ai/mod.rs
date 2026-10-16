@@ -7,7 +7,8 @@
 //! - [`prompt`]: the prompt text (consts) and its assembly.
 //! - [`output`]: JSON extraction and strict validation of the answer.
 //! - [`job`]: one run end to end (diff, workspace, prompt, retry).
-//! - [`runtime`]: queueing (per review serial, two at once) and `ai:state`.
+//! - [`runtime`]: queueing (per review serial, two at once), `ai:state`,
+//!   and the shutdown that kills running agents on quit.
 //! - `store`: SQLite (the v1 tables plus `ai_runs`, migration 5).
 //! - `api`: the [`Core`](crate::Core) methods.
 //!
@@ -25,6 +26,7 @@ pub(crate) mod store;
 
 pub mod model;
 
+pub use job::sweep_stale_temp_dirs;
 pub use model::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost,
     FindingPostOutcome, FindingPostResult, Severity, Verdict, VerdictLabel,
@@ -43,6 +45,10 @@ pub const MAX_CONCURRENT: usize = 2;
 
 /// A run that takes longer is killed and fails.
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// How long quitting waits for cancelled runs to end (their agents are
+/// killed at once; this is for their threads to clean up).
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 /// Error text of a run the user (or turning the AI pass off) stopped.
 pub(crate) const CANCELLED: &str = "cancelled";

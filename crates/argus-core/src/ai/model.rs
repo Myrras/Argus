@@ -8,6 +8,7 @@
 //!   queued: boolean; round: number | null; adapter: string | null;
 //!   error: string | null; startedAt: string | null; finishedAt: string | null;
 //!   lastDoneRound: number | null; droppedFindings: number; droppedVerdicts: number;
+//!   readOnlyGuaranteed: boolean;
 //! }
 //! type Severity = "high" | "medium" | "low";
 //! interface Finding {
@@ -145,6 +146,10 @@ pub struct AiRunState {
     pub dropped_findings: u32,
     /// Verdicts the latest successful run dropped: unknown thread ids.
     pub dropped_verdicts: u32,
+    /// Whether Argus can guarantee the configured agent only reads. False
+    /// for `auggie`: its user-configured MCP tools cannot be turned off, so
+    /// the UI warns.
+    pub read_only_guaranteed: bool,
 }
 
 impl AiRunState {
@@ -162,6 +167,7 @@ impl AiRunState {
             last_done_round: None,
             dropped_findings: 0,
             dropped_verdicts: 0,
+            read_only_guaranteed: true,
         }
     }
 }

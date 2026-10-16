@@ -148,6 +148,7 @@ impl Core {
             Arc::new(ai::job::execute),
             ai::MAX_CONCURRENT,
         );
+        ai.set_adapter(&settings.ai.adapter);
         Self {
             store,
             settings_path,
@@ -183,6 +184,7 @@ impl Core {
         }
         *self.settings.lock().expect("settings lock poisoned") = settings.clone();
         self.ai.set_enabled(settings.ai.enabled);
+        self.ai.set_adapter(&settings.ai.adapter);
         *self.providers.lock().expect("providers lock poisoned") =
             provider::from_settings(&settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();
@@ -364,6 +366,17 @@ impl Core {
         if let Some((p, _)) = running {
             p.stop();
         }
+    }
+
+    /// Stop everything that runs in the background, for quitting: AI runs
+    /// are cancelled and their agents killed (waiting up to
+    /// [`ai::SHUTDOWN_GRACE`] for the runs to remove their temp dirs), then
+    /// the poll loop stops. Nothing starts afterwards. Blocking.
+    pub fn shutdown(&self) {
+        if !self.ai.shutdown(ai::SHUTDOWN_GRACE) {
+            tracing::warn!("AI runs were still ending when Argus quit");
+        }
+        self.stop_polling();
     }
 
     /// Ask a running loop to refresh now; a no-op when not polling.

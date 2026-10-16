@@ -56,6 +56,11 @@ pub(crate) struct RunOutput {
     pub verdicts: Vec<(ThreadId, VerdictLabel, String)>,
     pub dropped_findings: u32,
     pub dropped_verdicts: u32,
+    /// The diff the agent was given: its right side (where new-side lines
+    /// are numbered) and left side (old-side lines; the watermark for a
+    /// run over the commits since the last review).
+    pub head_sha: Option<String>,
+    pub base_sha: Option<String>,
 }
 
 /// Parse `text` into a valid answer, or say what is wrong with it.
@@ -254,9 +259,189 @@ pub(crate) fn filter(
     run
 }
 
+/// Prefixes of tokens with a fixed shape: GitHub (classic, OAuth, user,
+/// server, refresh, fine-grained), GitLab (personal, deploy), Slack.
+const TOKEN_PREFIXES: &[&str] = &[
+    "github_pat_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "glpat-",
+    "gldt-",
+    "xoxb-",
+    "xoxp-",
+];
+/// A prefix followed by fewer token characters is prose about the format.
+const MIN_TOKEN_TAIL: usize = 8;
+const REDACTED: &str = "[redacted]";
+
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// `text` with every `secrets` occurrence and every token-shaped string
+/// replaced: the prefixes above, AWS access key ids (`AKIA` + 16), and PEM
+/// private key blocks.
+pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for s in secrets.iter().filter(|s| s.len() >= MIN_TOKEN_TAIL) {
+        out = out.replace(s.as_str(), REDACTED);
+    }
+    out = redact_pem(&out);
+    let mut result = String::with_capacity(out.len());
+    let mut rest = out.as_str();
+    'scan: while !rest.is_empty() {
+        let at_boundary = !result.chars().last().is_some_and(token_char);
+        if at_boundary {
+            for p in TOKEN_PREFIXES {
+                if let Some(tail) = rest.strip_prefix(p) {
+                    let n = tail.chars().take_while(|c| token_char(*c)).count();
+                    if n >= MIN_TOKEN_TAIL {
+                        result.push_str(REDACTED);
+                        rest = &tail[n..];
+                        continue 'scan;
+                    }
+                }
+            }
+            if let Some(tail) = rest.strip_prefix("AKIA") {
+                let n = tail
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    .count();
+                if n == 16 {
+                    result.push_str(REDACTED);
+                    rest = &tail[n..];
+                    continue 'scan;
+                }
+            }
+        }
+        let c = rest.chars().next().expect("not empty");
+        result.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    result
+}
+
+/// PEM private key blocks (`-----BEGIN … PRIVATE KEY-----` to its `END`
+/// line, or to the end of the text when the block is cut off).
+fn redact_pem(text: &str) -> String {
+    const BEGIN: &str = "-----BEGIN ";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(BEGIN) {
+        let after = &rest[i + BEGIN.len()..];
+        let Some(label_end) = after.find("-----") else {
+            break;
+        };
+        let label = &after[..label_end];
+        if !label.ends_with("PRIVATE KEY") || label.contains('\n') {
+            out.push_str(&rest[..i + BEGIN.len()]);
+            rest = after;
+            continue;
+        }
+        out.push_str(&rest[..i]);
+        out.push_str(REDACTED);
+        let end_marker = format!("-----END {label}-----");
+        rest = match after.find(&end_marker) {
+            Some(j) => &after[j + end_marker.len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Redact every text of a run's output that reaches the store (and from
+/// there, one click away, the platform): finding titles and bodies,
+/// checklist items, verdict reasons. The agent can read files beside the
+/// diff; whatever secret it quoted stays out.
+pub(crate) fn redact(out: &mut RunOutput, secrets: &[String]) {
+    for f in &mut out.findings {
+        f.title = redact_text(&f.title, secrets);
+        f.body = redact_text(&f.body, secrets);
+    }
+    for item in &mut out.checklist {
+        *item = redact_text(item, secrets);
+    }
+    for (_, _, reason) in &mut out.verdicts {
+        *reason = redact_text(reason, secrets);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_shapes_and_known_secrets_are_redacted() {
+        // Fictitious tokens of the right shapes.
+        let gh = format!("ghp_{}", "A1b2C3d4E5".repeat(4));
+        let pat = format!("github_pat_{}", "x9".repeat(20));
+        let glpat = "glpat-FixtureFixture1234";
+        let aws = "AKIAFIXTUREFIXTURE12";
+        let pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=\n-----END OPENSSH PRIVATE KEY-----";
+        let text = format!(
+            "Found {gh} in ~/.config/gh/hosts.yml, ({pat}), token={glpat}; aws {aws}.\n{pem}\nand fixture-secret-value here"
+        );
+        let out = redact_text(&text, &["fixture-secret-value".into()]);
+        for leaked in [
+            gh.as_str(),
+            pat.as_str(),
+            glpat,
+            aws,
+            "b3BlbnNzaC1rZXk",
+            "fixture-secret-value",
+        ] {
+            assert!(!out.contains(leaked), "{leaked} in {out}");
+        }
+        assert_eq!(out.matches(REDACTED).count(), 6, "{out}");
+        assert!(out.starts_with(
+            "Found [redacted] in ~/.config/gh/hosts.yml, ([redacted]), token=[redacted];"
+        ));
+        // Prose about the formats, and lookalikes, stay.
+        for kept in [
+            "Tokens start with ghp_ or glpat-.",
+            "nightly_ghp_build",
+            "AKIA is the prefix",
+            "-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----",
+        ] {
+            assert_eq!(redact_text(kept, &[]), kept);
+        }
+        // A cut-off key block is redacted to the end.
+        assert_eq!(
+            redact_text("x -----BEGIN RSA PRIVATE KEY-----\nMIIE", &[]),
+            "x [redacted]"
+        );
+    }
+
+    #[test]
+    fn a_run_output_is_redacted_everywhere_it_has_text() {
+        let tok = format!("gho_{}", "Z".repeat(36));
+        let mut out = RunOutput {
+            findings: vec![RawFinding {
+                path: "src/a.rs".into(),
+                line: 1,
+                side: Side::New,
+                severity: Severity::High,
+                title: format!("Leaks {tok}"),
+                body: format!("The token {tok} is printed."),
+            }],
+            checklist: vec![format!("Rotate {tok}")],
+            verdicts: vec![(
+                ThreadId::from_key(crate::ids::ReviewId::from_key("r"), "1"),
+                VerdictLabel::Partly,
+                format!("still uses {tok}"),
+            )],
+            ..RunOutput::default()
+        };
+        redact(&mut out, &[]);
+        let all = format!("{out:?}");
+        assert!(!all.contains(&tok), "{all}");
+        assert_eq!(out.findings[0].title, "Leaks [redacted]");
+        assert_eq!(out.checklist[0], "Rotate [redacted]");
+    }
 
     const VALID: &str = r#"{"findings":[{"path":"src/a.rs","line":3,"side":"new","severity":"high","title":"Off by one","body":"The loop skips the last item."}],"checklist":[{"text":"Is the cache meant to be per user?"}],"verdicts":[]}"#;
 

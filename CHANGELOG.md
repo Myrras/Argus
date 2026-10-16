@@ -148,6 +148,35 @@ when it merges.
 - Dialogs now focus their contents when they open, keep `Tab` inside, and
   give the focus back when they close.
 
+### Fixed
+
+- The AI agent can no longer be configured by the branch under review: it runs
+  in its own temporary folder with your clone read-only beside it, so a
+  repository's own agent settings, hooks and instructions never load. Claude
+  can only read the review's files and the clone, not your home folder or
+  other repositories, and anything shaped like a token or private key is
+  removed from findings before they are saved.
+- Auggie runs without its file-writing, process, web and sub-agent tools.
+  Argus cannot turn off MCP tools from your own Auggie setup, so it no longer
+  claims those runs are guaranteed read-only.
+- Posting an AI finding places it on the code the AI actually read; a finding
+  from a later round's "since last review" diff on a removed line is refused
+  instead of landing on another line.
+- Posting or approving when new commits arrived in between now refuses and
+  shows the new commits right away, instead of failing until the next
+  refresh. A multi-line comment no longer moves when lines inside it changed.
+- Re-running the AI pass no longer keeps stale verdicts, never offers an
+  already posted finding again, and keeps your own verdict label on a thread
+  in later rounds.
+- Quitting Argus stops running AI passes and removes their temporary files;
+  files left by a crash are cleaned up on the next start.
+- Opening Argus a second time brings the running window to the front instead
+  of starting a second copy.
+- If Argus cannot open its data at startup it now says so, naming the folder,
+  instead of quitting without a word.
+- The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and
+  Close Window (⌘W) work.
+
 ## [0.1.0] - 2026-10-16
 
 ### Added

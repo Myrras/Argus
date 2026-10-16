@@ -244,6 +244,34 @@ fn resolves_a_shifted_line_after_the_head_moved() {
 }
 
 #[test]
+fn a_range_moves_only_when_every_line_of_it_survived() {
+    // h1 lines 3..=5 of a file; since h1 line 4 changed, the ends did not.
+    let current = diff("base", "h2", vec![changed("src/cache.rs", PATCH_H2)]);
+    let changed_middle = diff(
+        "h1",
+        "h2",
+        vec![changed(
+            "src/cache.rs",
+            "@@ -4 +4 @@\n-fn d() {}\n+fn d2() {}",
+        )],
+    );
+    let mut range = comment(5, Side::New);
+    range.start_line = Some(3);
+    let err = resolve(&range, "h1", &current, Some(&changed_middle)).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::LineNotInDiff);
+    assert!(err.message.contains("changed since"), "{}", err.message);
+
+    // A line inserted inside the range: the ends map, the range grew.
+    let inserted = diff(
+        "h1",
+        "h2",
+        vec![changed("src/cache.rs", "@@ -3,0 +4 @@\n+// new")],
+    );
+    let err = resolve(&range, "h1", &current, Some(&inserted)).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::LineNotInDiff);
+}
+
+#[test]
 fn fails_a_line_removed_since_or_a_rewritten_branch() {
     let current = diff("base", "h2", vec![changed("src/cache.rs", PATCH_H2)]);
     // `fn y` (h1 line 12) was changed between h1 and h2.
@@ -396,6 +424,10 @@ struct Fake {
     fetches: Mutex<u32>,
     /// `fetch_files` calls.
     file_reads: Mutex<u32>,
+    /// The next review-diff read lands a push to `h2` right after it (the
+    /// diff stays the `h1` one): a push between reading the diff and
+    /// posting.
+    push_after_files: Mutex<bool>,
 }
 
 impl Fake {
@@ -433,7 +465,11 @@ impl ReviewProvider for Fake {
         *self.file_reads.lock().unwrap() += 1;
         Ok(match range {
             DiffRange::Review { head, .. } => {
-                diff("mergebase", head, self.files.lock().unwrap().clone())
+                let out = diff("mergebase", head, self.files.lock().unwrap().clone());
+                if std::mem::take(&mut *self.push_after_files.lock().unwrap()) {
+                    push_h2(self);
+                }
+                out
             }
             DiffRange::Compare { from, to } => diff(from, to, self.since.lock().unwrap().clone()),
         })
@@ -503,6 +539,7 @@ fn setup() -> (Core, Arc<Fake>, ReviewId) {
         approval_shows: Mutex::new(true),
         fetches: Mutex::new(0),
         file_reads: Mutex::new(0),
+        push_after_files: Mutex::new(false),
     });
     let core = Core::with_providers(Store::in_memory().unwrap(), vec![fake.clone()]);
     assert!(core.refresh().errors.is_empty());
@@ -620,6 +657,73 @@ fn a_comment_follows_the_head_and_the_watermark_stays_at_what_was_seen() {
 }
 
 #[test]
+fn a_push_between_reading_the_diff_and_posting_fails_the_batch_and_refreshes() {
+    let (core, fake, id) = setup();
+    *fake.push_after_files.lock().unwrap() = true;
+    let err = core
+        .post_comments(id, vec![comment(12, Side::New)])
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    assert_eq!(fake.writes(), 0);
+    // The stored review caught up, so a retry is placed on the new head.
+    assert_eq!(core.review(id).unwrap().head_sha, "h2");
+    let results = core
+        .post_comments(id, vec![comment(14, Side::New)])
+        .unwrap();
+    assert!(results[0].is_posted(), "{results:?}");
+}
+
+#[test]
+fn a_diff_of_another_head_than_the_platforms_fails_the_batch() {
+    struct Lagging(Arc<Fake>);
+    impl ReviewProvider for Lagging {
+        fn id(&self) -> ProviderId {
+            self.0.id()
+        }
+        fn host(&self) -> &str {
+            "github.com"
+        }
+        fn current_user(&self) -> CoreResult<String> {
+            self.0.current_user()
+        }
+        fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+            self.0.list_reviews()
+        }
+        fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+            self.0.fetch_review(r)
+        }
+        fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
+            self.0.fetch_threads(r)
+        }
+        fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String> {
+            self.0.file_at(r, sha, path)
+        }
+        // The platform served the diff of an older head than asked for.
+        fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+            let mut d = self.0.fetch_files(r, range)?;
+            d.head_sha = "h0".into();
+            Ok(d)
+        }
+        fn post_comment(
+            &self,
+            r: &ReviewRef,
+            c: &PlacedComment,
+        ) -> Result<PostedComment, PostError> {
+            self.0.post_comment(r, c)
+        }
+    }
+    let (_, fake, id) = setup();
+    let store = Store::in_memory().unwrap();
+    let core = Core::with_providers(store, vec![Arc::new(Lagging(fake.clone()))]);
+    assert!(core.refresh().errors.is_empty());
+    let err = core
+        .post_comments(id, vec![comment(12, Side::New)])
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    assert_eq!(fake.writes(), 0);
+}
+
+#[test]
 fn a_batch_with_nothing_valid_never_reaches_the_platform() {
     let (core, fake, id) = setup();
     let fetches = *fake.fetches.lock().unwrap();
@@ -675,6 +779,8 @@ fn an_approval_is_pinned_to_the_head_the_user_saw() {
     push_h2(&fake);
     let err = core.approve_review(id, "h1").unwrap_err();
     assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    // The refusal refreshed the stored review: the UI re-reads h2.
+    assert_eq!(core.review(id).unwrap().head_sha, "h2");
     // A head other than the stored one (the view was stale).
     let err = core.approve_review(id, "h0").unwrap_err();
     assert_eq!(err.kind, PostErrorKind::HeadMoved);
@@ -697,6 +803,11 @@ fn an_approval_is_pinned_to_the_head_the_user_saw() {
 fn replies_go_to_the_platform_thread() {
     let (core, fake, id) = setup();
     let thread = core.threads(id).unwrap()[0].thread_id;
+    assert_eq!(core.thread_review(thread).unwrap(), id);
+    assert!(matches!(
+        core.thread_review(ThreadId::from_key(id, "nope")),
+        Err(CoreError::NotFound)
+    ));
     let note = core.reply_to_thread(thread, "Fixed?").unwrap();
     assert_eq!(note.provider_thread_id, "900");
     assert_eq!(

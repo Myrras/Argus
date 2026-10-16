@@ -100,6 +100,7 @@
       "finishedAt",
       "lastDoneRound",
       "queued",
+      "readOnlyGuaranteed",
       "reviewId",
       "round",
       "startedAt",

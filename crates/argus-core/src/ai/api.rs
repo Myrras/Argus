@@ -16,6 +16,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::ids::{ReviewId, ThreadId};
 use crate::poll::RefreshReport;
 use crate::post::{NewComment, PostError, PostErrorKind, PostResult};
+use crate::provider::Side;
 use crate::store::ReviewRecord;
 use crate::Core;
 
@@ -178,6 +179,17 @@ impl Core {
                     )))
                 }
                 Some(f) if f.review_id == id => {
+                    let (head_sha, base_sha) = ai_store::finding_shas(&self.store, f.id)?;
+                    // Old-side lines are numbered against the left side the
+                    // agent read; without it (stored before migration 6)
+                    // they could land on another line of the base.
+                    if f.side == Side::Old && base_sha.is_none() {
+                        outcomes.push(Some(failed(
+                            PostErrorKind::LineNotInDiff,
+                            "this finding is from before Argus kept the diff it was read at; re-run the AI pass to post it",
+                        )));
+                        continue;
+                    }
                     comments.push(NewComment {
                         path: f.path.clone(),
                         line: f.line,
@@ -187,11 +199,13 @@ impl Core {
                             .body
                             .clone()
                             .unwrap_or_else(|| format!("**{}**\n\n{}", f.title, f.body)),
-                        // The finding was read at the head Argus stored
-                        // (what the UI shows); the post API moves it
-                        // forward when the platform's head is newer.
-                        head_sha: None,
-                        base_sha: None,
+                        // The diff the agent read: the post API moves a
+                        // new-side line forward from its head, and refuses
+                        // an old-side one whose left side is not the
+                        // review's diff's (a run since the last review).
+                        // `None` (an older finding): the stored head.
+                        head_sha,
+                        base_sha,
                     });
                     found.push((i, f));
                     outcomes.push(None);
@@ -237,6 +251,7 @@ impl Core {
             settings: self.settings(),
             provider: self.provider_for(record)?,
             timeout: RUN_TIMEOUT,
+            child: Default::default(),
         })
     }
 }

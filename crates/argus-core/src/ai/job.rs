@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::adapter::{self, Adapter, Invocation, PromptDelivery};
+use super::adapter::{self, Adapter, ChildSlot, Invocation, PromptDelivery, RunDirs};
 use super::output::{self, RunOutput};
 use super::prompt::{self, DiffScope, PromptInput, Workspace};
 use crate::files::{review_range, since_range};
@@ -29,16 +29,26 @@ pub(crate) struct JobContext {
     /// Read access only: the AI pass never posts.
     pub provider: Arc<dyn ReviewProvider>,
     pub timeout: Duration,
+    /// The agent process while one runs; the runtime gives each started run
+    /// a fresh one and kills what is in it on shutdown.
+    pub child: ChildSlot,
 }
+
+/// Prefix of a run's temp dir under the system temp dir.
+const TEMP_PREFIX: &str = "argus-ai-";
 
 /// A directory under the system temp dir, removed (with its contents) on
 /// drop, so a run cleans up after itself however it ends.
 pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
+    /// A fresh dir, by its canonical path (macOS' temp dir is behind the
+    /// `/var` → `/private/var` link), which the agent's deny rules name.
     pub fn new() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("argus-ai-{}", uuid::Uuid::new_v4().simple()));
+        let path =
+            std::env::temp_dir().join(format!("{TEMP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&path)?;
+        let path = path.canonicalize().unwrap_or(path);
         Ok(Self(path))
     }
 
@@ -53,43 +63,109 @@ impl Drop for TempDir {
     }
 }
 
-/// `path` from a diff as a relative path with only normal components, so a
-/// hostile `../../x` cannot write outside the snapshot dir.
-fn safe_relative(path: &str) -> Option<PathBuf> {
-    let p: PathBuf = Path::new(path)
+/// Remove the temp dirs of runs a previous Argus left behind (it crashed or
+/// was killed mid-run): they hold private diffs. Only for a process that
+/// knows no run of its own is live (the app at startup; one instance runs
+/// at a time). Returns how many went.
+pub fn sweep_stale_temp_dirs() -> usize {
+    sweep_temp_dirs_in(&std::env::temp_dir())
+}
+
+pub(crate) fn sweep_temp_dirs_in(base: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            // Exactly Argus' own names: the prefix and a simple UUID.
+            name.strip_prefix(TEMP_PREFIX)
+                .is_some_and(|id| id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit()))
+                && e.file_type().is_ok_and(|t| t.is_dir())
+        })
+        .filter(|e| std::fs::remove_dir_all(e.path()).is_ok())
+        .count()
+}
+
+/// Longest file name most file systems take (`NAME_MAX`), in bytes.
+const MAX_NAME: usize = 255;
+
+/// A path component that fits [`MAX_NAME`] with `suffix` added: as is, or
+/// (a name only a platform could hold) its SHA-1 instead.
+fn fit_name(name: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
+    if name.len() + suffix.len() <= MAX_NAME {
+        let mut out = name.to_os_string();
+        out.push(suffix);
+        return out;
+    }
+    let hash = sha1_smol::Sha1::from(name.to_string_lossy().as_bytes())
+        .digest()
+        .to_string();
+    format!("{hash}{suffix}").into()
+}
+
+/// `diff/<path>.diff` for a diff's `path`: only its normal components (a
+/// hostile `../../x` cannot write outside the snapshot dir), each fitting
+/// a file name. `None` for a path with no normal component.
+fn snapshot_path(path: &str) -> Option<PathBuf> {
+    let parts: Vec<_> = Path::new(path)
         .components()
         .filter_map(|c| match c {
             Component::Normal(s) => Some(s),
             _ => None,
         })
         .collect();
-    (!p.as_os_str().is_empty()).then_some(p)
+    let (last, dirs) = parts.split_last()?;
+    let mut out = PathBuf::from("diff");
+    for d in dirs {
+        out.push(fit_name(d, ""));
+    }
+    out.push(fit_name(last, ".diff"));
+    Some(out)
 }
 
 /// Fill a snapshot dir: `diff/<path>.diff` per file with a patch, and
-/// `threads.json` with every thread of the review.
+/// `threads.json` with every thread of the review. A file that cannot be
+/// written is left out (its patch is in the prompt all the same); only
+/// `threads.json` failing fails.
 pub(crate) fn write_snapshot(
     dir: &Path,
     diff: &FileDiff,
     threads: &[StoredThread],
 ) -> std::io::Result<()> {
     for f in &diff.files {
-        let (Some(patch), Some(rel)) = (f.patch.as_deref(), safe_relative(&f.path)) else {
+        let (Some(patch), Some(rel)) = (f.patch.as_deref(), snapshot_path(&f.path)) else {
             continue;
         };
-        let mut target = dir.join("diff").join(rel);
-        let name = format!(
-            "{}.diff",
-            target.file_name().unwrap_or_default().to_string_lossy()
-        );
-        target.set_file_name(name);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+        let target = dir.join(rel);
+        let written = target
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&target, patch));
+        if let Err(e) = written {
+            tracing::debug!("AI run: a diff file was left out of the snapshot: {e}");
         }
-        std::fs::write(target, patch)?;
     }
     let json = serde_json::to_string_pretty(threads).map_err(std::io::Error::other)?;
     std::fs::write(dir.join("threads.json"), json)
+}
+
+/// Tokens the agent's answer must not carry into a finding, besides the
+/// shapes [`super::output::redact`] knows: the configured GitLab token.
+/// (`gh`'s token stays inside the provider; GitHub tokens have fixed
+/// prefixes, which the shapes cover.)
+pub(crate) fn known_secrets(settings: &Settings) -> Vec<String> {
+    use crate::provider::gitlab::{KeychainToken, TokenSource};
+    let url = settings.gitlab.base_url.trim();
+    if url.is_empty() {
+        return Vec::new();
+    }
+    KeychainToken::for_base_url(url)
+        .token()
+        .into_iter()
+        .collect()
 }
 
 /// `CLAUDE.md` / `AGENTS.md` at the clone's root, those that exist.
@@ -211,15 +287,33 @@ pub(crate) fn execute(
         .settings
         .clone_path(&record.review)
         .filter(|p| p.is_dir())
-        .map(Path::to_path_buf);
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    // The working directory is always the run's own temp dir: an agent
+    // started in the clone would load the checkout's own agent settings
+    // (hooks, env, an API key helper), which a PR branch can change.
     let temp = TempDir::new().map_err(|_| "could not create a temp dir for the run".to_string())?;
-    let (cwd, workspace, conventions) = match &clone {
-        Some(c) => (c.clone(), Workspace::Clone, conventions(c)),
-        None => {
-            write_snapshot(temp.path(), &diff, &threads)
-                .map_err(|_| "could not write the review snapshot".to_string())?;
-            (temp.path().to_path_buf(), Workspace::Snapshot, Vec::new())
+    write_snapshot(temp.path(), &diff, &threads)
+        .map_err(|_| "could not write the review snapshot".to_string())?;
+    let (workspace, conventions) = match &clone {
+        Some(c) => (Workspace::Clone(c), conventions(c)),
+        None => (Workspace::Snapshot, Vec::new()),
+    };
+    let settings_file = match adapter.id {
+        "claude" => {
+            let mut allowed = vec![temp.path().to_path_buf()];
+            allowed.extend(clone.clone());
+            let file = temp.path().join("claude-settings.json");
+            let json = adapter::claude_settings(&allowed).to_string();
+            std::fs::write(&file, json)
+                .map_err(|_| "could not write the agent's settings".to_string())?;
+            Some(file)
         }
+        _ => None,
+    };
+    let dirs = RunDirs {
+        temp: temp.path(),
+        clone: clone.as_deref(),
+        settings: settings_file.as_deref(),
     };
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let text = prompt::build(&PromptInput {
@@ -234,8 +328,8 @@ pub(crate) fn execute(
 
     let spawn = |prompt: &str| -> Result<String, String> {
         check(cancel)?;
-        let inv = invocation(&adapter, &program, &cwd, temp.path(), prompt, ctx)?;
-        adapter::run(&inv, cancel).map_err(|e| e.message())
+        let inv = invocation(&adapter, &program, &dirs, prompt, ctx)?;
+        adapter::run_tracked(&inv, cancel, &ctx.child).map_err(|e| e.message())
     };
     let answer = spawn(&text)?;
     let parsed = match output::parse(&answer) {
@@ -246,29 +340,35 @@ pub(crate) fn execute(
                 .map_err(|e| format!("the agent's answer was invalid after a retry: {e}"))?
         }
     };
-    Ok(output::filter(parsed, &paths, &known))
+    Ok(RunOutput {
+        // The shas of the diff actually returned (the provider's contract),
+        // which for a run since the last review has the watermark as its
+        // left side.
+        head_sha: Some(diff.head_sha.clone()),
+        base_sha: Some(diff.base_sha.clone()),
+        ..output::filter(parsed, &paths, &known)
+    })
 }
 
 fn invocation(
     adapter: &Adapter,
     program: &str,
-    cwd: &Path,
-    temp: &Path,
+    dirs: &RunDirs<'_>,
     prompt: &str,
     ctx: &JobContext,
 ) -> Result<Invocation, String> {
     let (stdin, prompt_file) = match adapter.prompt {
         PromptDelivery::Stdin => (Some(prompt.to_string()), None),
         PromptDelivery::File(_) => {
-            let file = temp.join("prompt.md");
+            let file = dirs.temp.join("prompt.md");
             std::fs::write(&file, prompt).map_err(|_| "could not write the prompt".to_string())?;
             (None, Some(file))
         }
     };
     Ok(Invocation {
         program: PathBuf::from(program),
-        args: adapter.args(prompt_file.as_deref(), &ctx.settings.ai.args),
-        cwd: cwd.to_path_buf(),
+        args: adapter.args(dirs, prompt_file.as_deref(), &ctx.settings.ai.args),
+        cwd: dirs.temp.to_path_buf(),
         env: adapter::sanitized_env(std::env::vars_os(), crate::platform::login_path()),
         stdin,
         timeout: ctx.timeout,

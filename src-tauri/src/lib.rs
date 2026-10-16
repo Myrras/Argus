@@ -16,9 +16,12 @@ mod error;
 mod events;
 mod state;
 
+use std::path::Path;
+
 #[cfg(target_os = "macos")]
 use tauri::Emitter;
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tauri_plugin_log::{Target, TargetKind};
 
 use crate::state::AppState;
@@ -26,7 +29,13 @@ use crate::state::AppState;
 /// Build and run the Tauri application.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        // First: a second launch hands over to the running Argus (whose
+        // window comes to the front) and exits before anything opens the
+        // database, polls, or marks the first one's AI runs interrupted.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            focus_main_window(app);
+        }))
         // Persist window size/position across runs. Decorations excluded (as
         // in Iris): its on_window_ready restore runs after the platform
         // config is applied and, with default StateFlags, would reassert the
@@ -41,7 +50,8 @@ pub fn run() {
         )
         // Opens review links in the OS default browser.
         .plugin(tauri_plugin_opener::init())
-        // Native folder picker for a repository's local clone (Settings → AI).
+        // Native folder picker for a repository's local clone (Settings → AI),
+        // and the startup error dialog.
         .plugin(tauri_plugin_dialog::init())
         // Logging sinks: stdout (dev), the per-OS log directory (support), and
         // the webview console (in-app diagnostics).
@@ -95,9 +105,19 @@ pub fn run() {
                     .separator()
                     .select_all()
                     .build()?;
+                // The standard Window menu: without it ⌘M, the zoom and
+                // full-screen items and ⌘W do nothing.
+                let window_menu = SubmenuBuilder::new(app, "Window")
+                    .minimize()
+                    .maximize()
+                    .fullscreen()
+                    .separator()
+                    .close_window()
+                    .build()?;
                 let menu = MenuBuilder::new(app)
                     .item(&app_menu)
                     .item(&edit_menu)
+                    .item(&window_menu)
                     .build()?;
                 app.set_menu(menu)?;
                 app.on_menu_event(|app, event| {
@@ -107,10 +127,43 @@ pub fn run() {
                 });
             }
 
+            // Temp dirs a previous Argus left behind (it crashed or was killed
+            // mid-run) hold private diffs. Safe here: single-instance means no
+            // run of another Argus is live.
+            let swept = argus_core::ai::sweep_stale_temp_dirs();
+            if swept > 0 {
+                tracing::info!("removed {swept} stale AI run dir(s)");
+            }
+
             // The database and settings.json live in the app data dir, which
             // only exists once the app does — hence managing state here
-            // rather than on the builder.
-            let state = AppState::open(&app.path().app_data_dir()?)?;
+            // rather than on the builder. A failure is shown and Argus quits:
+            // an error out of setup would abort without a word.
+            let opened = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| (None, e.to_string()))
+                .and_then(|dir| {
+                    AppState::open(&dir).map_err(|e| (Some(dir.clone()), e.to_string()))
+                });
+            let state = match opened {
+                Ok(state) => state,
+                Err((dir, error)) => {
+                    let message = startup_error_message(dir.as_deref(), &error);
+                    tracing::error!("{message}");
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                    let handle = app.handle().clone();
+                    // Not `blocking_show`: setup runs on the main thread.
+                    app.dialog()
+                        .message(message)
+                        .title("Argus could not start")
+                        .kind(MessageDialogKind::Error)
+                        .show(move |_| handle.exit(1));
+                    return Ok(());
+                }
+            };
             // Before the first poll, so the runs it queues are reported.
             let handle = app.handle().clone();
             state
@@ -152,8 +205,42 @@ pub fn run() {
             commands::ai::set_verdict_override,
             commands::ai::post_findings,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app, event| {
+        // Quitting: cancel the AI runs and kill their agents (else they run
+        // on as orphans, their temp dirs with private diffs left behind),
+        // then stop polling. `try_state`: the state is missing when startup
+        // failed.
+        if let RunEvent::Exit = event {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.core.shutdown();
+            }
+        }
+    });
+}
+
+/// Bring the main window to the front (a second launch of Argus).
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// What the startup error dialog says: what failed and where Argus keeps
+/// its data, so the user can look there (or move the folder aside).
+/// `error` is app-owned text (`CoreError`'s), never a secret.
+fn startup_error_message(data_dir: Option<&Path>, error: &str) -> String {
+    match data_dir {
+        Some(dir) => format!(
+            "Argus could not open its data in {}: {error}\n\nArgus will quit.",
+            dir.display()
+        ),
+        None => format!("Argus could not find its data folder: {error}\n\nArgus will quit."),
+    }
 }
 
 /// Start the core's background refresh loop. It refreshes at once, then at
@@ -172,4 +259,23 @@ fn start_polling(app: tauri::AppHandle, state: &AppState) {
             core.on_refresh_report(report);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_startup_error_names_the_data_dir() {
+        let m = startup_error_message(
+            Some(Path::new(
+                "/Users/fixture/Library/Application Support/com.argus.app",
+            )),
+            "the database is from a newer Argus; update Argus",
+        );
+        assert!(m.contains("/Users/fixture/Library/Application Support/com.argus.app"));
+        assert!(m.contains("the database is from a newer Argus"));
+        assert!(m.ends_with("Argus will quit."));
+        assert!(startup_error_message(None, "no home").contains("could not find its data folder"));
+    }
 }

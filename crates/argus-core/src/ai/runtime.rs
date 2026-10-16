@@ -12,9 +12,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use chrono::Utc;
 
-use super::job::JobContext;
+use super::adapter::{self, ChildSlot};
+use super::job::{self, JobContext};
 use super::model::AiRunState;
-use super::output::RunOutput;
+use super::output::{self, RunOutput};
 use super::store as ai_store;
 use super::CANCELLED;
 use crate::error::CoreResult;
@@ -32,23 +33,34 @@ pub(crate) type Executor = Arc<
         + Sync,
 >;
 
+/// A started run: its cancel flag and its agent process.
+struct Running {
+    cancel: Arc<AtomicBool>,
+    child: ChildSlot,
+}
+
 #[derive(Default)]
 struct Sched {
-    /// Review → its run's cancel flag.
-    running: HashMap<ReviewId, Arc<AtomicBool>>,
+    running: HashMap<ReviewId, Running>,
     /// At most one entry per review.
     queue: VecDeque<(ReviewId, JobContext)>,
+    /// The AI pass is on. Read and written under this lock, so turning it
+    /// off and queueing (or starting) a run never interleave.
+    enabled: bool,
+    /// [`AiRuntime::shutdown`] ran: nothing starts any more.
+    stopped: bool,
 }
 
 struct Inner {
     store: Arc<Store>,
     executor: Mutex<Executor>,
     max_concurrent: usize,
-    enabled: AtomicBool,
     sched: Mutex<Sched>,
-    /// Signalled whenever a run ends (for `wait_idle`).
+    /// Signalled whenever a run ends (for `wait_idle` and `shutdown`).
     changed: Condvar,
     callback: Mutex<Option<AiStateCallback>>,
+    /// The configured adapter id, for `readOnlyGuaranteed`.
+    adapter: Mutex<String>,
 }
 
 /// The AI scheduler a [`Core`](crate::Core) owns. Dropping it cancels what
@@ -74,12 +86,20 @@ impl AiRuntime {
                 store,
                 executor: Mutex::new(executor),
                 max_concurrent: max_concurrent.max(1),
-                enabled: AtomicBool::new(enabled),
-                sched: Mutex::new(Sched::default()),
+                sched: Mutex::new(Sched {
+                    enabled,
+                    ..Sched::default()
+                }),
                 changed: Condvar::new(),
                 callback: Mutex::new(None),
+                adapter: Mutex::new(String::new()),
             }),
         }
+    }
+
+    /// The adapter the settings name (what `readOnlyGuaranteed` is about).
+    pub fn set_adapter(&self, id: &str) {
+        *self.inner.adapter.lock().expect("adapter lock poisoned") = id.trim().to_string();
     }
 
     #[cfg(test)]
@@ -88,7 +108,7 @@ impl AiRuntime {
     }
 
     pub fn enabled(&self) -> bool {
-        self.inner.enabled.load(Ordering::Relaxed)
+        self.inner.enabled()
     }
 
     pub fn set_callback(&self, cb: AiStateCallback) {
@@ -97,14 +117,14 @@ impl AiRuntime {
 
     /// Turning the AI pass off drops the queue and cancels running runs.
     pub fn set_enabled(&self, enabled: bool) {
-        self.inner.enabled.store(enabled, Ordering::Relaxed);
-        if enabled {
-            return;
-        }
         let dropped: Vec<ReviewId> = {
             let mut s = self.inner.sched.lock().expect("sched lock poisoned");
-            for flag in s.running.values() {
-                flag.store(true, Ordering::Relaxed);
+            s.enabled = enabled;
+            if enabled {
+                return;
+            }
+            for run in s.running.values() {
+                run.cancel.store(true, Ordering::Relaxed);
             }
             s.queue.drain(..).map(|(id, _)| id).collect()
         };
@@ -120,13 +140,14 @@ impl AiRuntime {
     }
 
     /// Queue a run of `review` (a queued one keeps its place and takes the
-    /// fresher context). Returns false when the AI pass is off.
+    /// fresher context). Returns false when the AI pass is off (or Argus
+    /// is shutting down).
     pub fn enqueue(&self, review: ReviewId, ctx: JobContext) -> bool {
-        if !self.enabled() {
-            return false;
-        }
         {
             let mut s = self.inner.sched.lock().expect("sched lock poisoned");
+            if !s.enabled || s.stopped {
+                return false;
+            }
             match s.queue.iter_mut().find(|(id, _)| *id == review) {
                 Some(entry) => entry.1 = ctx,
                 None => s.queue.push_back((review, ctx)),
@@ -137,13 +158,41 @@ impl AiRuntime {
         true
     }
 
+    /// Quitting: nothing new starts, the queue is dropped, running runs are
+    /// cancelled and their agents killed, then this waits up to `grace` for
+    /// the run threads to finish (each removes its temp dir and stores its
+    /// `cancelled` end). Whether they all did.
+    pub fn shutdown(&self, grace: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + grace;
+        let mut s = self.inner.sched.lock().expect("sched lock poisoned");
+        s.stopped = true;
+        s.queue.clear();
+        for run in s.running.values() {
+            run.cancel.store(true, Ordering::Relaxed);
+            adapter::kill_child(&run.child);
+        }
+        while !s.running.is_empty() {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            s = self
+                .inner
+                .changed
+                .wait_timeout(s, left)
+                .expect("sched lock poisoned")
+                .0;
+        }
+        true
+    }
+
     /// Drop a queued run of `review` and stop a running one (it ends
     /// `failed` with `cancelled`).
     pub fn cancel(&self, review: ReviewId) {
         let was_queued = {
             let mut s = self.inner.sched.lock().expect("sched lock poisoned");
-            if let Some(flag) = s.running.get(&review) {
-                flag.store(true, Ordering::Relaxed);
+            if let Some(run) = s.running.get(&review) {
+                run.cancel.store(true, Ordering::Relaxed);
             }
             let before = s.queue.len();
             s.queue.retain(|(id, _)| *id != review);
@@ -156,6 +205,20 @@ impl AiRuntime {
 
     pub fn state(&self, review: ReviewId) -> CoreResult<AiRunState> {
         self.inner.state(review)
+    }
+
+    /// Put a run in the queue without the checks of [`enqueue`] (tests of
+    /// the start path).
+    #[cfg(test)]
+    pub fn queue_unchecked(&self, review: ReviewId, ctx: JobContext) {
+        let mut s = self.inner.sched.lock().expect("sched lock poisoned");
+        s.queue.push_back((review, ctx));
+    }
+
+    /// Start what the queue holds and a slot allows.
+    #[cfg(test)]
+    pub fn pump(&self) {
+        Inner::pump(&self.inner);
     }
 
     /// Block until nothing is queued or running, or `timeout` passes;
@@ -183,29 +246,40 @@ impl AiRuntime {
 impl Drop for AiRuntime {
     fn drop(&mut self) {
         let mut s = self.inner.sched.lock().expect("sched lock poisoned");
+        s.stopped = true;
         s.queue.clear();
-        for flag in s.running.values() {
-            flag.store(true, Ordering::Relaxed);
+        for run in s.running.values() {
+            run.cancel.store(true, Ordering::Relaxed);
         }
     }
 }
 
 impl Inner {
+    fn enabled(&self) -> bool {
+        self.sched.lock().expect("sched lock poisoned").enabled
+    }
+
     fn state(&self, review: ReviewId) -> CoreResult<AiRunState> {
-        let enabled = self.enabled.load(Ordering::Relaxed);
-        if !enabled {
-            return Ok(AiRunState::not_started(review, false));
-        }
-        let queued = {
+        let (enabled, queued) = {
             let s = self.sched.lock().expect("sched lock poisoned");
-            s.queue.iter().any(|(id, _)| *id == review)
+            (s.enabled, s.queue.iter().any(|(id, _)| *id == review))
         };
-        Ok(match ai_store::run(&self.store, review)? {
-            Some(row) => row.state(true, queued),
-            None => AiRunState {
-                queued,
-                ..AiRunState::not_started(review, true)
-            },
+        let read_only =
+            adapter::read_only_guaranteed(&self.adapter.lock().expect("adapter lock poisoned"));
+        let state = if !enabled {
+            AiRunState::not_started(review, false)
+        } else {
+            match ai_store::run(&self.store, review)? {
+                Some(row) => row.state(true, queued),
+                None => AiRunState {
+                    queued,
+                    ..AiRunState::not_started(review, true)
+                },
+            }
+        };
+        Ok(AiRunState {
+            read_only_guaranteed: read_only,
+            ..state
         })
     }
 
@@ -227,6 +301,11 @@ impl Inner {
     /// reviews that already run.
     fn pump(this: &Arc<Self>) {
         let mut s = this.sched.lock().expect("sched lock poisoned");
+        // Checked under the lock, against a `set_enabled(false)` racing the
+        // enqueue that led here.
+        if !s.enabled || s.stopped {
+            return;
+        }
         while s.running.len() < this.max_concurrent {
             let Some(i) = s
                 .queue
@@ -235,9 +314,16 @@ impl Inner {
             else {
                 break;
             };
-            let (review, ctx) = s.queue.remove(i).expect("index in range");
+            let (review, mut ctx) = s.queue.remove(i).expect("index in range");
             let flag = Arc::new(AtomicBool::new(false));
-            s.running.insert(review, flag.clone());
+            ctx.child = ChildSlot::default();
+            s.running.insert(
+                review,
+                Running {
+                    cancel: flag.clone(),
+                    child: ctx.child.clone(),
+                },
+            );
             let inner = Arc::clone(this);
             let spawned = std::thread::Builder::new()
                 .name("argus-ai".into())
@@ -298,7 +384,12 @@ impl Inner {
             _ if cancel.load(Ordering::Relaxed) => {
                 ai_store::mark_failed(&self.store, review, CANCELLED, now)
             }
-            Ok(out) => ai_store::save_done(&self.store, review, record.round, &out, now),
+            Ok(mut out) => {
+                // Whatever secret the agent quoted from a file it read stays
+                // out of the store, and so off the platform.
+                output::redact(&mut out, &job::known_secrets(&ctx.settings));
+                ai_store::save_done(&self.store, review, record.round, &out, now)
+            }
             Err(e) => ai_store::mark_failed(&self.store, review, &e, now),
         };
         if let Err(e) = saved {

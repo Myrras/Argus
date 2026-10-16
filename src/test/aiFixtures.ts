@@ -20,6 +20,7 @@ export function aiRun(overrides: Partial<AiRunState> = {}): AiRunState {
     lastDoneRound: 1,
     droppedFindings: 0,
     droppedVerdicts: 0,
+    readOnlyGuaranteed: true,
     ...overrides,
   };
 }

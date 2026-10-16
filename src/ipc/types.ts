@@ -485,6 +485,11 @@ export interface AiRunState {
   droppedFindings: number;
   /** Verdicts the latest successful run dropped (unknown thread ids). */
   droppedVerdicts: number;
+  /**
+   * Whether Argus can guarantee the configured agent only reads. `false` for
+   * `auggie`, whose user-configured MCP tools cannot be turned off.
+   */
+  readOnlyGuaranteed: boolean;
 }
 
 /** `ai::Severity`. */

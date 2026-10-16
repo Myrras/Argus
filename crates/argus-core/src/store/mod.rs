@@ -153,6 +153,8 @@ const MIGRATIONS: &[&str] = &[
     "-- 4: reserved (M4)",
     // 5: AI run state and the side of a finding (see `ai::store`).
     crate::ai::store::MIGRATION,
+    // 6: the head and left side of the diff a finding was read at.
+    crate::ai::store::MIGRATION_6,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus
