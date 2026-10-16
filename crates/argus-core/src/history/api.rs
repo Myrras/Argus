@@ -9,6 +9,7 @@
 //! moves.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::cache::{CachedHistory, CachedMapping};
 use super::snapshot::{anchored_text, around, diff_rows, from_diff_hunk, window};
@@ -21,7 +22,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::ids::{ReviewId, ThreadId};
 use crate::provider::{Anchor, CommitInfo, ReviewProvider, ReviewRef, Side, Thread};
 use crate::review::{untouched_with, RoundInput};
-use crate::store::{ReviewRecord, StoredThread};
+use crate::store::{ReviewRecord, Store, StoredThread};
 use crate::Core;
 
 /// How many threads of one review are computed at the same time.
@@ -38,7 +39,7 @@ impl Core {
             .store
             .thread_review(thread_id)?
             .ok_or(CoreError::NotFound)?;
-        self.histories(review, Some(thread_id))?
+        self.histories(review, Some(&[thread_id]))?
             .pop()
             .ok_or(CoreError::NotFound)
     }
@@ -64,124 +65,138 @@ impl Core {
         self.store.snapshot_text(thread_id, &record.head_sha)
     }
 
-    fn histories(&self, id: ReviewId, only: Option<ThreadId>) -> CoreResult<Vec<ThreadHistory>> {
+    fn histories(&self, id: ReviewId, only: Option<&[ThreadId]>) -> CoreResult<Vec<ThreadHistory>> {
         let record = self.review(id)?;
-        let threads: Vec<StoredThread> = self
-            .store
-            .threads(id)?
-            .into_iter()
-            .filter(|t| only.is_none_or(|o| t.thread_id == o))
-            .collect();
-        let mut cached: Vec<Option<CachedHistory>> = Vec::with_capacity(threads.len());
-        for t in &threads {
-            let hit = self
-                .store
-                .cached_history(t.thread_id, &record.head_sha)?
-                .filter(|c| c.mapping.resolved == t.thread.resolved);
-            cached.push(hit);
-        }
-        let misses: Vec<usize> = (0..threads.len())
-            .filter(|&i| cached[i].is_none())
-            .collect();
-        if !misses.is_empty() {
-            let wanted: Vec<&Thread> = misses.iter().map(|&i| &threads[i].thread).collect();
-            let computed = self.compute(&record, &wanted);
-            for (&i, (history, cacheable)) in misses.iter().zip(computed) {
-                if cacheable {
-                    self.store
-                        .put_history(threads[i].thread_id, &record.head_sha, &history)?;
-                }
-                cached[i] = Some(history);
-            }
-            self.refresh_untouched(&record)?;
-        }
-        Ok(threads
-            .iter()
-            .zip(cached)
-            .map(|(t, c)| assemble(&record, t, c.expect("every miss was computed")))
-            .collect())
+        let provider = self.provider_for(&record);
+        compute_histories(&self.store, &record, &provider, only)
     }
+}
 
-    /// Compute `threads` (all of `record`): each with whether it may be
-    /// cached.
-    fn compute(&self, record: &ReviewRecord, threads: &[&Thread]) -> Vec<(CachedHistory, bool)> {
-        let provider = match self.provider_for(record) {
-            Ok(p) => p,
-            Err(e) => return threads.iter().map(|t| degraded(t, &e)).collect(),
-        };
-        // The review's commits, in order: the walk's steps and the
-        // timeline's commit details.
-        let detail = match provider.fetch_review(&record.review) {
-            Ok(d) => d,
-            Err(e) => return threads.iter().map(|t| degraded(t, &e)).collect(),
-        };
-        let (resolutions, resolutions_ok) = if threads.iter().any(|t| t.resolved) {
-            match provider.thread_resolutions(&record.review) {
-                Ok(list) => (group(list), true),
-                Err(_) => (HashMap::new(), false),
+/// The histories of `record`'s threads (or just those in `only`): cached ones as
+/// they are, the rest computed through `provider` and cached. Free of
+/// [`Core`] so the AI pass can run it from its job thread, where it holds
+/// the store and the provider but no `Core`.
+pub(crate) fn compute_histories(
+    store: &Store,
+    record: &ReviewRecord,
+    provider: &CoreResult<Arc<dyn ReviewProvider>>,
+    only: Option<&[ThreadId]>,
+) -> CoreResult<Vec<ThreadHistory>> {
+    let threads: Vec<StoredThread> = store
+        .threads(record.id)?
+        .into_iter()
+        .filter(|t| only.is_none_or(|o| o.contains(&t.thread_id)))
+        .collect();
+    let mut cached: Vec<Option<CachedHistory>> = Vec::with_capacity(threads.len());
+    for t in &threads {
+        let hit = store
+            .cached_history(t.thread_id, &record.head_sha)?
+            .filter(|c| c.mapping.resolved == t.thread.resolved);
+        cached.push(hit);
+    }
+    let misses: Vec<usize> = (0..threads.len())
+        .filter(|&i| cached[i].is_none())
+        .collect();
+    if !misses.is_empty() {
+        let wanted: Vec<&Thread> = misses.iter().map(|&i| &threads[i].thread).collect();
+        let computed = compute(provider, record, &wanted);
+        for (&i, (history, cacheable)) in misses.iter().zip(computed) {
+            if cacheable {
+                store.put_history(threads[i].thread_id, &record.head_sha, &history)?;
             }
-        } else {
-            (HashMap::new(), true)
-        };
-        let ctx = Ctx {
-            provider: provider.as_ref(),
-            review: &record.review,
-            head: &record.head_sha,
-            commits: &detail.commits,
-            source: ApiSource::new(provider.as_ref(), &record.review, &detail.commits),
-            resolutions,
-            resolutions_ok,
-        };
-        let mut out = Vec::with_capacity(threads.len());
-        for chunk in threads.chunks(PARALLELISM) {
-            std::thread::scope(|s| {
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|t| (t, s.spawn(|| compute_one(&ctx, t))))
-                    .collect();
-                for (t, h) in handles {
-                    out.push(h.join().unwrap_or_else(|_| {
-                        degraded(t, &CoreError::Provider("the history crashed".into()))
-                    }));
-                }
-            });
+            cached[i] = Some(history);
         }
-        out
+        refresh_untouched(store, record)?;
     }
+    Ok(threads
+        .iter()
+        .zip(cached)
+        .map(|(t, c)| assemble(record, t, c.expect("every miss was computed")))
+        .collect())
+}
 
-    /// Store the review's untouched count as the cached walks now tell it.
-    fn refresh_untouched(&self, record: &ReviewRecord) -> CoreResult<()> {
-        let threads: Vec<Thread> = self
-            .store
-            .threads(record.id)?
-            .into_iter()
-            .map(|t| t.thread)
-            .collect();
-        let touches = self.store.line_touches(record.id, &record.head_sha)?;
-        let n = untouched_with(
-            &RoundInput {
-                state: record.state,
-                head_sha: &record.head_sha,
-                last_reviewed_sha: record.last_reviewed_sha.as_deref(),
-                last_reviewed_at: record.last_reviewed_at,
-                approved_at: record.approved_at,
-                rerequested_at: record.rerequested_at,
-                threads: &threads,
-                me: &record.viewer,
-            },
-            Some(&touches),
-        );
-        if n != record.untouched_threads {
-            self.store.set_round(
-                record.id,
-                record.round,
-                &record.round_reasons,
-                record.status,
-                n,
-            )?;
+/// Compute `threads` (all of `record`): each with whether it may be
+/// cached.
+fn compute(
+    provider: &CoreResult<Arc<dyn ReviewProvider>>,
+    record: &ReviewRecord,
+    threads: &[&Thread],
+) -> Vec<(CachedHistory, bool)> {
+    let provider = match provider {
+        Ok(p) => p,
+        Err(e) => return threads.iter().map(|t| degraded(t, e)).collect(),
+    };
+    // The review's commits, in order: the walk's steps and the
+    // timeline's commit details.
+    let detail = match provider.fetch_review(&record.review) {
+        Ok(d) => d,
+        Err(e) => return threads.iter().map(|t| degraded(t, &e)).collect(),
+    };
+    let (resolutions, resolutions_ok) = if threads.iter().any(|t| t.resolved) {
+        match provider.thread_resolutions(&record.review) {
+            Ok(list) => (group(list), true),
+            Err(_) => (HashMap::new(), false),
         }
-        Ok(())
+    } else {
+        (HashMap::new(), true)
+    };
+    let ctx = Ctx {
+        provider: provider.as_ref(),
+        review: &record.review,
+        head: &record.head_sha,
+        commits: &detail.commits,
+        source: ApiSource::new(provider.as_ref(), &record.review, &detail.commits),
+        resolutions,
+        resolutions_ok,
+    };
+    let mut out = Vec::with_capacity(threads.len());
+    for chunk in threads.chunks(PARALLELISM) {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|t| (t, s.spawn(|| compute_one(&ctx, t))))
+                .collect();
+            for (t, h) in handles {
+                out.push(h.join().unwrap_or_else(|_| {
+                    degraded(t, &CoreError::Provider("the history crashed".into()))
+                }));
+            }
+        });
     }
+    out
+}
+
+/// Store the review's untouched count as the cached walks now tell it.
+fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
+    let threads: Vec<Thread> = store
+        .threads(record.id)?
+        .into_iter()
+        .map(|t| t.thread)
+        .collect();
+    let touches = store.line_touches(record.id, &record.head_sha)?;
+    let n = untouched_with(
+        &RoundInput {
+            state: record.state,
+            head_sha: &record.head_sha,
+            last_reviewed_sha: record.last_reviewed_sha.as_deref(),
+            last_reviewed_at: record.last_reviewed_at,
+            approved_at: record.approved_at,
+            rerequested_at: record.rerequested_at,
+            threads: &threads,
+            me: &record.viewer,
+        },
+        Some(&touches),
+    );
+    if n != record.untouched_threads {
+        store.set_round(
+            record.id,
+            record.round,
+            &record.round_reasons,
+            record.status,
+            n,
+        )?;
+    }
+    Ok(())
 }
 
 /// What every thread of one computation shares.

@@ -24,11 +24,11 @@ use super::{
     count_patch, digest, encode_segment, first_line, looks_binary, PostResultOf, ReviewProvider,
 };
 use crate::error::{CoreError, CoreResult};
+use crate::history::ThreadResolution;
 use crate::post::{
     sanitize, DiffLine, LineKind, PlacedComment, PostError, PostErrorKind, PostedComment,
     PostedNote,
 };
-use crate::history::ThreadResolution;
 
 const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
 

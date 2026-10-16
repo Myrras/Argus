@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{ReviewId, ThreadId};
 
+pub(crate) use api::compute_histories;
 pub use walk::{walk_line, LineHistorySource, LineMapping, WalkStart};
 
 /// What [`Core::thread_history`](crate::Core::thread_history) returns.

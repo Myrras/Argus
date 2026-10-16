@@ -86,9 +86,9 @@ impl DiffScope<'_> {
     }
 }
 
-/// M3 hook: the then/now code of a thread (what it was commented on, what
-/// is there at head). M3 fills this from its snapshots; until then every
-/// thread goes in with `None` and only its own excerpt.
+/// The then/now code of a thread (what it was commented on, what is there
+/// at head), from the thread history's cache (`job::thread_snapshot`). A
+/// thread without one goes in with `None` and only its own excerpt.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThreadSnapshot {
     pub then_code: Option<String>,
@@ -314,7 +314,6 @@ fn write_thread(out: &mut String, input: &ThreadInput<'_>, nonce: &str) {
     if let Some(hunk) = t.anchor.as_ref().and_then(|a| a.diff_hunk.as_deref()) {
         let _ = writeln!(out, "Code it was left on:\n{}", hunk.trim_end());
     }
-    // M3 HOOK: then/now snapshots land here once M3 provides them.
     if let Some(s) = &input.snapshot {
         if let Some(then) = &s.then_code {
             let _ = writeln!(out, "Code then:\n{}", then.trim_end());
@@ -340,7 +339,7 @@ pub(crate) fn repair(original: &str, error: &str) -> String {
 }
 
 /// The threads a later round asks about: the reviewer's own unresolved
-/// ones. `snapshot` is the M3 hook (see [`ThreadSnapshot`]).
+/// ones. `snapshot` gives a thread's then/now code (see [`ThreadSnapshot`]).
 pub(crate) fn open_threads<'a>(
     threads: &'a [StoredThread],
     snapshot: impl Fn(ThreadId) -> Option<ThreadSnapshot>,

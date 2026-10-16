@@ -808,6 +808,196 @@ fn claude_runs_in_the_clone_with_its_conventions_in_a_later_round() {
     assert_eq!(entries.len(), 1);
 }
 
+/// A later-round review with one open thread of the user's, `t1`, on head
+/// `h1`; returns the store, the record and the thread's id.
+fn later_round_with_thread() -> (Store, ReviewRecord, ThreadId) {
+    let store = Store::in_memory().unwrap();
+    let mut r = record(12);
+    r.round = 2;
+    r.last_reviewed_sha = Some("h0".into());
+    r.last_reviewed_at = Some(at(9, 9));
+    r.status = ReviewStatus::NeedsReReview;
+    store.upsert_review(&r).unwrap();
+    store
+        .upsert_threads(
+            r.id,
+            &[thread("t1", ME, "h0", vec![note("n1", ME, at(1, 1))])],
+            ME,
+        )
+        .unwrap();
+    let t1 = ThreadId::from_key(r.id, "t1");
+    (store, r, t1)
+}
+
+fn snapshot_at(sha: &str, lines: &[&str]) -> crate::history::CodeSnapshot {
+    crate::history::CodeSnapshot {
+        sha: sha.into(),
+        path: "src/a.rs".into(),
+        first_line: 10,
+        lines: lines.iter().map(|l| l.to_string()).collect(),
+        anchor_start: Some(10),
+        anchor_end: Some(10),
+        source: crate::history::SnapshotSource::File,
+    }
+}
+
+const EMPTY_ANSWER: &str = r#"{"findings":[],"checklist":[],"verdicts":[]}"#;
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_later_round_prompt_carries_the_cached_then_now_code() {
+    use crate::history::cache::{CachedHistory, CachedMapping};
+    use crate::history::LineStatus;
+
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(bin.path().join("out.jsonl"), result_line(EMPTY_ANSWER)).unwrap();
+    let (store, r, t1) = later_round_with_thread();
+    store
+        .put_history(
+            t1,
+            "h1",
+            &CachedHistory {
+                mapping: CachedMapping {
+                    status: LineStatus::Located {
+                        path: "src/b.rs".into(),
+                        start_line: 14,
+                        line: 14,
+                        moved: true,
+                        renamed: true,
+                        touched: true,
+                    },
+                    touched_by: vec!["h1".into()],
+                    attributed: true,
+                    then_sha: Some("h0".into()),
+                    commits: vec!["h1".into()],
+                    resolved: false,
+                },
+                then_snapshot: Some(snapshot_at("h0", &["let then_marker = 1;"])),
+                now_snapshot: Some(snapshot_at("h1", &["let now_marker = 2;"])),
+                entries: Vec::new(),
+            },
+        )
+        .unwrap();
+    let c = ctx(
+        fake_settings(&script, "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+
+    job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(
+        stdin.contains("Code then:\nlet then_marker = 1;"),
+        "{stdin}"
+    );
+    assert!(
+        stdin.contains("Code now (src/b.rs:14):\nlet now_marker = 2;"),
+        "{stdin}"
+    );
+}
+
+/// A repository where the user's comment (on `src/cache.rs:10` at `h0`)
+/// is still there at head `h1`: the only commit in between touches another
+/// file.
+struct HistoryProvider;
+
+impl HistoryProvider {
+    const FILE: &'static str = "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nthe commented line\nl11\n";
+}
+
+impl ReviewProvider for HistoryProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Github
+    }
+    fn host(&self) -> &str {
+        "github.com"
+    }
+    fn current_user(&self) -> CoreResult<String> {
+        Ok(ME.into())
+    }
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        Ok(Vec::new())
+    }
+    fn fetch_review(&self, _: &ReviewRef) -> CoreResult<ReviewDetail> {
+        let mut d = detail("h1");
+        d.review = review_ref(12);
+        d.commits = ["h0", "h1"]
+            .iter()
+            .map(|sha| crate::provider::CommitInfo {
+                sha: sha.to_string(),
+                title: format!("Commit {sha}"),
+                author: AUTHOR.into(),
+                authored_at: Some(at(10, 9)),
+            })
+            .collect();
+        Ok(d)
+    }
+    fn fetch_threads(&self, _: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        Ok(Vec::new())
+    }
+    fn file_at(&self, _: &ReviewRef, _: &str, path: &str) -> CoreResult<String> {
+        if path == "src/cache.rs" {
+            Ok(Self::FILE.into())
+        } else {
+            Err(CoreError::NotFound)
+        }
+    }
+    fn fetch_files(&self, _: &ReviewRef, _: &DiffRange) -> CoreResult<FileDiff> {
+        Ok(FileDiff {
+            base_sha: "base".into(),
+            head_sha: "h1".into(),
+            files: vec![changed("src/other.rs")],
+            truncated: false,
+        })
+    }
+    fn commit_diff(&self, _: &ReviewRef, _: &str) -> CoreResult<FileDiff> {
+        Ok(FileDiff {
+            base_sha: "h0".into(),
+            head_sha: "h1".into(),
+            files: vec![changed("src/other.rs")],
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_run_computes_the_history_of_the_open_threads() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(bin.path().join("out.jsonl"), result_line(EMPTY_ANSWER)).unwrap();
+    let (store, r, t1) = later_round_with_thread();
+    assert_eq!(store.snapshot_text(t1, "h1").unwrap(), None);
+    let c = ctx(fake_settings(&script, "claude"), Arc::new(HistoryProvider));
+
+    job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(stdin.contains("Code then:"), "{stdin}");
+    assert!(stdin.contains("Code now (src/cache.rs:10):"), "{stdin}");
+    assert!(stdin.contains("the commented line"), "{stdin}");
+    // Cached for the next run (and for the UI) at this head.
+    assert!(store.snapshot_text(t1, "h1").unwrap().is_some());
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_failing_history_does_not_fail_the_run() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(bin.path().join("out.jsonl"), result_line(EMPTY_ANSWER)).unwrap();
+    let (store, r, t1) = later_round_with_thread();
+    // `FakeProvider::fetch_review` fails, so the history cannot be computed.
+    let c = ctx(
+        fake_settings(&script, "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+
+    job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(stdin.contains(&format!("threadId: {t1}")));
+    assert!(!stdin.contains("Code then:") && !stdin.contains("Code now"));
+}
+
 #[test]
 #[cfg_attr(windows, ignore)]
 fn invalid_answer_is_retried_once_then_fails() {

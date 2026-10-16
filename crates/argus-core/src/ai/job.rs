@@ -103,6 +103,45 @@ pub(crate) fn conventions(clone: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Compute (and cache) the histories of the threads a later round asks about at the review's
+/// head. Errors are logged and dropped: history is context, not a
+/// requirement of the run.
+fn warm_histories(
+    store: &Store,
+    record: &ReviewRecord,
+    ctx: &JobContext,
+    threads: &[StoredThread],
+) {
+    let ids: Vec<_> = prompt::open_threads(threads, |_| None)
+        .iter()
+        .map(|t| t.thread.thread_id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let provider = Ok(ctx.provider.clone());
+    if let Err(e) = crate::history::compute_histories(store, record, &provider, Some(&ids)) {
+        tracing::debug!("AI run: thread history unavailable: {e}");
+    }
+}
+
+/// The cached then/now text of a thread at the review's head, as the prompt
+/// wants it. `None` without a cached history (or with nothing in it).
+fn thread_snapshot(
+    store: &Store,
+    record: &ReviewRecord,
+    thread: crate::ids::ThreadId,
+) -> Option<prompt::ThreadSnapshot> {
+    let text = store.snapshot_text(thread, &record.head_sha).ok()??;
+    let snapshot = prompt::ThreadSnapshot {
+        then_code: text.then_code,
+        now_code: text.now_code,
+        now_path: text.now_path,
+        now_line: text.now_line,
+    };
+    (snapshot != prompt::ThreadSnapshot::default()).then_some(snapshot)
+}
+
 fn check(cancel: &AtomicBool) -> Result<(), String> {
     if cancel.load(Ordering::Relaxed) {
         Err(super::CANCELLED.into())
@@ -149,12 +188,16 @@ pub(crate) fn execute(
     check(cancel)?;
 
     let threads = store.threads(record.id).map_err(|e| e.to_string())?;
-    // M3 HOOK: pass the thread's then/now snapshot (store `snapshots` at the
-    // current head) instead of `None` once M3 writes them.
+    // Later rounds: the then/now text of the user's open threads. Computed
+    // here (cached per thread and head, so a re-run is cheap) because the
+    // history is otherwise only built when the UI opens a thread. A failure
+    // never fails the run: the thread goes in with its own excerpt only.
     let asked = if first {
         Vec::new()
     } else {
-        prompt::open_threads(&threads, |_| None)
+        warm_histories(store, record, ctx, &threads);
+        check(cancel)?;
+        prompt::open_threads(&threads, |id| thread_snapshot(store, record, id))
     };
     let known: HashSet<_> = asked.iter().map(|t| t.thread.thread_id).collect();
     let paths: HashSet<String> = diff
