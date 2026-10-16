@@ -1,0 +1,403 @@
+{
+  "enums": {
+    "AiRunStatus": [
+      "notStarted",
+      "running",
+      "done",
+      "failed"
+    ],
+    "DiffKind": [
+      "same",
+      "changed",
+      "removed",
+      "added"
+    ],
+    "FileStatus": [
+      "added",
+      "modified",
+      "removed",
+      "renamed"
+    ],
+    "LineChange.kind": [
+      "modified",
+      "deleted",
+      "fileGone",
+      "renamed"
+    ],
+    "LineStatus.kind": [
+      "located",
+      "deleted",
+      "fileGone",
+      "unlocated",
+      "notCode"
+    ],
+    "PostErrorKind": [
+      "notFound",
+      "invalidInput",
+      "githubUnavailable",
+      "gitlabNotConfigured",
+      "gitlabAuth",
+      "provider",
+      "store",
+      "io",
+      "postRejected",
+      "lineNotInDiff",
+      "headMoved"
+    ],
+    "ProviderId": [
+      "github",
+      "gitlab"
+    ],
+    "ReviewState": [
+      "open",
+      "merged",
+      "closed"
+    ],
+    "ReviewStatus": [
+      "needsReview",
+      "needsReReview",
+      "waitingOnAuthor",
+      "closedWithoutApproval",
+      "approved"
+    ],
+    "RoundReason": [
+      "newCommits",
+      "authorReplied",
+      "reRequested"
+    ],
+    "Severity": [
+      "high",
+      "medium",
+      "low"
+    ],
+    "Side": [
+      "old",
+      "new"
+    ],
+    "SnapshotSource": [
+      "file",
+      "diffHunk"
+    ],
+    "TimelineEvent.kind": [
+      "note",
+      "commit",
+      "resolved",
+      "unresolved"
+    ],
+    "VerdictLabel": [
+      "addressed",
+      "partly",
+      "untouched"
+    ]
+  },
+  "structs": {
+    "AiRunState": [
+      "adapter",
+      "droppedFindings",
+      "droppedVerdicts",
+      "enabled",
+      "error",
+      "finishedAt",
+      "lastDoneRound",
+      "queued",
+      "reviewId",
+      "round",
+      "startedAt",
+      "status"
+    ],
+    "ChecklistItem": [
+      "checked",
+      "id",
+      "reviewId",
+      "round",
+      "text"
+    ],
+    "CommentableLines": [
+      "baseSha",
+      "headSha",
+      "hunks",
+      "hunks[].new",
+      "hunks[].old",
+      "path",
+      "reviewId"
+    ],
+    "Finding": [
+      "body",
+      "dismissed",
+      "id",
+      "line",
+      "path",
+      "postedAt",
+      "postedUrl",
+      "reviewId",
+      "round",
+      "severity",
+      "side",
+      "title"
+    ],
+    "FindingPostResult:failed": [
+      "findingId",
+      "kind",
+      "message",
+      "status"
+    ],
+    "FindingPostResult:posted": [
+      "findingId",
+      "postedAt",
+      "postedUrl",
+      "status"
+    ],
+    "LineStatus:deleted": [
+      "kind",
+      "path",
+      "removedBy"
+    ],
+    "LineStatus:fileGone": [
+      "kind",
+      "path",
+      "removedBy"
+    ],
+    "LineStatus:located": [
+      "kind",
+      "line",
+      "moved",
+      "path",
+      "renamed",
+      "startLine",
+      "touched"
+    ],
+    "LineStatus:notCode": [
+      "kind"
+    ],
+    "LineStatus:unlocated": [
+      "kind",
+      "reason"
+    ],
+    "NewComment": [
+      "baseSha",
+      "body",
+      "headSha",
+      "line",
+      "path",
+      "side",
+      "startLine"
+    ],
+    "PostResult:failed": [
+      "kind",
+      "message",
+      "status"
+    ],
+    "PostResult:posted": [
+      "headSha",
+      "line",
+      "path",
+      "providerNoteId",
+      "providerThreadId",
+      "side",
+      "startLine",
+      "status",
+      "url"
+    ],
+    "PostedNote": [
+      "providerNoteId",
+      "providerThreadId",
+      "url"
+    ],
+    "ProviderStatus": [
+      "github",
+      "github.enabled",
+      "github.host",
+      "github.installed",
+      "github.loggedIn",
+      "gitlab",
+      "gitlab.baseUrl",
+      "gitlab.configured",
+      "gitlab.tokenPresent"
+    ],
+    "RefreshReport": [
+      "changed",
+      "errors",
+      "errors[].message",
+      "errors[].provider",
+      "errors[].review",
+      "errors[].unavailable",
+      "refreshedAt"
+    ],
+    "ReviewFiles": [
+      "baseSha",
+      "files",
+      "files[].additions",
+      "files[].binary",
+      "files[].contentSha",
+      "files[].deletions",
+      "files[].oldPath",
+      "files[].patch",
+      "files[].path",
+      "files[].status",
+      "files[].tooLarge",
+      "files[].viewed",
+      "headSha",
+      "reviewId",
+      "sinceLastReview",
+      "truncated"
+    ],
+    "ReviewRecord": [
+      "approvedAt",
+      "author",
+      "baseSha",
+      "draft",
+      "fetchedAt",
+      "headSha",
+      "host",
+      "id",
+      "lastReviewedAt",
+      "lastReviewedSha",
+      "listed",
+      "number",
+      "provider",
+      "repo",
+      "requested",
+      "rerequestedAt",
+      "round",
+      "roundReasons",
+      "state",
+      "status",
+      "title",
+      "untouchedThreads",
+      "updatedAt",
+      "url",
+      "viewer"
+    ],
+    "Settings": [
+      "ai",
+      "ai.adapter",
+      "ai.args",
+      "ai.binary",
+      "ai.enabled",
+      "clonePaths",
+      "github",
+      "github.account",
+      "github.enabled",
+      "github.host",
+      "gitlab",
+      "gitlab.baseUrl",
+      "pollIntervalSecs"
+    ],
+    "StoredThread": [
+      "anchor",
+      "anchor.baseSha",
+      "anchor.currentLine",
+      "anchor.diffHunk",
+      "anchor.headSha",
+      "anchor.lineNew",
+      "anchor.lineOld",
+      "anchor.pathNew",
+      "anchor.pathOld",
+      "anchor.side",
+      "anchor.startLine",
+      "anchor.startSha",
+      "author",
+      "createdAt",
+      "id",
+      "mine",
+      "notes",
+      "notes[].author",
+      "notes[].body",
+      "notes[].createdAt",
+      "notes[].id",
+      "notes[].system",
+      "outdated",
+      "resolved",
+      "reviewId",
+      "threadId"
+    ],
+    "ThreadHistory": [
+      "diffLines",
+      "diffLines[].kind",
+      "diffLines[].now",
+      "diffLines[].now.anchored",
+      "diffLines[].now.line",
+      "diffLines[].now.text",
+      "diffLines[].then",
+      "diffLines[].then.anchored",
+      "diffLines[].then.line",
+      "diffLines[].then.text",
+      "headSha",
+      "nowSnapshot",
+      "nowSnapshot.anchorEnd",
+      "nowSnapshot.anchorStart",
+      "nowSnapshot.firstLine",
+      "nowSnapshot.lines",
+      "nowSnapshot.path",
+      "nowSnapshot.sha",
+      "nowSnapshot.source",
+      "outdated",
+      "reviewId",
+      "status",
+      "status.kind",
+      "status.line",
+      "status.moved",
+      "status.path",
+      "status.renamed",
+      "status.startLine",
+      "status.touched",
+      "thenSnapshot",
+      "thenSnapshot.anchorEnd",
+      "thenSnapshot.anchorStart",
+      "thenSnapshot.firstLine",
+      "thenSnapshot.lines",
+      "thenSnapshot.path",
+      "thenSnapshot.sha",
+      "thenSnapshot.source",
+      "threadId",
+      "timeline",
+      "timeline[].at",
+      "timeline[].author",
+      "timeline[].body",
+      "timeline[].kind",
+      "timeline[].noteId",
+      "timeline[].root",
+      "timeline[].system",
+      "touchedBy"
+    ],
+    "TimelineEntry:commit": [
+      "at",
+      "author",
+      "change",
+      "change.from",
+      "change.kind",
+      "change.to",
+      "kind",
+      "sha",
+      "title"
+    ],
+    "TimelineEntry:note": [
+      "at",
+      "author",
+      "body",
+      "kind",
+      "noteId",
+      "root",
+      "system"
+    ],
+    "TimelineEntry:resolved": [
+      "at",
+      "by",
+      "kind"
+    ],
+    "TimelineEntry:unresolved": [
+      "at",
+      "by",
+      "kind"
+    ],
+    "Verdict": [
+      "aiLabel",
+      "aiReason",
+      "label",
+      "reviewId",
+      "round",
+      "threadId",
+      "userOverride"
+    ]
+  }
+}
