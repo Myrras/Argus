@@ -1,0 +1,351 @@
+//! No error ever carries a provider token: GitHub (`gh`) and GitLab error
+//! bodies that echo the token, in every place a platform puts text, for
+//! every read and write. The token may be redacted, the message shortened
+//! or replaced by Argus' own text; it is never forwarded.
+//!
+//! Fictitious tokens only; no network (a fake `gh`, a local HTTP double).
+
+#![cfg_attr(windows, allow(dead_code))]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use argus_core::post::{DiffLine, LineKind, PlacedComment};
+use argus_core::provider::{
+    DiffRange, GithubProvider, GitlabProvider, ProviderId, ReviewProvider, ReviewRef, Side,
+    StaticToken,
+};
+use argus_core::store::Store;
+use argus_core::Core;
+
+const GH_TOKEN: &str = "ghp_fixtureTOKENnotreal0123456789";
+const GL_TOKEN: &str = "glpat-fixtureTOKENnotreal";
+const HEAD: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
+const BASE: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+
+/// Error bodies with `{T}` where the platform echoes the token.
+fn bodies() -> Vec<String> {
+    [
+        r#"{"message":"Bad credentials {T}"}"#,
+        r#"{"message":"Validation Failed","errors":["token {T} is not allowed"]}"#,
+        r#"{"message":"Validation Failed","errors":[{"message":"({T}) must be part of the diff"}]}"#,
+        r#"{"message":"Validation Failed","errors":[{"field":"{T}","code":"invalid"}]}"#,
+        r#"{"message":"line one\nline two {T}\r\n\tend"}"#,
+        r#"{"message":"{T}{T} twice, and once more {T}"}"#,
+        r#"{"message":"see https://example.test/?access_token={T}&x=1"}"#,
+        r#"{"message":{"note":["{T} is bad"],"base":["fine"]}}"#,
+        r#"{"message":["{T}","list"]}"#,
+        r#"{"error":"invalid_token","error_description":"Token {T} was revoked"}"#,
+        // Long enough to be cut, with the token right at the cut.
+        &format!(r#"{{"message":"{}{{T}} tail"}}"#, "x".repeat(290)),
+        r#"<html>proxy error {T}</html>"#,
+        "{T}",
+        "",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+fn assert_clean(token: &str, what: &str, text: &str) {
+    assert!(!text.contains(token), "{what} leaked the token: {text}");
+    // Not even a long piece of it.
+    assert!(
+        !text.contains(&token[..token.len() - 4]),
+        "{what} leaked most of the token: {text}"
+    );
+}
+
+fn row(kind: LineKind, old_pos: u32, new_pos: u32) -> DiffLine {
+    DiffLine {
+        kind,
+        old_pos,
+        new_pos,
+    }
+}
+
+fn placed(path: &str) -> PlacedComment {
+    PlacedComment {
+        path: path.into(),
+        old_path: path.into(),
+        side: Side::New,
+        line: row(LineKind::Added, 3, 3),
+        start: None,
+        head_sha: HEAD.into(),
+        base_sha: BASE.into(),
+        body: "Why three?".into(),
+    }
+}
+
+// ------------------------------------------------------------------- GitHub
+
+/// A `gh` that hands out the token for the `work` account and fails every
+/// other call with `stdout` / `stderr` from files next to it.
+const FAKE_GH: &str = r#"
+case "$*" in
+  "auth token --hostname github.com --user work") echo "$TOKEN"; exit 0 ;;
+esac
+cat > /dev/null
+cat "$DIR/stdout"
+cat "$DIR/stderr" >&2
+exit 1
+"#;
+
+#[cfg(unix)]
+fn fake_gh() -> (tempfile::TempDir, GithubProvider) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\nDIR='{}'\nTOKEN='{GH_TOKEN}'\n{FAKE_GH}",
+        dir.path().display()
+    );
+    std::fs::write(&gh, script).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let provider = GithubProvider::with_binary(
+        gh.to_string_lossy().into_owned(),
+        "github.com",
+        Some("work".into()),
+    );
+    (dir, provider)
+}
+
+#[cfg(not(unix))]
+fn fake_gh() -> (tempfile::TempDir, GithubProvider) {
+    unreachable!("fake gh scripts are Unix-only; these tests are ignored on Windows")
+}
+
+fn github_pr() -> ReviewRef {
+    ReviewRef {
+        provider: ProviderId::Github,
+        host: "github.com".into(),
+        repo: "acme-fixture/widgets".into(),
+        number: 12,
+        url: "https://github.com/acme-fixture/widgets/pull/12".into(),
+        title: "Add widget caching".into(),
+        author: "alice-fixture".into(),
+        updated_at: None,
+    }
+}
+
+/// Every provider call's error text, Display and Debug.
+fn every_error(p: &dyn ReviewProvider, r: &ReviewRef) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let mut core = |what, e: argus_core::CoreError| out.push((what, format!("{e} / {e:?}")));
+    if let Err(e) = p.current_user() {
+        core("current_user", e);
+    }
+    if let Err(e) = p.list_reviews() {
+        core("list_reviews", e);
+    }
+    if let Err(e) = p.fetch_review(r) {
+        core("fetch_review", e);
+    }
+    if let Err(e) = p.fetch_threads(r) {
+        core("fetch_threads", e);
+    }
+    if let Err(e) = p.file_at(r, HEAD, "src/cache.rs") {
+        core("file_at", e);
+    }
+    let range = DiffRange::Review {
+        base: BASE.into(),
+        head: HEAD.into(),
+    };
+    if let Err(e) = p.fetch_files(r, &range) {
+        core("fetch_files", e);
+    }
+    if let Err(e) = p.commit_diff(r, HEAD) {
+        core("commit_diff", e);
+    }
+    if let Err(e) = p.thread_resolutions(r) {
+        core("thread_resolutions", e);
+    }
+    let mut post = |what, e: argus_core::PostError| out.push((what, format!("{e} / {e:?}")));
+    if let Err(e) = p.post_comment(r, &placed("src/cache.rs")) {
+        post("post_comment", e);
+    }
+    if let Err(e) = p.reply(r, "4001", "Thanks") {
+        post("reply", e);
+    }
+    if let Err(e) = p.approve(r, HEAD) {
+        post("approve", e);
+    }
+    out
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn github_errors_never_carry_the_token() {
+    let (dir, gh) = fake_gh();
+    let stderrs = [
+        "gh: Validation Failed (HTTP 422)",
+        "gh: Not Found (HTTP 404)",
+        "gh: Bad credentials (HTTP 401) {T}",
+    ];
+    let mut checked = 0;
+    for body in bodies() {
+        for stderr in stderrs {
+            std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
+            std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
+            let errors = every_error(&gh, &github_pr());
+            // All but `thread_resolutions` (no such call on GitHub) fail.
+            assert_eq!(errors.len(), 10, "{body} / {stderr}: {errors:?}");
+            for (what, text) in errors {
+                assert_clean(GH_TOKEN, what, &text);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 400);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_platforms_reason_still_comes_through_redacted() {
+    let (dir, gh) = fake_gh();
+    std::fs::write(
+        dir.path().join("stdout"),
+        format!(
+            r#"{{"message":"Validation Failed","errors":[{{"message":"line must be part of the diff ({GH_TOKEN})"}}]}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("stderr"), "gh: (HTTP 422)").unwrap();
+    let err = gh
+        .post_comment(&github_pr(), &placed("src/cache.rs"))
+        .unwrap_err();
+    assert_eq!(
+        err.message,
+        "GitHub: Validation Failed: line must be part of the diff ([redacted])"
+    );
+}
+
+// ------------------------------------------------------------------- GitLab
+
+type Route = Arc<Mutex<(String, String)>>;
+
+/// A local GitLab answering every request with the status and body in
+/// `route` — except the versions read a comment needs first.
+fn serve(route: Route) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for sock in listener.incoming() {
+            let Ok(mut sock) = sock else { continue };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            let head_end = loop {
+                if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break i + 4;
+                }
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break raw.len(),
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                }
+            };
+            let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
+            let length: usize = head
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse().ok())?
+                })
+                .unwrap_or(0);
+            while raw.len() < head_end + length {
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                }
+            }
+            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+            let (status, body) = if path.contains("/versions") {
+                ("200 OK".to_string(), versions())
+            } else {
+                route.lock().unwrap().clone()
+            };
+            let out = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            let _ = sock.write_all(out.as_bytes());
+        }
+    });
+    base
+}
+
+fn versions() -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gitlab/mr_21_versions.json"),
+    )
+    .unwrap()
+}
+
+fn gitlab_mr(base: &str) -> ReviewRef {
+    ReviewRef {
+        provider: ProviderId::Gitlab,
+        host: base.trim_start_matches("http://").into(),
+        repo: "grp/app".into(),
+        number: 21,
+        url: "https://gitlab.example.test/grp/app/-/merge_requests/21".into(),
+        title: String::new(),
+        author: String::new(),
+        updated_at: None,
+    }
+}
+
+#[test]
+fn gitlab_errors_never_carry_the_token() {
+    let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
+    let base = serve(route.clone());
+    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let statuses = [
+        "400 Bad Request",
+        "401 Unauthorized",
+        "403 Forbidden",
+        "404 Not Found",
+        "409 Conflict",
+        "422 Unprocessable Entity",
+        "429 Too Many Requests",
+        "500 Internal Server Error",
+        "502 Bad Gateway",
+    ];
+    let mut checked = 0;
+    for body in bodies() {
+        for status in statuses {
+            *route.lock().unwrap() = (status.to_string(), body.replace("{T}", GL_TOKEN));
+            let errors = every_error(&gl, &gitlab_mr(&base));
+            assert!(errors.len() >= 9, "{status} {body}: {errors:?}");
+            for (what, text) in errors {
+                assert_clean(GL_TOKEN, what, &text);
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 1000);
+}
+
+#[test]
+fn refresh_reports_never_carry_the_token() {
+    let route: Route = Arc::new(Mutex::new((
+        "500 Internal Server Error".into(),
+        format!(r#"{{"message":"boom {GL_TOKEN}"}}"#),
+    )));
+    let base = serve(route.clone());
+    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(gl)]);
+    for status in [
+        "401 Unauthorized",
+        "404 Not Found",
+        "500 Internal Server Error",
+    ] {
+        route.lock().unwrap().0 = status.into();
+        let report = core.refresh();
+        assert_eq!(report.errors.len(), 1, "{status}");
+        let json = serde_json::to_string(&report).unwrap();
+        assert_clean(GL_TOKEN, status, &json);
+    }
+}
