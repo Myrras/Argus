@@ -100,8 +100,28 @@ sibling app Iris (`../Iris`).
     count + Post all, Approve… with `ApproveModal`. Keys `commentLine`
     (`files`), `submitComment` / `cancelComment` (new `composer` scope;
     Escape is `fixed`). Ranges: `lib/commentRanges` (one hunk).
-  - Next: M3 (then/now thread history; the thread card's "Then/now
-    history" toggle expands the `data-slot="then-now"` placeholder).
+- 🟡 **Milestones 3 + 5 — Thread history and the AI pass: cores merged,
+  IPC done, UI pending.**
+  - Core `history/` (M3): `thread_history(ThreadId)` /
+    `review_histories(ReviewId)` (then/now snapshots, line walk to head,
+    diff rows, timeline of notes, commits and resolve events; cached per
+    thread + head in SQLite), `cached_snapshot` (for the AI prompt),
+    `thread_review`. Provider `commit_diff` + `thread_resolutions`. A
+    history call that computes walks rewrites the review's untouched count.
+  - Core `ai/` (M5): a local agent CLI (`claude`, `auggie`; read-only flags,
+    token-free env) reviews the diff headless: findings, a checklist, and
+    verdicts on the user's threads in later rounds. Per review serial, two
+    runs at once. `run_ai` / `cancel_ai`, `on_refresh_report` (the poll
+    hook: queues runs, never waits), `on_ai_state`, `dismiss_finding`,
+    `set_checklist_checked`, `set_verdict_override` (local only),
+    `post_findings` (through the post API; explicit only). Migrations 3 and
+    4 are intentional no-ops, 5 adds `ai_runs` + `findings.side`;
+    `AiSettings.binary` (optional agent path).
+  - Shell: `commands/history.rs` (emits `review:changed` when the untouched
+    count moved), `commands/ai.rs` (`post_findings` emits `review:changed`
+    after any posted). TS types/wrappers in their own `// --- Thread
+    history (M3) ---` and `// --- AI pass (M5) ---` sections of
+    `src/ipc/*.ts`. No stores or UI yet.
 
 ## Architecture
 
@@ -116,8 +136,8 @@ crates/argus-core/   # ALL domain logic; zero Tauri dependency (plain cargo test
 src-tauri/           # thin IPC adapter: (de)serialize and forward, nothing else
   src/state.rs       # AppState: Arc<Core> + last RefreshReport
   src/error.rs       # IpcError { kind, message } ← CoreError / PostError
-  src/events.rs      # review:changed / reviews:refreshed emission
-  src/commands/      # review, thread, files, post, settings, provider shims
+  src/events.rs      # review:changed / reviews:refreshed / ai:state emission
+  src/commands/      # review, thread, files, post, history, ai, settings, provider shims
 src/                 # React (presentation only)
   ipc/types.ts       # hand-written wire types (mirror the serde derives)
   ipc/commands.ts    # typed invoke() wrappers
@@ -129,8 +149,9 @@ src/                 # React (presentation only)
 `argus-core` modules: `provider/` (GitLab/GitHub clients, provider status),
 `review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
 code view's file list + viewed marks), `post/` (comments, replies,
-approvals; the only writes, explicit only). Planned (create
-them when their milestone starts): `history/`, `ai/`.
+approvals; the only writes, explicit only), `history/` (then/now thread
+history, line walk, timeline, cache), `ai/` (the AI pass: adapters,
+prompt, output validation, runs, findings/checklist/verdicts).
 
 ### IPC contract
 
@@ -149,8 +170,16 @@ After every refresh (poll or `refresh_reviews`) the shell emits
 `review:changed { reviewId }` per changed review, then one
 `reviews:refreshed` with the `RefreshReport` (time + per-provider errors).
 `last_refresh` returns the latest report for a webview that subscribed late.
-After a successful post, reply or approval the shell emits
-`review:changed` for that review too.
+After a successful post, reply or approval (or a posted AI finding) the
+shell emits `review:changed` for that review too, and after a history call
+that moved the review's untouched count.
+
+The AI pass emits `ai:state` with the review's `AiRunState` on every state
+change of a run (queued, running, done, failed, cancelled); a run that
+ended also emits `review:changed` (its history pass may have moved the
+untouched count). The poll callback and `refresh_reviews` hand each report
+to `Core::on_refresh_report`, which queues the runs it calls for without
+waiting on them.
 
 ### Frontend
 
