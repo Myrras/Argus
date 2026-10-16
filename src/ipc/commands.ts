@@ -21,6 +21,7 @@ import type {
   ReviewRecord,
   Settings,
   StoredThread,
+  ThreadHistory,
   ThreadId,
 } from "./types";
 
@@ -162,4 +163,21 @@ export function gitlabTokenPresent(): Promise<boolean> {
 
 export function providerStatus(): Promise<ProviderStatus> {
   return invoke("provider_status");
+}
+
+// --- Thread history (M3) ---
+// Read only towards the platforms. A call may rewrite the review's untouched
+// count; the backend then emits `review:changed` for it.
+
+/**
+ * The then/now history of one thread at its review's current head (computed
+ * on a cache miss, so it can take a moment).
+ */
+export function threadHistory(threadId: ThreadId): Promise<ThreadHistory> {
+  return invoke("thread_history", { threadId });
+}
+
+/** The histories of every thread of a review. */
+export function reviewHistories(reviewId: ReviewId): Promise<ThreadHistory[]> {
+  return invoke("review_histories", { reviewId });
 }

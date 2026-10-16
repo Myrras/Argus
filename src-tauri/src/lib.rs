@@ -134,6 +134,8 @@ pub fn run() {
             commands::settings::set_gitlab_token,
             commands::settings::gitlab_token_present,
             commands::provider::provider_status,
+            commands::history::thread_history,
+            commands::history::review_histories,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

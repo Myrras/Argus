@@ -65,6 +65,15 @@ impl Core {
         self.store.snapshot_text(thread_id, &record.head_sha)
     }
 
+    /// The review a stored thread belongs to (one SQLite read). The shell
+    /// needs it before [`thread_history`](Core::thread_history) to tell
+    /// whether the call rewrote the review's untouched count.
+    pub fn thread_review(&self, thread_id: ThreadId) -> CoreResult<ReviewId> {
+        self.store
+            .thread_review(thread_id)?
+            .ok_or(CoreError::NotFound)
+    }
+
     fn histories(&self, id: ReviewId, only: Option<&[ThreadId]>) -> CoreResult<Vec<ThreadHistory>> {
         let record = self.review(id)?;
         let provider = self.provider_for(&record);

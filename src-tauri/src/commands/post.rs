@@ -7,9 +7,9 @@
 
 use tauri::{AppHandle, State};
 
-use argus_core::{CommentableLines, NewComment, PostResult, PostedNote, ReviewRecord, ThreadId};
+use argus_core::{CommentableLines, NewComment, PostResult, PostedNote, ReviewRecord};
 
-use super::{blocking, blocking_post, parse_review_id};
+use super::{blocking, blocking_post, parse_review_id, parse_thread_id};
 use crate::error::IpcError;
 use crate::events;
 use crate::state::AppState;
@@ -76,16 +76,10 @@ pub async fn commentable_lines(
     blocking(state, move |core| core.commentable_lines(id, &path)).await
 }
 
-/// A thread id arrives as a plain UUID string.
-fn parse_thread_id(raw: &str) -> Result<ThreadId, IpcError> {
-    raw.trim()
-        .parse()
-        .map_err(|_| IpcError::invalid_input("threadId is not a valid id"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use argus_core::ThreadId;
 
     #[test]
     fn parses_thread_ids_without_echoing_input() {

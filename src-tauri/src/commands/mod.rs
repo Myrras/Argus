@@ -2,6 +2,7 @@
 //! [`argus_core::Core`]; no domain logic lives here.
 
 pub mod files;
+pub mod history;
 pub mod post;
 pub mod provider;
 pub mod review;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use argus_core::{Core, CoreResult, PostError, ReviewId};
+use argus_core::{Core, CoreResult, PostError, ReviewId, ThreadId};
 
 use crate::error::IpcError;
 use crate::state::AppState;
@@ -45,11 +46,20 @@ pub(crate) async fn blocking_post<T: Send + 'static>(
 }
 
 /// Ids arrive as plain UUID strings; a malformed one is an IPC-layer input
-/// error with no `CoreError` counterpart.
-pub(crate) fn parse_review_id(raw: &str) -> Result<ReviewId, IpcError> {
+/// error with no `CoreError` counterpart. `field` names the argument (the
+/// raw input is never echoed back).
+pub(crate) fn parse_id<T: std::str::FromStr>(raw: &str, field: &str) -> Result<T, IpcError> {
     raw.trim()
         .parse()
-        .map_err(|_| IpcError::invalid_input("reviewId is not a valid id"))
+        .map_err(|_| IpcError::invalid_input(format!("{field} is not a valid id")))
+}
+
+pub(crate) fn parse_review_id(raw: &str) -> Result<ReviewId, IpcError> {
+    parse_id(raw, "reviewId")
+}
+
+pub(crate) fn parse_thread_id(raw: &str) -> Result<ThreadId, IpcError> {
+    parse_id(raw, "threadId")
 }
 
 #[cfg(test)]

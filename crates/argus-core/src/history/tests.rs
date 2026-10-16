@@ -1119,4 +1119,18 @@ fn unknown_threads_are_not_found() {
         core.review_histories(crate::ids::ReviewId::new()),
         Err(CoreError::NotFound)
     ));
+    assert!(matches!(
+        core.thread_review(crate::ids::ThreadId::new()),
+        Err(CoreError::NotFound)
+    ));
+}
+
+#[test]
+fn a_stored_thread_knows_its_review() {
+    let repo = repo();
+    let core = core_over(&repo);
+    let rec = core.reviews().unwrap()[0].clone();
+    for t in core.threads(rec.id).unwrap() {
+        assert_eq!(core.thread_review(t.thread_id).unwrap(), rec.id);
+    }
 }

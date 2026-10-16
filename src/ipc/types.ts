@@ -327,6 +327,122 @@ export interface ReviewChangedEvent {
   reviewId: ReviewId;
 }
 
+// --- Thread history (M3) ---
+// `history::*` (crates/argus-core/src/history/mod.rs).
+
+/**
+ * `history::LineStatus`: where the anchored lines are at head. Lines are
+ * 1-based; `removedBy` is a commit sha, `null` when no single commit removed
+ * them (the review's own diff, a rebase).
+ */
+export type LineStatus =
+  | {
+      kind: "located";
+      path: string;
+      startLine: number;
+      line: number;
+      /** The path or the line numbers differ from then. */
+      moved: boolean;
+      /** The file was renamed on the way (`path` is the new name). */
+      renamed: boolean;
+      /** A commit changed the lines (see `touchedBy`). */
+      touched: boolean;
+    }
+  | { kind: "deleted"; path: string; removedBy: string | null }
+  | { kind: "fileGone"; path: string; removedBy: string | null }
+  /** Could not be followed reliably; `reason` is Argus-owned text. */
+  | { kind: "unlocated"; reason: string }
+  /** A discussion on the review as a whole: no code, no snapshots. */
+  | { kind: "notCode" };
+
+/** `history::SnapshotSource`: the file, or GitHub's `diff_hunk` fallback. */
+export type SnapshotSource = "file" | "diffHunk";
+
+/** `history::CodeSnapshot`: a window of code around the anchored lines. */
+export interface CodeSnapshot {
+  sha: string;
+  path: string;
+  /** 1-based number of `lines[0]`. */
+  firstLine: number;
+  lines: string[];
+  /** The anchored range in file line numbers; `null`: a deleted line's surroundings. */
+  anchorStart: number | null;
+  anchorEnd: number | null;
+  source: SnapshotSource;
+}
+
+/** `history::DiffKind`. */
+export type DiffKind = "same" | "changed" | "removed" | "added";
+
+/** `history::DiffCell`. */
+export interface DiffCell {
+  /** The file line number. */
+  line: number;
+  text: string;
+  /** Inside the anchored range of its side. */
+  anchored: boolean;
+}
+
+/** `history::DiffRow`: one row of the then/now diff; either side may be empty. */
+export interface DiffRow {
+  kind: DiffKind;
+  then: DiffCell | null;
+  now: DiffCell | null;
+}
+
+/** `history::LineChange`: what one commit did to the anchored lines. */
+export type LineChange =
+  | { kind: "modified" }
+  | { kind: "deleted" }
+  | { kind: "fileGone" }
+  | { kind: "renamed"; from: string; to: string };
+
+/** `history::TimelineEvent`, flattened into `TimelineEntry`. */
+export type TimelineEvent =
+  | {
+      kind: "note";
+      noteId: string;
+      author: string;
+      body: string;
+      system: boolean;
+      /** The thread's first comment. */
+      root: boolean;
+    }
+  | {
+      kind: "commit";
+      sha: string;
+      title: string;
+      author: string;
+      change: LineChange;
+    }
+  | { kind: "resolved"; by: string }
+  | { kind: "unresolved"; by: string };
+
+/**
+ * `history::TimelineEntry`. `at` is `null` only for a commit the platform
+ * sent no date for (sorted last).
+ */
+export type TimelineEntry = { at: Timestamp | null } & TimelineEvent;
+
+/** `history::ThreadHistory`: what `thread_history` returns. */
+export interface ThreadHistory {
+  threadId: ThreadId;
+  reviewId: ReviewId;
+  /** The head this was computed at. */
+  headSha: string;
+  /** The platform's own outdated flag. */
+  outdated: boolean;
+  status: LineStatus;
+  /** Commit shas that changed the lines, oldest first. */
+  touchedBy: string[];
+  thenSnapshot: CodeSnapshot | null;
+  nowSnapshot: CodeSnapshot | null;
+  /** Empty unless both snapshots exist. */
+  diffLines: DiffRow[];
+  /** Oldest first. */
+  timeline: TimelineEntry[];
+}
+
 /** Structured error every IPC command can reject with (`IpcError`). */
 export interface IpcError {
   /** Human-readable, sanitized description. */
