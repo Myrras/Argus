@@ -11,6 +11,7 @@
 //! `gh`'s stderr is only inspected to classify a failure, never forwarded.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write as _;
 use std::process::Stdio;
 use std::sync::Mutex;
 
@@ -23,8 +24,9 @@ use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
     ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
-use super::{encode_path, first_line, looks_binary, ReviewProvider};
+use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
+use crate::post::{sanitize, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
 
 /// Upper bound per search; a reviewer with more than this many open PRs in
 /// one bucket is not the user Argus is built for.
@@ -378,6 +380,50 @@ impl ReviewProvider for GithubProvider {
                 })
             }
         }
+    }
+    // --- M4 writes (helpers in the "M4: writes" section at the end) ---
+
+    fn post_comment(&self, r: &ReviewRef, c: &PlacedComment) -> PostResultOf<PostedComment> {
+        let posted: GhPosted = self.post_json(
+            &format!("repos/{}/pulls/{}/comments", r.repo, r.number),
+            &comment_body(c),
+        )?;
+        Ok(PostedComment {
+            url: posted.html_url.unwrap_or_else(|| r.url.clone()),
+            provider_thread_id: posted.id.to_string(),
+            provider_note_id: posted.id.to_string(),
+            path: c.path.clone(),
+            side: c.side,
+            line: c.line_number(),
+            start_line: c.start_number(),
+            head_sha: c.head_sha.clone(),
+        })
+    }
+
+    fn reply(&self, r: &ReviewRef, thread: &str, body: &str) -> PostResultOf<PostedNote> {
+        let root: u64 = thread
+            .parse()
+            .map_err(|_| PostError::new(PostErrorKind::InvalidInput, "not a GitHub thread"))?;
+        let posted: GhPosted = self.post_json(
+            &format!(
+                "repos/{}/pulls/{}/comments/{root}/replies",
+                r.repo, r.number
+            ),
+            &serde_json::json!({ "body": body }),
+        )?;
+        Ok(PostedNote {
+            url: posted.html_url.unwrap_or_else(|| r.url.clone()),
+            provider_thread_id: root.to_string(),
+            provider_note_id: posted.id.to_string(),
+        })
+    }
+
+    fn approve(&self, r: &ReviewRef) -> PostResultOf<()> {
+        let _: serde_json::Value = self.post_json(
+            &format!("repos/{}/pulls/{}/reviews", r.repo, r.number),
+            &serde_json::json!({ "event": "APPROVE" }),
+        )?;
+        Ok(())
     }
 }
 
@@ -765,6 +811,136 @@ struct GhCompare {
 struct GhContent {
     content: Option<String>,
     encoding: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// M4: writes. Only `Core`'s post API reaches these, on an explicit user
+// action. The JSON body goes to `gh api --input -` on stdin, never into an
+// argument or a shell string.
+// ---------------------------------------------------------------------------
+
+impl GithubProvider {
+    /// `gh api --method POST <path> --input -` with `body` on stdin; the
+    /// response parsed as `T`.
+    fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> PostResultOf<T> {
+        let token = self.account_token()?;
+        let mut cmd = self.command();
+        cmd.args(["api", "--method", "POST", path, "--input", "-"])
+            .stdin(Stdio::piped());
+        if let Some(token) = &token {
+            let var = if self.host == "github.com" {
+                "GH_TOKEN"
+            } else {
+                "GH_ENTERPRISE_TOKEN"
+            };
+            cmd.env(var, token);
+        }
+        let mut child = cmd.spawn().map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => CoreError::GithubUnavailable,
+            _ => CoreError::Provider("could not run gh".into()),
+        })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // gh reads all of stdin before it sends anything. A write error
+            // means gh exited early; its status says why.
+            let _ = stdin.write_all(body.to_string().as_bytes());
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|_| CoreError::Provider("could not run gh".into()))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if output.status.success() {
+            return serde_json::from_str(&stdout).map_err(|_| unexpected().into());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        tracing::debug!("gh api POST failed");
+        if stderr.contains("auth login")
+            || stderr.contains("not logged")
+            || stderr.contains("http 401")
+        {
+            *self.token.lock().expect("token lock poisoned") = None;
+            return Err(CoreError::GithubUnavailable.into());
+        }
+        if stderr.contains("rate limit") {
+            return Err(
+                CoreError::Provider("GitHub rate limit reached, try again later".into()).into(),
+            );
+        }
+        // gh prints GitHub's JSON error body on stdout: its message is what
+        // the user needs ("line must be part of the diff").
+        let message = github_error_message(&stdout).map(|m| {
+            format!(
+                "GitHub: {}",
+                sanitize(&m, &[token.as_deref().unwrap_or("")])
+            )
+        });
+        Err(match message {
+            Some(m) if stderr.contains("http 404") => PostError::new(PostErrorKind::NotFound, m),
+            Some(m) => PostError::new(PostErrorKind::PostRejected, m),
+            None if stderr.contains("http 404") => CoreError::NotFound.into(),
+            None => CoreError::Provider("gh could not post to GitHub".into()).into(),
+        })
+    }
+}
+
+/// The JSON body of a new review comment.
+fn comment_body(c: &PlacedComment) -> serde_json::Value {
+    let side = match c.side {
+        Side::Old => "LEFT",
+        Side::New => "RIGHT",
+    };
+    let mut body = serde_json::json!({
+        "body": c.body,
+        "commit_id": c.head_sha,
+        "path": c.path,
+        "line": c.line_number(),
+        "side": side,
+    });
+    if let Some(start) = c.start_number() {
+        body["start_line"] = start.into();
+        body["start_side"] = side.into();
+    }
+    body
+}
+
+/// GitHub's error text: `message`, plus each of `errors` (an object's
+/// `message`, else its `field` and `code`; or a plain string).
+fn github_error_message(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
+        parts.push(m.to_string());
+    }
+    for e in v
+        .get("errors")
+        .and_then(|e| e.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let text = match e {
+            serde_json::Value::String(s) => Some(s.clone()),
+            _ => e
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    let field = e.get("field").and_then(|f| f.as_str())?;
+                    let code = e.get("code").and_then(|c| c.as_str()).unwrap_or("invalid");
+                    Some(format!("{field} {code}"))
+                }),
+        };
+        parts.extend(text);
+    }
+    (!parts.is_empty()).then(|| parts.join(": "))
+}
+
+#[derive(Deserialize)]
+struct GhPosted {
+    id: u64,
+    html_url: Option<String>,
 }
 
 #[cfg(test)]

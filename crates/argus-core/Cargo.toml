@@ -21,6 +21,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["blocking"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 # GitHub's contents API returns files base64-encoded.
 base64 = "0.22"
+# GitLab line codes (`<sha1 of the path>_<old>_<new>`) for multi-line
+# comments. Already in the tree through `uuid`.
+sha1_smol = "1"
 # Local review state. `bundled` compiles SQLite in, so no system library is
 # needed on macOS or Windows.
 rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
