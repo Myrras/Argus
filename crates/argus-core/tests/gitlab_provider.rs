@@ -738,3 +738,65 @@ fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
     assert_eq!(threads.len(), 101);
     assert_eq!(threads[100].id, "d100");
 }
+
+/// MR 21 with `/reviewers` and `/approvals` answered by `reviewers` and
+/// `approvals` (status, body); everything else from the fixtures.
+fn mr21_with(
+    reviewers: (&'static str, &'static str),
+    approvals: (&'static str, &'static str),
+) -> impl Fn(&str, &str) -> Reply {
+    move |path, _| {
+        let mr21 = "/api/v4/projects/grp%2Fapp/merge_requests/21";
+        let reply = |(status, body): (&'static str, &'static str)| Reply {
+            status,
+            headers: String::new(),
+            body: body.into(),
+        };
+        match path.split_once('?').map_or(path, |(r, _)| r) {
+            r if r == format!("{mr21}/reviewers") => reply(reviewers),
+            r if r == format!("{mr21}/approvals") => reply(approvals),
+            _ => fixture_routes(path),
+        }
+    }
+}
+
+const NO_APPROVALS: (&str, &str) = ("200 OK", r#"{"approved_by":[]}"#);
+
+#[test]
+fn a_failing_reviewers_call_fails_the_fetch_instead_of_guessing() {
+    // A 500 from /reviewers must not read as "requested" (the MR's plain
+    // reviewer list): that would start a false re-request round.
+    let (base, _) = serve_raw(mr21_with(("500 Internal Server Error", "{}"), NO_APPROVALS));
+    let err = provider(&base)
+        .fetch_review(&mr_ref(&base, 21))
+        .unwrap_err();
+    assert!(matches!(err, CoreError::Provider(_)), "{err:?}");
+
+    // An instance without the endpoint (404): the plain list stands in.
+    let (base, _) = serve_raw(mr21_with(("404 Not Found", "{}"), NO_APPROVALS));
+    let d = provider(&base).fetch_review(&mr_ref(&base, 21)).unwrap();
+    assert!(d.reviewers.iter().any(|r| r.is_me));
+}
+
+#[test]
+fn a_failing_approvals_call_fails_the_fetch_or_falls_back_to_reviewer_state() {
+    const I_APPROVED: (&str, &str) = (
+        "200 OK",
+        r#"[{"user":{"id":42,"username":"rev-fixture"},"state":"approved"}]"#,
+    );
+    // A 500 must not read as "approved by nobody" (clearing the approval).
+    let (base, _) = serve_raw(mr21_with(I_APPROVED, ("500 Internal Server Error", "{}")));
+    let err = provider(&base)
+        .fetch_review(&mr_ref(&base, 21))
+        .unwrap_err();
+    assert!(matches!(err, CoreError::Provider(_)), "{err:?}");
+
+    // No approvals API here (404, or 403 on a tier without it): the user's
+    // own reviewer state says it.
+    for status in ["404 Not Found", "403 Forbidden"] {
+        let (base, _) = serve_raw(mr21_with(I_APPROVED, (status, "{}")));
+        let d = provider(&base).fetch_review(&mr_ref(&base, 21)).unwrap();
+        assert!(d.approved_by_me, "{status}");
+        assert!(!d.requested_from_me);
+    }
+}

@@ -415,12 +415,23 @@ impl ReviewProvider for GitlabProvider {
             (join(a), join(b), join(c), join(d), join(e))
         });
         let mr = mr?;
-        // Reviewer states and approvals enrich the detail; an instance or
-        // licence without them still yields a usable review.
-        let reviewers = reviewers.ok();
-        let approved_by: Vec<String> = approvals
-            .map(|a| a.approved_by.into_iter().map(|u| u.user.username).collect())
-            .unwrap_or_default();
+        // Reviewer states and approvals decide whether the review is
+        // requested and approved, so a failure fails the fetch (the stored
+        // review stays as it was) rather than guessing: a guess of
+        // "requested" starts a false re-request round, one of "approved by
+        // nobody" clears the approval. Only an instance or tier that does
+        // not have the endpoint falls back.
+        let reviewers = match reviewers {
+            Ok(r) => Some(r),
+            Err(CoreError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        let approved_by: Option<Vec<String>> = match approvals {
+            Ok(a) => Some(a.approved_by.into_iter().map(|u| u.user.username).collect()),
+            // 403: approvals are not in this tier (the MR itself was read).
+            Err(CoreError::NotFound | CoreError::GitlabAuth) => None,
+            Err(e) => return Err(e),
+        };
         Ok(assemble_detail(
             self.to_ref(&mr),
             &me,
@@ -690,8 +701,17 @@ fn assemble_detail(
     commits: Vec<GlCommit>,
     versions: Vec<GlVersion>,
     reviewers: Option<Vec<GlReviewer>>,
-    approved_by: Vec<String>,
+    approved_by: Option<Vec<String>>,
 ) -> ReviewDetail {
+    // Without the approvals API, the user's own reviewer state says it.
+    let approved_by = approved_by.unwrap_or_else(|| {
+        reviewers
+            .iter()
+            .flatten()
+            .filter(|r| reviewer_state(&r.state) == ReviewerState::Approved)
+            .map(|r| r.user.username.clone())
+            .collect()
+    });
     let i_approved = approved_by.iter().any(|u| same_user(u, me));
     let (mut list, requested_from_me) = match reviewers {
         Some(rs) => {
