@@ -146,6 +146,7 @@
           "avatar_url": null,
           "web_url": "https://gitlab.example.test/alice-fixture"
         },
+        "resolved_at": "2026-10-09T15:00:00.000Z",
         "confidential": false,
         "internal": false,
         "position": {
