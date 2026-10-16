@@ -108,8 +108,9 @@ pub trait ReviewProvider: Send + Sync {
     /// What commit `sha` changed, against its first parent (the thread
     /// history's line walk). GitHub `repos/{o}/{r}/commits/{sha}` (`files`,
     /// up to 3000; `base_sha` is the first parent); GitLab
-    /// `repository/commits/:sha/diff` (`base_sha` empty: it sends no
-    /// parent). `head_sha` is `sha`. The default is for providers without
+    /// `repository/commits/:sha/diff` with `repository/commits/:sha` for
+    /// the first parent (`base_sha` empty when that cannot be read).
+    /// `head_sha` is `sha`. The default is for providers without
     /// commit diffs (test doubles).
     fn commit_diff(&self, _r: &ReviewRef, _sha: &str) -> CoreResult<FileDiff> {
         Err(crate::error::CoreError::Provider(

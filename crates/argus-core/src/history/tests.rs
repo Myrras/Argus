@@ -488,6 +488,25 @@ fn rewritten_or_branched_history_uses_one_direct_diff() {
     assert_eq!(where_(&m), located("a.rs", 6, 6));
 }
 
+#[test]
+fn a_commit_that_names_no_parent_is_not_taken_as_linear() {
+    // c2 names no parent (GitLab's commit diff did not): it may merge a
+    // side branch, whose changes c2's own diff repeats, so walking commit by
+    // commit would count the insertion twice. The direct diff decides.
+    let mut src = MemSource::new(vec![
+        ("c1", vec![changed("a.rs", "@@ -0,0 +1 @@\n+x")]),
+        ("c2", vec![changed("a.rs", "@@ -0,0 +1 @@\n+x")]),
+    ]);
+    src.diffs.get_mut("c2").unwrap().base_sha = String::new();
+    src.direct.insert(
+        ("c0".into(), "c2".into()),
+        diff("c0", "c2", vec![changed("a.rs", "@@ -0,0 +1 @@\n+x")]),
+    );
+    let m = walk_line(&src, &start("a.rs", 5, 5), "c2").unwrap();
+    assert_eq!(where_(&m), located("a.rs", 6, 6));
+    assert!(!m.attributed);
+}
+
 // -------------------------------------------------------------- snapshots
 
 fn file_of(n: u32) -> String {

@@ -701,15 +701,30 @@ impl ReviewProvider for GitlabProvider {
 
     // --- M3: thread history ---
 
+    /// The diff endpoint names no parent, so the commit itself is read
+    /// alongside for its first `parent_ids` entry: without it the walk
+    /// cannot tell a merged side branch from a line of commits.
     fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
         check_sha(sha)?;
-        let diffs: Vec<GlDiff> = self.get_all(&format!(
-            "/projects/{}/repository/commits/{sha}/diff",
+        let commit = format!(
+            "/projects/{}/repository/commits/{sha}",
             encode_segment(&r.repo)
-        ))?;
+        );
+        let (diffs, parent) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.get_all::<GlDiff>(&format!("{commit}/diff")));
+            let b = s.spawn(|| self.get_json::<GlCommitParents>(&commit));
+            (join(a), join(b))
+        });
+        let diffs = diffs?;
+        let parent = match parent {
+            Ok(c) => c.parent_ids.into_iter().next().unwrap_or_default(),
+            // Not readable on its own: no parent named (the walk then diffs
+            // directly).
+            Err(CoreError::NotFound) => String::new(),
+            Err(e) => return Err(e),
+        };
         Ok(FileDiff {
-            // The diff endpoint names no parent.
-            base_sha: String::new(),
+            base_sha: parent,
             head_sha: sha.to_string(),
             truncated: diffs.len() >= (PER_PAGE * MAX_PAGES) as usize,
             files: diffs.into_iter().map(|d| changed_file(d, sha)).collect(),
@@ -1075,6 +1090,13 @@ struct GlCommit {
     #[serde(default)]
     author_name: String,
     authored_date: Option<DateTime<Utc>>,
+}
+
+/// A commit, for its parents.
+#[derive(Deserialize)]
+struct GlCommitParents {
+    #[serde(default)]
+    parent_ids: Vec<String>,
 }
 
 #[derive(Deserialize, PartialEq, Eq)]

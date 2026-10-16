@@ -84,6 +84,9 @@ fn fixture_routes(path: &str) -> Reply {
         {
             ok("commit_a2_diff.json")
         }
+        "/api/v4/projects/grp%2Fapp/repository/commits/a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2" => {
+            ok("commit_a2.json")
+        }
         "/api/v4/projects/grp%2Fapp/repository/compare"
             if query
                 == "from=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
@@ -523,10 +526,10 @@ fn commit_diff_and_resolve_events() {
     let gl = provider(&base);
     let r = mr_ref(&base, 21);
     let diff = gl.commit_diff(&r, HEAD_SHA).unwrap();
-    // The diff endpoint names no parent.
+    // The diff endpoint names no parent; the commit does.
     assert_eq!(
         (diff.base_sha.as_str(), diff.head_sha.as_str()),
-        ("", HEAD_SHA)
+        ("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", HEAD_SHA)
     );
     let files: Vec<(&str, FileStatus)> = diff
         .files
