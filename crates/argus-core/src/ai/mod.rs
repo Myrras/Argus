@@ -71,4 +71,6 @@ pub(crate) fn needs_run(record: &ReviewRecord, run: Option<&RunRow>) -> bool {
 }
 
 #[cfg(test)]
+mod guarantees;
+#[cfg(test)]
 mod tests;
