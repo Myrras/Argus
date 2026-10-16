@@ -17,10 +17,10 @@ use serde::Deserialize;
 
 use super::github::check_sha;
 use super::model::{
-    Anchor, CommitInfo, DiffVersion, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState,
-    Reviewer, ReviewerState, Side, Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
+    ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
-use super::{encode_segment, first_line, ReviewProvider};
+use super::{count_patch, digest, encode_segment, first_line, looks_binary, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
 
 const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
@@ -375,6 +375,96 @@ impl ReviewProvider for GitlabProvider {
         ))?;
         Ok(body)
     }
+
+    fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+        let project = encode_segment(&r.repo);
+        match range {
+            DiffRange::Review { base, head } => {
+                check_sha(base)?;
+                check_sha(head)?;
+                let p = Self::mr_path(r);
+                // `/diffs` (15.7+) pages; an older instance only has the
+                // single-shot `/changes`, whose `overflow` flags a cut list.
+                let (diffs, truncated) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
+                    Ok(d) => {
+                        let full = d.len() >= (PER_PAGE * MAX_PAGES) as usize;
+                        (d, full)
+                    }
+                    Err(CoreError::NotFound) => {
+                        let c: GlChanges = self.get_json(&format!("{p}/changes"))?;
+                        (c.changes, c.overflow)
+                    }
+                    Err(e) => return Err(e),
+                };
+                Ok(FileDiff {
+                    files: diffs.into_iter().map(|d| changed_file(d, head)).collect(),
+                    base_sha: base.clone(),
+                    head_sha: head.clone(),
+                    truncated,
+                })
+            }
+            DiffRange::Compare { from, to } => {
+                check_sha(from)?;
+                check_sha(to)?;
+                // Straight: the plain from..to diff, so the left side is
+                // exactly the commit last reviewed.
+                let cmp: GlCompare = self.get_json(&format!(
+                    "/projects/{project}/repository/compare?from={from}&to={to}&straight=true"
+                ))?;
+                Ok(FileDiff {
+                    files: cmp.diffs.into_iter().map(|d| changed_file(d, to)).collect(),
+                    base_sha: from.clone(),
+                    head_sha: to.clone(),
+                    truncated: cmp.compare_timeout,
+                })
+            }
+        }
+    }
+}
+
+/// A GitLab diff entry as a [`ChangedFile`]. GitLab sends no line counts
+/// (they are counted from the diff) and no blob sha: the content key is a
+/// digest of the diff, or of the head when the diff was left out.
+fn changed_file(d: GlDiff, head: &str) -> ChangedFile {
+    let status = if d.new_file {
+        FileStatus::Added
+    } else if d.deleted_file {
+        FileStatus::Removed
+    } else if d.renamed_file {
+        FileStatus::Renamed
+    } else {
+        FileStatus::Modified
+    };
+    let binary_marker = d.diff.starts_with("Binary files") || d.diff.contains("GIT binary patch");
+    let binary = binary_marker || (d.diff.is_empty() && looks_binary(&d.new_path));
+    let too_large = !binary && (d.too_large || (d.collapsed && d.diff.is_empty()));
+    let has_patch = !d.diff.is_empty() && !binary_marker;
+    let (additions, deletions) = if has_patch {
+        count_patch(&d.diff)
+    } else {
+        (0, 0)
+    };
+    let content_sha = if has_patch {
+        digest(&[&d.new_path, &d.b_mode, &d.diff])
+    } else {
+        digest(&[&d.new_path, &d.b_mode, head])
+    };
+    let path = if status == FileStatus::Removed {
+        d.old_path.clone()
+    } else {
+        d.new_path.clone()
+    };
+    ChangedFile {
+        old_path: (status == FileStatus::Renamed).then_some(d.old_path),
+        path,
+        status,
+        additions,
+        deletions,
+        patch: has_patch.then_some(d.diff),
+        content_sha,
+        binary,
+        too_large,
+    }
 }
 
 fn join<T>(h: std::thread::ScopedJoinHandle<'_, CoreResult<T>>) -> CoreResult<T> {
@@ -559,6 +649,7 @@ fn position_anchor(p: &GlPosition) -> Anchor {
         start_sha: p.start_sha.clone(),
         head_sha: p.head_sha.clone().unwrap_or_default(),
         diff_hunk: None,
+        current_line: None,
     }
 }
 
@@ -719,6 +810,42 @@ struct GlNote {
     resolved: bool,
     #[serde(default)]
     position: Option<GlPosition>,
+}
+
+#[derive(Deserialize)]
+struct GlDiff {
+    old_path: String,
+    new_path: String,
+    #[serde(default)]
+    b_mode: String,
+    #[serde(default)]
+    diff: String,
+    #[serde(default)]
+    new_file: bool,
+    #[serde(default)]
+    renamed_file: bool,
+    #[serde(default)]
+    deleted_file: bool,
+    #[serde(default)]
+    too_large: bool,
+    #[serde(default)]
+    collapsed: bool,
+}
+
+#[derive(Deserialize)]
+struct GlChanges {
+    #[serde(default)]
+    changes: Vec<GlDiff>,
+    #[serde(default)]
+    overflow: bool,
+}
+
+#[derive(Deserialize)]
+struct GlCompare {
+    #[serde(default)]
+    diffs: Vec<GlDiff>,
+    #[serde(default)]
+    compare_timeout: bool,
 }
 
 #[derive(Deserialize)]

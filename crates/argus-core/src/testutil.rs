@@ -74,6 +74,7 @@ pub fn thread(id: &str, author: &str, sha: &str, notes: Vec<Note>) -> Thread {
             start_sha: None,
             head_sha: sha.into(),
             diff_hunk: None,
+            current_line: None,
         }),
         notes,
     }

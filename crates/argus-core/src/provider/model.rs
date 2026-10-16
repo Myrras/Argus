@@ -206,6 +206,13 @@ pub struct Anchor {
     pub head_sha: String,
     /// GitHub's hunk excerpt; GitLab does not send one.
     pub diff_hunk: Option<String>,
+    /// GitHub: the line in the PR's current diff (`line`), on
+    /// [`side`](Self::side); `None` once outdated. `line_old`/`line_new`
+    /// hold the original line, which drifts when lines are added above it.
+    /// GitLab sends no such field (a current position is as of the head), so
+    /// `None` there. Absent in anchors stored before it existed.
+    #[serde(default)]
+    pub current_line: Option<u32>,
 }
 
 /// One comment in a thread.
@@ -236,6 +243,66 @@ pub struct Thread {
     /// `None` for a GitLab discussion on the MR as a whole.
     pub anchor: Option<Anchor>,
     pub notes: Vec<Note>,
+}
+
+/// How a file changed in a diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileStatus {
+    Added,
+    Modified,
+    Removed,
+    Renamed,
+}
+
+/// One file of a diff, as the platform reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFile {
+    /// The path at head (for a removed file, the path it had).
+    pub path: String,
+    /// The path before a rename; `None` unless [`FileStatus::Renamed`].
+    pub old_path: Option<String>,
+    pub status: FileStatus,
+    /// Added / removed lines; 0 when the platform sent no patch.
+    pub additions: u32,
+    pub deletions: u32,
+    /// The unified patch hunks, when the platform sent them (not for binary
+    /// or too-large files).
+    pub patch: Option<String>,
+    /// What the file is at head, to tell whether it changed since it was
+    /// marked viewed: GitHub's blob sha. GitLab sends no blob sha in a diff,
+    /// so there it is a digest of the file's diff from the review's base
+    /// (the same base and diff mean the same content at head).
+    pub content_sha: String,
+    pub binary: bool,
+    /// The platform left the patch out because it is too large.
+    pub too_large: bool,
+}
+
+/// Which diff [`ReviewProvider::fetch_files`](super::ReviewProvider::fetch_files)
+/// reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffRange {
+    /// The MR/PR's own diff (what the platform's Files/Changes tab shows).
+    /// `base` and `head` are the review's stored shas; the provider resolves
+    /// the side the diff is really taken from.
+    Review { base: String, head: String },
+    /// Two commits of the review, e.g. "since my last review".
+    Compare { from: String, to: String },
+}
+
+/// The files of one diff and the commits its two sides are read at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDiff {
+    /// The left side: the commit the patches are relative to.
+    pub base_sha: String,
+    /// The right side.
+    pub head_sha: String,
+    pub files: Vec<ChangedFile>,
+    /// The platform's file limit was hit; more files changed than listed.
+    pub truncated: bool,
 }
 
 #[cfg(test)]

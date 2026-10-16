@@ -87,6 +87,13 @@ impl ReviewProvider for Fake {
     fn file_at(&self, _: &ReviewRef, _: &str, _: &str) -> CoreResult<String> {
         Err(CoreError::NotFound)
     }
+    fn fetch_files(
+        &self,
+        _: &ReviewRef,
+        _: &crate::provider::DiffRange,
+    ) -> CoreResult<crate::provider::FileDiff> {
+        Err(CoreError::NotFound)
+    }
 }
 
 fn detail_n(n: u64, head: &str) -> ReviewDetail {

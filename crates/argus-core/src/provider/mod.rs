@@ -11,8 +11,8 @@ pub mod model;
 pub use github::{GhAuth, GithubProvider};
 pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
 pub use model::{
-    Anchor, CommitInfo, DiffVersion, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState,
-    Reviewer, ReviewerState, Side, Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
+    ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
 
 use std::sync::Arc;
@@ -44,6 +44,20 @@ pub trait ReviewProvider: Send + Sync {
 
     /// The content of `path` at commit `sha`.
     fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String>;
+
+    /// The changed files of `range`, with the commit each side is read at.
+    ///
+    /// [`DiffRange::Review`]: GitHub `pulls/{n}/files` (up to 3000 files;
+    /// large patches are left out) with the merge base of base and head from
+    /// the compare API as the left side, as GitHub's own Files tab diffs
+    /// three-dot. GitLab `merge_requests/:iid/diffs` (`changes` on instances
+    /// before 15.7) with the latest version's `base_sha` (the merge base
+    /// GitLab diffs from) as the left side.
+    ///
+    /// [`DiffRange::Compare`]: GitHub `compare/{from}...{to}` (up to 300
+    /// files; left side its merge base, which is `from` unless the branch was
+    /// rebased); GitLab `repository/compare?straight=true` (left side `from`).
+    fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff>;
 
     // M4: post_comment(&self, r, c: &NewComment) -> CoreResult<PostedComment>,
     // reply(&self, r, thread: &str, body) and approve(&self, r) go here.
@@ -151,6 +165,46 @@ pub(crate) fn encode_path(path: &str) -> String {
         .join("/")
 }
 
+/// Extensions whose files are binary even when the platform cannot say so
+/// (a binary file has no patch, as does a too-large or a renamed-only one).
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "icns", "webp", "tiff", "psd", "pdf", "zip", "gz",
+    "tgz", "bz2", "xz", "7z", "rar", "jar", "war", "class", "dll", "exe", "so", "dylib", "a", "o",
+    "bin", "dat", "db", "sqlite", "woff", "woff2", "ttf", "otf", "eot", "mp3", "mp4", "mov", "avi",
+    "wav", "flac", "ogg", "webm", "docx", "xlsx", "pptx", "doc", "xls", "ppt", "pyc", "wasm",
+];
+
+/// Whether `path` names a file type that is binary.
+pub(crate) fn looks_binary(path: &str) -> bool {
+    path.rsplit_once('.')
+        .is_some_and(|(_, ext)| BINARY_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+/// Added and removed lines of a unified patch (hunk bodies only; the
+/// `---`/`+++` headers some platforms include are skipped).
+pub(crate) fn count_patch(patch: &str) -> (u32, u32) {
+    let (mut add, mut del) = (0, 0);
+    for line in patch.lines() {
+        if line.starts_with("+++ ") || line.starts_with("--- ") {
+            continue;
+        }
+        match line.as_bytes().first() {
+            Some(b'+') => add += 1,
+            Some(b'-') => del += 1,
+            _ => {}
+        }
+    }
+    (add, del)
+}
+
+/// A stable digest of `parts` (UUID v5, SHA-1 based: the same input gives
+/// the same value on every build and platform, unlike `std`'s hasher).
+pub(crate) fn digest(parts: &[&str]) -> String {
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, parts.join("\0").as_bytes())
+        .simple()
+        .to_string()
+}
+
 /// The first line of a commit message.
 pub(crate) fn first_line(message: &str) -> String {
     message.lines().next().unwrap_or("").trim().to_string()
@@ -165,5 +219,16 @@ mod tests {
         assert_eq!(encode_segment("a/b c"), "a%2Fb%20c");
         assert_eq!(encode_path("src/my file.rs"), "src/my%20file.rs");
         assert_eq!(first_line("Fix it\n\nbody"), "Fix it");
+    }
+
+    #[test]
+    fn counts_patches_and_spots_binaries() {
+        let patch = "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n+more\n ctx";
+        assert_eq!(count_patch(patch), (2, 1));
+        assert!(looks_binary("assets/Logo.PNG"));
+        assert!(!looks_binary("src/main.rs"));
+        assert!(!looks_binary("Makefile"));
+        assert_eq!(digest(&["a", "b"]), digest(&["a", "b"]));
+        assert_ne!(digest(&["a", "b"]), digest(&["ab"]));
     }
 }

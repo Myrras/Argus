@@ -10,7 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use argus_core::provider::{
-    GithubProvider, ProviderId, ReviewProvider, ReviewRef, ReviewState, ReviewerState, Side,
+    DiffRange, FileStatus, GithubProvider, ProviderId, ReviewProvider, ReviewRef, ReviewState,
+    ReviewerState, Side,
 };
 use argus_core::CoreError;
 
@@ -36,6 +37,12 @@ case "$*" in
   "api --paginate repos/acme-fixture/widgets/pulls/12/reviews?per_page=100") cat "$F/pull_12_reviews.json" ;;
   "api --paginate repos/acme-fixture/widgets/pulls/12/comments?per_page=100")
     cat "$F/pull_12_comments_page1.json" "$F/pull_12_comments_page2.json" ;;
+  "api --paginate repos/acme-fixture/widgets/pulls/12/files?per_page=100")
+    cat "$F/pull_12_files_page1.json" "$F/pull_12_files_page2.json" ;;
+  "api repos/acme-fixture/widgets/compare/b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0...c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 --jq .merge_base_commit.sha")
+    echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ;;
+  "api repos/acme-fixture/widgets/compare/c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1...c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3")
+    cat "$F/compare_c1_c3.json" ;;
   "api repos/acme-fixture/gadgets/pulls/7") cat "$F/pull_7.json" ;;
   "api --paginate repos/acme-fixture/gadgets/pulls/7/commits?per_page=100") cat "$F/empty.json" ;;
   "api --paginate repos/acme-fixture/gadgets/pulls/7/reviews?per_page=100") cat "$F/pull_7_reviews.json" ;;
@@ -196,20 +203,119 @@ fn rebuilds_threads_from_review_comments() {
     assert_eq!(a.head_sha, "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1");
     assert!(a.diff_hunk.as_deref().unwrap().starts_with("@@"));
 
-    // position == null → outdated, original line kept.
+    assert_eq!(a.current_line, Some(10));
+
+    // position == null → outdated, original line kept, no current line.
     let outdated = &threads[1];
     assert!(outdated.outdated);
     assert_eq!(outdated.anchor.as_ref().unwrap().line_new, Some(20));
+    assert_eq!(outdated.anchor.as_ref().unwrap().current_line, None);
 
-    // Multi-line: the original start line.
+    // Multi-line: the original start line; lines added above moved it to 33
+    // in the current diff.
     let range = threads[2].anchor.as_ref().unwrap();
     assert_eq!((range.start_line, range.line_new), (Some(28), Some(31)));
+    assert_eq!(range.current_line, Some(33));
 
     // A comment on the removed side of a renamed file.
     let renamed = threads[3].anchor.as_ref().unwrap();
     assert_eq!(renamed.side, Side::Old);
     assert_eq!(renamed.line_old, Some(4));
     assert_eq!(renamed.path_new.as_deref(), Some("src/new_name.rs"));
+}
+
+const BASE: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
+const HEAD: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn lists_pr_files_across_pages_from_the_merge_base() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let diff = gh
+        .fetch_files(
+            &widgets_12(),
+            &DiffRange::Review {
+                base: BASE.into(),
+                head: HEAD.into(),
+            },
+        )
+        .unwrap();
+    // The left side is the merge base, not the base branch tip.
+    assert_eq!(diff.base_sha, "b".repeat(40));
+    assert_eq!(diff.head_sha, HEAD);
+    assert!(!diff.truncated);
+    let paths: Vec<&str> = diff.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(
+        paths,
+        [
+            "src/cache.rs",
+            "src/widget_cache.rs",
+            "src/legacy.rs",
+            "src/new_name.rs",
+            "assets/logo.png",
+            "data/fixtures.json"
+        ]
+    );
+    let f = |p: &str| diff.files.iter().find(|f| f.path == p).unwrap();
+
+    let modified = f("src/cache.rs");
+    assert_eq!(modified.status, FileStatus::Modified);
+    assert_eq!((modified.additions, modified.deletions), (2, 1));
+    assert_eq!(modified.content_sha, "f1".repeat(20));
+    assert!(modified.patch.as_deref().unwrap().starts_with("@@ -1,3"));
+    assert!(!modified.binary && !modified.too_large);
+
+    assert_eq!(f("src/widget_cache.rs").status, FileStatus::Added);
+    assert_eq!(f("src/legacy.rs").status, FileStatus::Removed);
+
+    let renamed = f("src/new_name.rs");
+    assert_eq!(renamed.status, FileStatus::Renamed);
+    assert_eq!(renamed.old_path.as_deref(), Some("src/old_name.rs"));
+    assert_eq!(modified.old_path, None);
+
+    // No patch and no line counted: binary. No patch with lines: too large.
+    let png = f("assets/logo.png");
+    assert!(png.binary && !png.too_large && png.patch.is_none());
+    let big = f("data/fixtures.json");
+    assert!(big.too_large && !big.binary);
+    assert_eq!((big.additions, big.deletions), (4200, 3100));
+
+    assert!(fake
+        .calls()
+        .contains("api --paginate repos/acme-fixture/widgets/pulls/12/files?per_page=100"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn compares_since_the_last_review() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let from = "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1";
+    let diff = gh
+        .fetch_files(
+            &widgets_12(),
+            &DiffRange::Compare {
+                from: from.into(),
+                to: HEAD.into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(diff.base_sha, from);
+    assert_eq!(diff.head_sha, HEAD);
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].additions, 1);
+    // Never a sha the shell could read as a flag.
+    assert!(matches!(
+        gh.fetch_files(
+            &widgets_12(),
+            &DiffRange::Compare {
+                from: "--paginate".into(),
+                to: HEAD.into()
+            }
+        ),
+        Err(CoreError::InvalidInput(_))
+    ));
 }
 
 #[test]

@@ -12,8 +12,8 @@ use argus_core::store::Store;
 use argus_core::{Core, ReviewStatus};
 
 use argus_core::provider::{
-    GitlabProvider, ProviderId, ReviewRef, ReviewState, ReviewerState, Side, StaticToken,
-    TokenSource,
+    DiffRange, FileStatus, GitlabProvider, ProviderId, ReviewRef, ReviewState, ReviewerState, Side,
+    StaticToken, TokenSource,
 };
 use argus_core::CoreError;
 
@@ -66,6 +66,29 @@ fn fixture_routes(path: &str) -> Reply {
         r if r == format!("{mr21}/versions") => ok("mr_21_versions.json"),
         r if r == format!("{mr21}/reviewers") => ok("mr_21_reviewers.json"),
         r if r == format!("{mr21}/approvals") => ok("mr_21_approvals.json"),
+        r if r == format!("{mr21}/diffs") => {
+            if query.contains("page=2") {
+                Reply {
+                    headers: "X-Next-Page: \r\n".into(),
+                    ..ok("mr_21_diffs_page2.json")
+                }
+            } else {
+                Reply {
+                    headers: "X-Next-Page: 2\r\n".into(),
+                    ..ok("mr_21_diffs_page1.json")
+                }
+            }
+        }
+        "/api/v4/projects/grp%2Fapp/repository/compare"
+            if query
+                == "from=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
+                    &to=a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2&straight=true" =>
+        {
+            ok("compare_a1_a2.json")
+        }
+        // An instance before 15.7: no `/diffs`, only `/changes`.
+        r if r == format!("{mr31}/diffs") => status("404 Not Found"),
+        r if r == format!("{mr31}/changes") => ok("mr_31_changes.json"),
         r if r == format!("{mr21}/discussions") => {
             if query.contains("page=2") {
                 Reply {
@@ -282,6 +305,97 @@ fn file_at_reads_raw_content() {
         gl.file_at(&r, "a2a2", "src/missing.rs"),
         Err(CoreError::NotFound)
     ));
+}
+
+const BASE_SHA: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
+const HEAD_SHA: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
+
+fn review_range() -> DiffRange {
+    DiffRange::Review {
+        base: BASE_SHA.into(),
+        head: HEAD_SHA.into(),
+    }
+}
+
+#[test]
+fn lists_mr_diffs_across_pages() {
+    let (base, seen) = serve(fixture_routes);
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    // The left side is the version's base_sha, as GitLab diffs from it.
+    assert_eq!(
+        (diff.base_sha.as_str(), diff.head_sha.as_str()),
+        (BASE_SHA, HEAD_SHA)
+    );
+    assert!(!diff.truncated);
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains("/diffs?per_page=100&page=2 ")));
+    let f = |p: &str| diff.files.iter().find(|f| f.path == p).unwrap();
+    assert_eq!(diff.files.len(), 6);
+
+    let modified = f("src/importer.rs");
+    assert_eq!(modified.status, FileStatus::Modified);
+    // Counted from the diff: GitLab sends no numbers.
+    assert_eq!((modified.additions, modified.deletions), (1, 1));
+    assert!(modified.patch.is_some());
+    assert_eq!(f("src/backoff.rs").status, FileStatus::Added);
+    assert_eq!(f("src/backoff.rs").additions, 2);
+    assert_eq!(f("src/old_import.rs").status, FileStatus::Removed);
+
+    let renamed = f("src/new_name.rs");
+    assert_eq!(renamed.status, FileStatus::Renamed);
+    assert_eq!(renamed.old_path.as_deref(), Some("src/old_name.rs"));
+
+    let bin = f("docs/diagram.bin");
+    assert!(bin.binary && !bin.too_large && bin.patch.is_none());
+    let big = f("data/seed.sql");
+    assert!(big.too_large && !big.binary && big.patch.is_none());
+
+    // The content key follows the diff: the same diff gives the same key,
+    // and every file has its own.
+    let again = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    assert_eq!(again.files, diff.files);
+    let mut keys: Vec<&str> = diff.files.iter().map(|f| f.content_sha.as_str()).collect();
+    keys.sort();
+    keys.dedup();
+    assert_eq!(keys.len(), 6);
+}
+
+#[test]
+fn falls_back_to_changes_on_an_older_instance() {
+    let (base, _) = serve(fixture_routes);
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 31), &review_range())
+        .unwrap();
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].path, "README.md");
+    assert_eq!(diff.files[0].additions, 1);
+    // `overflow`: GitLab cut the list.
+    assert!(diff.truncated);
+}
+
+#[test]
+fn compares_two_commits_straight() {
+    let (base, _) = serve(fixture_routes);
+    let from = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
+    let diff = provider(&base)
+        .fetch_files(
+            &mr_ref(&base, 21),
+            &DiffRange::Compare {
+                from: from.into(),
+                to: HEAD_SHA.into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(diff.base_sha, from);
+    assert_eq!(diff.files.len(), 1);
+    assert_eq!(diff.files[0].patch.as_deref().unwrap().lines().count(), 5);
 }
 
 struct NoToken;

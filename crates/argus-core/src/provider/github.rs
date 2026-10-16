@@ -20,16 +20,21 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use super::model::{
-    Anchor, CommitInfo, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer,
-    ReviewerState, Side, Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
+    ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
-use super::{encode_path, first_line, ReviewProvider};
+use super::{encode_path, first_line, looks_binary, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
 
 /// Upper bound per search; a reviewer with more than this many open PRs in
 /// one bucket is not the user Argus is built for.
 const SEARCH_LIMIT: &str = "100";
 const SEARCH_FIELDS: &str = "number,title,url,repository,author,updatedAt";
+
+/// GitHub's caps: `pulls/{n}/files` lists at most 3000 files, a compare at
+/// most 300. Reaching one means the list is cut off.
+const PULL_FILES_LIMIT: usize = 3000;
+const COMPARE_FILES_LIMIT: usize = 300;
 
 /// What [`GithubProvider::auth_status`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,6 +329,86 @@ impl ReviewProvider for GithubProvider {
         ))?;
         decode_content(file)
     }
+
+    fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+        match range {
+            DiffRange::Review { base, head } => {
+                check_sha(base)?;
+                check_sha(head)?;
+                // The PR's files are diffed from the merge base (three-dot),
+                // not from the base branch tip the PR reports: the compare
+                // API names that commit.
+                let (files, merge_base) = std::thread::scope(|s| {
+                    let a = s.spawn(|| {
+                        self.api_list::<GhFile>(&format!(
+                            "repos/{}/pulls/{}/files",
+                            r.repo, r.number
+                        ))
+                    });
+                    let b = s.spawn(|| {
+                        self.run(&[
+                            "api",
+                            &format!("repos/{}/compare/{base}...{head}", r.repo),
+                            "--jq",
+                            ".merge_base_commit.sha",
+                        ])
+                    });
+                    (join(a), join(b))
+                });
+                let files = files?;
+                let merge_base = merge_base?.trim().to_string();
+                check_sha(&merge_base).map_err(|_| unexpected())?;
+                Ok(FileDiff {
+                    base_sha: merge_base,
+                    head_sha: head.clone(),
+                    truncated: files.len() >= PULL_FILES_LIMIT,
+                    files: files.into_iter().map(changed_file).collect(),
+                })
+            }
+            DiffRange::Compare { from, to } => {
+                check_sha(from)?;
+                check_sha(to)?;
+                let cmp: GhCompare =
+                    self.api(&format!("repos/{}/compare/{from}...{to}", r.repo))?;
+                Ok(FileDiff {
+                    base_sha: cmp.merge_base_commit.sha,
+                    head_sha: to.clone(),
+                    truncated: cmp.files.len() >= COMPARE_FILES_LIMIT,
+                    files: cmp.files.into_iter().map(changed_file).collect(),
+                })
+            }
+        }
+    }
+}
+
+/// One entry of `pulls/{n}/files` or a compare's `files`. GitHub leaves the
+/// patch out of binary files and of diffs too large to send; `changes` tells
+/// the two apart (a binary file counts no lines).
+fn changed_file(f: GhFile) -> ChangedFile {
+    let status = match f.status.as_str() {
+        "added" => FileStatus::Added,
+        "removed" => FileStatus::Removed,
+        "renamed" => FileStatus::Renamed,
+        // modified, changed (mode only), copied, unchanged
+        _ => FileStatus::Modified,
+    };
+    let no_patch = f.patch.is_none();
+    let binary =
+        no_patch && f.changes == 0 && (status == FileStatus::Modified || looks_binary(&f.filename));
+    ChangedFile {
+        old_path: f
+            .previous_filename
+            .filter(|_| status == FileStatus::Renamed),
+        status,
+        additions: f.additions,
+        deletions: f.deletions,
+        too_large: no_patch && f.changes > 0,
+        binary,
+        patch: f.patch,
+        // A missing sha (submodules) still needs a key; the path does.
+        content_sha: f.sha.unwrap_or_else(|| f.filename.clone()),
+        path: f.filename,
+    }
 }
 
 fn join<T>(h: std::thread::ScopedJoinHandle<'_, CoreResult<T>>) -> CoreResult<T> {
@@ -545,6 +630,8 @@ fn root_thread(c: GhComment) -> Thread {
             .or_else(|| c.commit_id.clone())
             .unwrap_or_default(),
         diff_hunk: c.diff_hunk.clone(),
+        // Outdated comments have no current line.
+        current_line: c.position.and(c.line),
     };
     Thread {
         id: c.id.to_string(),
@@ -647,6 +734,31 @@ struct GhComment {
     commit_id: Option<String>,
     original_commit_id: Option<String>,
     diff_hunk: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GhFile {
+    filename: String,
+    status: String,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    #[serde(default)]
+    changes: u32,
+    #[serde(default)]
+    patch: Option<String>,
+    #[serde(default)]
+    previous_filename: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GhCompare {
+    merge_base_commit: GhRef,
+    #[serde(default)]
+    files: Vec<GhFile>,
 }
 
 #[derive(Deserialize)]

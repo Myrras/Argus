@@ -1,0 +1,34 @@
+[
+  {
+    "old_path": "src/old_name.rs",
+    "new_path": "src/new_name.rs",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "diff": "@@ -4 +4 @@\n-fn a() {}\n+fn b() {}\n",
+    "new_file": false,
+    "renamed_file": true,
+    "deleted_file": false
+  },
+  {
+    "old_path": "docs/diagram.bin",
+    "new_path": "docs/diagram.bin",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "diff": "Binary files a/docs/diagram.bin and b/docs/diagram.bin differ\n",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false
+  },
+  {
+    "old_path": "data/seed.sql",
+    "new_path": "data/seed.sql",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "diff": "",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "too_large": true,
+    "collapsed": true
+  }
+]
