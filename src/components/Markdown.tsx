@@ -8,7 +8,9 @@
  *
  * Argus additions:
  * - Links open in the browser through the opener plugin; the webview never
- *   navigates.
+ *   navigates. Relative ones resolve against the open review's page
+ *   (`resolveLink`), footnotes jump inside the comment, and a link that
+ *   resolves to nothing http(s) shows as text.
  * - Images are links, not loaded: the CSP blocks remote images, and most
  *   comment images sit behind the platform's login anyway.
  * - Fenced code is highlighted by CodeMirror (`CodeEditorBlock`, lazy; the
@@ -35,7 +37,8 @@ import ReactMarkdown, {
 } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { openExternal } from "../lib/links";
+import { openExternal, resolveLink, type LinkBase } from "../lib/links";
+import { useReviewStore } from "../state/reviewStore";
 import { CheckIcon, CopyIcon, ImageIcon } from "./icons";
 import styles from "./Markdown.module.css";
 
@@ -46,22 +49,53 @@ const CodeEditorBlock = lazy(() =>
 /** Takes over a fenced block: `info` is its info string (may be ""). */
 export type RenderFence = (info: string, code: string) => ReactNode | null;
 
+/** The open review's page, for relative links (a store: widget roots). */
+function useLinkBase(): LinkBase | null {
+  const url = useReviewStore(
+    (s) => s.reviews.find((r) => r.id === s.selectedId)?.url ?? null,
+  );
+  const provider = useReviewStore(
+    (s) => s.reviews.find((r) => r.id === s.selectedId)?.provider ?? null,
+  );
+  return url && provider ? { url, provider } : null;
+}
+
+/** react-markdown's prefix for footnote and heading ids. */
+const LOCAL = "#user-content-";
+
 function MarkdownLink({
   href,
   children,
   node: _node,
   ...rest
 }: AnchorHTMLAttributes<HTMLAnchorElement> & ExtraProps) {
+  const base = useLinkBase();
+  const raw = href ?? "";
+  const local = raw.startsWith(LOCAL);
+  const target = local ? null : resolveLink(raw, base);
+  if (!local && !target) {
+    return <span title={raw || undefined}>{children}</span>;
+  }
   return (
     <a
       {...rest}
-      href={href}
-      title={href}
-      target="_blank"
+      href={target ?? raw}
+      title={target ?? undefined}
+      target={local ? undefined : "_blank"}
       rel="noreferrer"
       onClick={(e) => {
         e.preventDefault();
-        if (href) openExternal(href);
+        if (target) {
+          openExternal(target);
+          return;
+        }
+        // A footnote (or its way back): within this comment.
+        const id = raw.slice(1);
+        const prose = e.currentTarget.closest(`.${styles.prose}`);
+        const to = [...(prose?.querySelectorAll("[id]") ?? [])].find(
+          (el) => el.id === id,
+        );
+        to?.scrollIntoView?.({ block: "nearest" });
       }}
     >
       {children}
@@ -74,7 +108,16 @@ function MarkdownImage({
   alt,
   node: _node,
 }: ImgHTMLAttributes<HTMLImageElement> & ExtraProps) {
-  const href = typeof src === "string" ? src : "";
+  const base = useLinkBase();
+  const href = resolveLink(typeof src === "string" ? src : "", base);
+  if (!href) {
+    return (
+      <span className={styles.image}>
+        <ImageIcon />
+        {alt || "Image"}
+      </span>
+    );
+  }
   return (
     <a
       className={styles.image}

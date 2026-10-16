@@ -66,7 +66,8 @@ when it merges.
   approved; pending comments are not posted with it (the dialog says how
   many). An approved review leaves the lists. Argus never merges.
 - Comments render as markdown: headings, lists, task lists, tables, quotes,
-  links (they open in your browser) and code blocks highlighted by language
+  links (they open in your browser, relative ones such as GitLab
+  attachments resolved against the review) and code blocks highlighted by language
   (jq included) with a copy button. Images show as links; HTML in a comment
   shows as text and never runs. Suggested changes (GitHub's and GitLab's
   `suggestion` blocks) show as a small diff of the lines they replace and

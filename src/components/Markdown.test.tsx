@@ -8,9 +8,13 @@ const { openUrlMock } = vi.hoisted(() => ({
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: openUrlMock }));
 vi.mock("@tauri-apps/plugin-log", () => ({
   warn: vi.fn(() => Promise.resolve()),
+  error: vi.fn(() => Promise.resolve()),
 }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { languageForInfo } from "../lib/codemirror";
+import { useReviewStore } from "../state/reviewStore";
+import { review } from "../test/fixtures";
 import { Markdown } from "./Markdown";
 
 // jsdom has no layout: CodeMirror asks ranges for their rectangles.
@@ -185,5 +189,78 @@ describe("languageForInfo", () => {
     rerender(view());
     expect(mounts).toBe(1);
     expect(container.querySelector("[class*=fence]")).toBe(block);
+  });
+  describe("relative links", () => {
+    const open = (name: string) => {
+      openUrlMock.mockClear();
+      fireEvent.click(screen.getByRole("link", { name }));
+      return (openUrlMock.mock.calls as unknown as string[][])[0]?.[0];
+    };
+
+    it("resolve against a GitLab review's page", () => {
+      const r = review({
+        provider: "gitlab",
+        url: "https://gitlab.example.test/acme/widgets/-/merge_requests/7",
+      });
+      useReviewStore.setState({ reviews: [r], selectedId: r.id });
+      render(
+        <Markdown>
+          {
+            "[log](/uploads/abc123/build.log) [that note](#note_55) [readme](../blob/main/README.md)"
+          }
+        </Markdown>,
+      );
+      expect(open("log")).toBe(
+        "https://gitlab.example.test/acme/widgets/uploads/abc123/build.log",
+      );
+      expect(open("that note")).toBe(
+        "https://gitlab.example.test/acme/widgets/-/merge_requests/7#note_55",
+      );
+      expect(open("readme")).toBe(
+        "https://gitlab.example.test/acme/widgets/-/blob/main/README.md",
+      );
+    });
+
+    it("resolve against a GitHub review's page", () => {
+      const r = review({
+        url: "https://github.com/acme-fixture/widgets/pull/3",
+      });
+      useReviewStore.setState({ reviews: [r], selectedId: r.id });
+      render(
+        <Markdown>
+          {"[file](../blob/main/src/a.rs) [c](#discussion_r9)"}
+        </Markdown>,
+      );
+      expect(open("file")).toBe(
+        "https://github.com/acme-fixture/widgets/blob/main/src/a.rs",
+      );
+      expect(open("c")).toBe(
+        "https://github.com/acme-fixture/widgets/pull/3#discussion_r9",
+      );
+    });
+
+    it("show as text when nothing http(s) comes out", () => {
+      useReviewStore.setState({ reviews: [], selectedId: null });
+      render(
+        <Markdown>
+          {"[mail](mailto:dev@example.test) [rel](docs/x.md)"}
+        </Markdown>,
+      );
+      expect(screen.queryByRole("link")).toBeNull();
+      expect(screen.getByText("mail")).toBeInTheDocument();
+      expect(screen.getByText("rel")).toBeInTheDocument();
+    });
+
+    it("footnotes jump inside the comment", () => {
+      const r = review();
+      useReviewStore.setState({ reviews: [r], selectedId: r.id });
+      const scroll = vi.fn();
+      Element.prototype.scrollIntoView = scroll;
+      render(<Markdown>{"Claim[^1].\n\n[^1]: The source."}</Markdown>);
+      openUrlMock.mockClear();
+      fireEvent.click(screen.getByRole("link", { name: "1" }));
+      expect(openUrlMock).not.toHaveBeenCalled();
+      expect(scroll).toHaveBeenCalled();
+    });
   });
 });
