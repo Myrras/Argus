@@ -118,7 +118,9 @@ pub async fn post_findings(
     posts: Vec<FindingPost>,
 ) -> Result<Vec<FindingPostResult>, IpcError> {
     let id = parse_review_id(&review_id)?;
-    let results = blocking_post(state, move |core| core.post_findings(id, posts)).await?;
+    let results = blocking_post(state, move |core| core.post_findings(id, posts)).await;
+    super::post::emit_if_head_moved(&app, id, &results);
+    let results = results?;
     if any_posted(&results) {
         events::emit_changed(&app, id);
     }

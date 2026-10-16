@@ -7,12 +7,25 @@
 
 use tauri::{AppHandle, State};
 
-use argus_core::{CommentableLines, NewComment, PostResult, PostedNote, ReviewRecord};
+use argus_core::{
+    CommentableLines, NewComment, PostErrorKind, PostResult, PostedNote, ReviewId, ReviewRecord,
+};
 
 use super::{blocking, blocking_post, parse_review_id, parse_thread_id};
 use crate::error::IpcError;
 use crate::events;
 use crate::state::AppState;
+
+/// After a `headMoved` refusal the core stored the review's new head: the
+/// stores re-read it, so the user retries from what is there now.
+pub(crate) fn emit_if_head_moved<T>(app: &AppHandle, id: ReviewId, result: &Result<T, IpcError>) {
+    if result
+        .as_ref()
+        .is_err_and(|e| e.kind == PostErrorKind::HeadMoved.as_str())
+    {
+        events::emit_changed(app, id);
+    }
+}
 
 /// Post `comments` on a review, one by one; one result per comment in the
 /// same order (`posted` or `failed`). `Err` only when nothing could be
@@ -25,15 +38,19 @@ pub async fn post_comments(
     comments: Vec<NewComment>,
 ) -> Result<Vec<PostResult>, IpcError> {
     let id = parse_review_id(&review_id)?;
-    let results = blocking_post(state, move |core| core.post_comments(id, comments)).await?;
+    let results = blocking_post(state, move |core| core.post_comments(id, comments)).await;
+    emit_if_head_moved(&app, id, &results);
+    let results = results?;
     if results.iter().any(PostResult::is_posted) {
         events::emit_changed(&app, id);
     }
     Ok(results)
 }
 
-/// Reply to a stored thread of the review `review_id` (the review is only
-/// used to tell the stores which review changed).
+/// Reply to a stored thread of the review `review_id`. The thread's review
+/// is looked up, not taken from the caller: a thread of another review is
+/// refused before anything is posted, and `review:changed` names the review
+/// that really changed.
 #[tauri::command]
 pub async fn reply_to_thread(
     app: AppHandle,
@@ -42,11 +59,27 @@ pub async fn reply_to_thread(
     thread_id: String,
     body: String,
 ) -> Result<PostedNote, IpcError> {
-    let id = parse_review_id(&review_id)?;
+    let claimed = parse_review_id(&review_id)?;
     let thread = parse_thread_id(&thread_id)?;
-    let note = blocking_post(state, move |core| core.reply_to_thread(thread, &body)).await?;
+    let (id, note) = blocking_post(state, move |core| {
+        let id = core.thread_review(thread)?;
+        check_thread_review(claimed, id)?;
+        Ok((id, core.reply_to_thread(thread, &body)?))
+    })
+    .await?;
     events::emit_changed(&app, id);
     Ok(note)
+}
+
+fn check_thread_review(claimed: ReviewId, actual: ReviewId) -> Result<(), argus_core::PostError> {
+    if claimed == actual {
+        Ok(())
+    } else {
+        Err(argus_core::PostError::new(
+            PostErrorKind::InvalidInput,
+            "the thread is not on this review",
+        ))
+    }
 }
 
 /// Approve a review, pinned to `head_sha` (the head the user confirmed);
@@ -59,7 +92,9 @@ pub async fn approve_review(
     head_sha: String,
 ) -> Result<ReviewRecord, IpcError> {
     let id = parse_review_id(&review_id)?;
-    let record = blocking_post(state, move |core| core.approve_review(id, &head_sha)).await?;
+    let record = blocking_post(state, move |core| core.approve_review(id, &head_sha)).await;
+    emit_if_head_moved(&app, id, &record);
+    let record = record?;
     events::emit_changed(&app, record.id);
     Ok(record)
 }
@@ -89,6 +124,15 @@ mod tests {
         let err = parse_thread_id("../4001").unwrap_err();
         assert_eq!(err.kind, "invalidInput");
         assert!(!err.message.contains("4001"));
+    }
+
+    #[test]
+    fn a_reply_names_the_threads_own_review() {
+        let a = argus_core::ReviewId::from_key("github|github.com|acme-fixture/widgets|12");
+        let b = argus_core::ReviewId::from_key("github|github.com|acme-fixture/widgets|13");
+        assert!(check_thread_review(a, a).is_ok());
+        let err = IpcError::from(check_thread_review(a, b).unwrap_err());
+        assert_eq!(err.kind, "invalidInput");
     }
 
     #[test]

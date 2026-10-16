@@ -30,7 +30,7 @@ pub(crate) async fn blocking<T: Send + 'static>(
     let core = Arc::clone(&state.core);
     tauri::async_runtime::spawn_blocking(move || f(&core))
         .await
-        .map_err(|e| IpcError::new("io", format!("background task failed: {e}")))?
+        .map_err(join_failed)?
         .map_err(IpcError::from)
 }
 
@@ -42,8 +42,16 @@ pub(crate) async fn blocking_post<T: Send + 'static>(
     let core = Arc::clone(&state.core);
     tauri::async_runtime::spawn_blocking(move || f(&core))
         .await
-        .map_err(|e| IpcError::new("io", format!("background task failed: {e}")))?
+        .map_err(join_failed)?
         .map_err(IpcError::from)
+}
+
+/// A blocking task that panicked (or was cancelled). Its `Display` carries
+/// the panic message, which is not app-owned text: it stays in the log at
+/// `DEBUG`, and the webview gets a fixed message of kind `internal`.
+fn join_failed(e: impl std::fmt::Display) -> IpcError {
+    tracing::debug!("a background task failed: {e}");
+    IpcError::new("internal", "Something went wrong inside Argus; try again.")
 }
 
 /// Ids arrive as plain UUID strings; a malformed one is an IPC-layer input
@@ -66,6 +74,14 @@ pub(crate) fn parse_thread_id(raw: &str) -> Result<ThreadId, IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_task_never_shows_its_panic_message() {
+        let err = join_failed("panicked at 'token ghp_fixture in a path'");
+        assert_eq!(err.kind, "internal");
+        assert!(!err.message.contains("ghp_fixture"));
+        assert!(!err.message.contains("panicked"));
+    }
 
     #[test]
     fn parses_review_ids() {
