@@ -70,7 +70,7 @@ sibling app Iris (`../Iris`).
     stream mode). Suggestions: `lib/suggestions` (pure: GitHub
     `suggestion` = start_line..line, GitLab `suggestion:-N+M`; original
     lines from `file_contents` at the anchor's commit, else `diff_hunk`)
-    rendered by `SuggestedChange`; never applied. The gutter "+" is the disabled M4 comment hook. Core: `fetch_files`
+    rendered by `SuggestedChange`; never applied. Core: `fetch_files`
     (`DiffRange::Review` / `Compare`) per provider; left side = GitHub merge
     base (compare API), GitLab latest version `base_sha`; since-last-review
     = GitHub `compare/last...head` (left: its merge base), GitLab
@@ -78,6 +78,28 @@ sibling app Iris (`../Iris`).
     (migration 2), keyed path + `content_sha` (GitHub blob sha, GitLab diff
     digest) of the review's own diff. Keys `nextFile`/`prevFile`/
     `toggleViewed` (scope `files`).
+- ✅ **Milestone 4 — Posting.** Core `post/`: `post_comments` (one by one,
+  a result per comment in order, moved to the platform's current head),
+  `reply_to_thread`, `approve_review` (pinned to the head the user saw:
+  GitHub review `commit_id`, GitLab approve `sha`; `headMoved` when the
+  stored or platform head differs) and `commentable_lines` (per hunk;
+  cached per review + stored head). `PostError { kind, message }` → `IpcError`
+  by `kind.as_str()`; new kinds `postRejected`, `lineNotInDiff`,
+  `headMoved`. Shell `commands/post.rs` emits `review:changed` after every
+  successful write. Only these four commands write, each from a button or
+  shortcut handler; nothing auto-posts.
+  - UI: `DiffEditor` takes `items` (blocks under lines besides threads) and
+    `comment` (`CommentGutter`: "+" on commentable lines per side, click /
+    shift-click / drag, selection + focused-line decorations); the unified
+    view comments on new-side lines only. `FileDiffCard` loads the lines
+    (`commentStore.loadCommentable`) and places the composer and drafts.
+    `commentStore`: drafts per review (localStorage `argus.drafts.v1.<id>`),
+    the one composer, reply composers, the focused line; `CommentComposer`
+    (textarea + Preview via `Markdown`) and `CommentBlocks`
+    (`InlineComposer`, `DraftBlock`, `ReplyComposer`). Header: pending
+    count + Post all, Approve… with `ApproveModal`. Keys `commentLine`
+    (`files`), `submitComment` / `cancelComment` (new `composer` scope;
+    Escape is `fixed`). Ranges: `lib/commentRanges` (one hunk).
   - Next: M3 (then/now thread history; the thread card's "Then/now
     history" toggle expands the `data-slot="then-now"` placeholder).
 
@@ -93,9 +115,9 @@ crates/argus-core/   # ALL domain logic; zero Tauri dependency (plain cargo test
   tests/             # integration tests over the public API
 src-tauri/           # thin IPC adapter: (de)serialize and forward, nothing else
   src/state.rs       # AppState: Arc<Core> + last RefreshReport
-  src/error.rs       # IpcError { kind, message } ← CoreError
+  src/error.rs       # IpcError { kind, message } ← CoreError / PostError
   src/events.rs      # review:changed / reviews:refreshed emission
-  src/commands/      # review, thread, files, settings, provider shims
+  src/commands/      # review, thread, files, post, settings, provider shims
 src/                 # React (presentation only)
   ipc/types.ts       # hand-written wire types (mirror the serde derives)
   ipc/commands.ts    # typed invoke() wrappers
@@ -106,7 +128,8 @@ src/                 # React (presentation only)
 
 `argus-core` modules: `provider/` (GitLab/GitHub clients, provider status),
 `review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
-code view's file list + viewed marks). Planned (create
+code view's file list + viewed marks), `post/` (comments, replies,
+approvals; the only writes, explicit only). Planned (create
 them when their milestone starts): `history/`, `ai/`.
 
 ### IPC contract
@@ -126,6 +149,8 @@ After every refresh (poll or `refresh_reviews`) the shell emits
 `review:changed { reviewId }` per changed review, then one
 `reviews:refreshed` with the `RefreshReport` (time + per-provider errors).
 `last_refresh` returns the latest report for a webview that subscribed late.
+After a successful post, reply or approval the shell emits
+`review:changed` for that review too.
 
 ### Frontend
 

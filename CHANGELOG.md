@@ -47,7 +47,23 @@ when it merges.
   round reviewed. Binary files and very large diffs stay folded ("Load
   anyway"), and files load as you scroll to them. `j`/`k` move through the
   Conversation and the files, `v` marks the selected file viewed.
-  Commenting from a line comes in a later release.
+- Commenting from the diff: hover a line to see its `+` (only on lines the
+  platform accepts a comment on), click it to write a comment under the
+  line, or shift-click or drag to comment on a range. The comment box takes
+  markdown and has a Preview. "Add to review" keeps it as a pending comment
+  (shown under its line, editable and deletable, and kept when Argus
+  restarts); "Comment now" posts just that one. The review header counts
+  your pending comments with "Post all": what posts becomes a normal
+  thread, and a comment the platform refuses stays pending with its reason,
+  ready to edit and retry, without holding up the rest. Nothing is ever
+  posted until you press a button.
+- Replying: every thread has a Reply button with the same comment box. If
+  the platform refuses, the reason shows and your text stays.
+- Approving: an Approve button in the review header, separate from posting,
+  asks first and names the commit you are approving. If the review got new
+  commits since you looked, the approval is refused so nothing unseen gets
+  approved; pending comments are not posted with it (the dialog says how
+  many). An approved review leaves the lists. Argus never merges.
 - Comments render as markdown: headings, lists, task lists, tables, quotes,
   links (they open in your browser) and code blocks highlighted by language
   (jq included) with a copy button. Images show as links; HTML in a comment
@@ -71,9 +87,10 @@ when it merges.
   repository), and Shortcuts. Switches apply at once, text fields have their
   own Save.
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` (or
-  `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in a review,
-  `⌘,` for Settings. Every shortcut
-  can be rebound in Settings → Shortcuts.
+  `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in a review, `c` to
+  comment on the line you last clicked, `⌘↩` to submit a comment and `Esc`
+  to cancel it, `⌘,` for Settings. Every shortcut except `Esc` can be
+  rebound in Settings → Shortcuts.
 
 ## [0.1.0] - 2026-10-16
 
