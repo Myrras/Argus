@@ -27,7 +27,8 @@ fn fixtures() -> PathBuf {
 /// blank line, the body. Each fixture's ETag is `"fx-<file name>"`; a
 /// request naming it gets a 304 (logged as `304 <path>`), as GitHub answers
 /// an unchanged resource. Pages link to the next through `Link`. A
-/// `graphql-down` file next to the log makes GraphQL fail.
+/// `graphql-down` file next to the log makes GraphQL fail, a
+/// `compare-down` file every compare (a PR too large to compare).
 const FAKE: &str = r##"
 echo "$* token=${GH_TOKEN:-none} ent=${GH_ENTERPRISE_TOKEN:-none} host=${GH_HOST:-none}" >> "$LOG"
 case "$*" in
@@ -59,6 +60,13 @@ while [ $# -gt 0 ]; do
     *) path="$1"; shift ;;
   esac
 done
+case "$path" in
+  */compare/*)
+    if [ -e "${LOG%/*}/compare-down" ]; then
+      printf 'HTTP/2.0 500 Internal Server Error\r\n\r\n{"message":"Server Error"}'
+      echo "gh: HTTP 500" >&2; exit 1
+    fi ;;
+esac
 # respond FILE [NEXT-PAGE-QUERY]
 respond() {
   tag="\"fx-${1##*/}\""
@@ -807,4 +815,25 @@ fn the_review_diff_names_the_head_it_was_taken_at() {
     assert!(fake.calls().contains(&format!(
         "repos/acme-fixture/widgets/compare/{BASE}...{HEAD}"
     )));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_pr_too_large_to_compare_still_lists_its_files() {
+    let fake = script(FAKE);
+    std::fs::write(fake.log.parent().unwrap().join("compare-down"), "").unwrap();
+    let gh = fake.provider("github.com", None);
+    let diff = gh
+        .fetch_files(
+            &widgets_12(),
+            &DiffRange::Review {
+                base: BASE.into(),
+                head: HEAD.into(),
+            },
+        )
+        .unwrap();
+    // No merge base to be had: the PR's base stands in for it.
+    assert_eq!(diff.base_sha, BASE);
+    assert_eq!(diff.head_sha, HEAD);
+    assert_eq!(diff.files.len(), 6);
 }

@@ -501,7 +501,8 @@ impl GithubProvider {
     ///
     /// The files are diffed from the merge base (three-dot), not from the
     /// base branch tip the PR reports: the compare API of the PR's own base
-    /// and head names that commit.
+    /// and head names that commit. When GitHub cannot compare (a PR too
+    /// large for it), the PR's base commit stands in.
     fn review_diff(&self, r: &ReviewRef) -> CoreResult<FileDiff> {
         let pull_path = format!("repos/{}/pulls/{}", r.repo, r.number);
         for _ in 0..2 {
@@ -520,8 +521,23 @@ impl GithubProvider {
                 (join(a), join(b))
             });
             let files = files?;
-            let merge_base = merge_base?.body.trim().to_string();
-            check_sha(&merge_base).map_err(|_| unexpected())?;
+            let merge_base = match merge_base {
+                Ok(page) => {
+                    let sha = page.body.trim().to_string();
+                    check_sha(&sha).map_err(|_| unexpected())?;
+                    sha
+                }
+                // GitHub gives up comparing a very large PR (a server
+                // error or a timeout) while its files still list. The
+                // base branch commit the PR reports is the closest left
+                // side then: the merge base itself while the branch is
+                // up to date with its base.
+                Err(e @ CoreError::Provider(_)) if !super::is_rate_limited(&e) => {
+                    tracing::debug!("no merge base for a large PR; using its base commit");
+                    base.clone()
+                }
+                Err(e) => return Err(e),
+            };
             let after: GhPull = self.api(&pull_path)?;
             if after.head.sha != head {
                 continue;
