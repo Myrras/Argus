@@ -964,8 +964,11 @@ fn changed_file(f: GhFile) -> ChangedFile {
         _ => FileStatus::Modified,
     };
     let no_patch = f.patch.is_none();
+    // Only a "modified" file with no patch and no lines is a binary by
+    // that alone: "changed" (a mode change), "copied" and "unchanged" also
+    // map to Modified and send no patch, but have no content change.
     let binary =
-        no_patch && f.changes == 0 && (status == FileStatus::Modified || looks_binary(&f.filename));
+        no_patch && f.changes == 0 && (f.status == "modified" || looks_binary(&f.filename));
     ChangedFile {
         old_path: f
             .previous_filename
@@ -1533,6 +1536,30 @@ struct GhCommitDiff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mode_only_change_is_not_a_binary() {
+        let file = |status: &str, name: &str| GhFile {
+            filename: name.into(),
+            status: status.into(),
+            sha: Some("f1".repeat(20)),
+            additions: 0,
+            deletions: 0,
+            changes: 0,
+            patch: None,
+            previous_filename: None,
+        };
+        // chmod +x: status "changed", no patch, no lines.
+        let chmod = changed_file(file("changed", "scripts/run.sh"));
+        assert!(!chmod.binary && !chmod.too_large);
+        assert_eq!(chmod.status, FileStatus::Modified);
+        // A pure rename or copy is no binary either.
+        assert!(!changed_file(file("copied", "src/a.rs")).binary);
+        // A modified file without a patch or lines is.
+        assert!(changed_file(file("modified", "assets/blob")).binary);
+        // A binary type whatever the status.
+        assert!(changed_file(file("changed", "assets/logo.png")).binary);
+    }
 
     #[test]
     fn parses_concatenated_pages() {
