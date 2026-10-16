@@ -20,7 +20,15 @@
  * not in the diff shown; dismissed ones only with "Show dismissed".
  */
 
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  memo,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type {
   CommentableLines,
@@ -82,16 +90,21 @@ function lineCount(text: string): number {
   return n;
 }
 
-export function FileDiffCard({
+/**
+ * Memoized: every prop is stable while nothing about the file changes (the
+ * callbacks take the path), so a review page re-rendering (the clock, a
+ * selection elsewhere) skips the cards. Ages tick inside the thread cards
+ * (`useNow`).
+ */
+export const FileDiffCard = memo(function FileDiffCard({
   review,
   file: f,
   threads,
   provider,
   layout,
   selected,
-  now,
-  onSelect,
-  onToggleViewed,
+  onSelect: select,
+  onToggleViewed: toggleViewed,
   cardRef,
 }: {
   review: ReviewFiles;
@@ -100,11 +113,12 @@ export function FileDiffCard({
   provider: ProviderId;
   layout: DiffLayout;
   selected: boolean;
-  now: number;
-  onSelect: () => void;
-  onToggleViewed: () => void;
-  cardRef: (el: HTMLElement | null) => void;
+  onSelect: (path: string) => void;
+  onToggleViewed: (file: FileEntry) => void;
+  cardRef: (path: string, el: HTMLElement | null) => void;
 }) {
+  const onSelect = () => select(f.path);
+  const onToggleViewed = () => toggleViewed(f);
   const [collapsed, setCollapsed] = useState(f.viewed);
   const [forced, setForced] = useState(false);
   const [near, setNear] = useState(false);
@@ -146,7 +160,12 @@ export function FileDiffCard({
       (entries) => {
         if (entries.some((e) => e.isIntersecting)) setNear(true);
       },
-      { rootMargin: "600px 0px" },
+      // The page's own scroller: against the window, the margin would be
+      // clipped by the scroller's overflow and count nothing below it.
+      {
+        root: el.closest<HTMLElement>('[data-slot="diff"]'),
+        rootMargin: "600px 0px",
+      },
     );
     io.observe(el);
     return () => io.disconnect();
@@ -438,14 +457,14 @@ export function FileDiffCard({
   );
 
   const renderThread = (t: StoredThread, onResize: () => void) => (
-    <ThreadBlock thread={t} provider={provider} now={now} onResize={onResize} />
+    <ThreadBlock thread={t} provider={provider} onResize={onResize} />
   );
 
   return (
     <section
       ref={(el) => {
         root.current = el;
-        cardRef(el);
+        cardRef(f.path, el);
       }}
       className={styles.card}
       data-selected={selected}
@@ -508,12 +527,7 @@ export function FileDiffCard({
                 </span>
               </h3>
               {placed.outdated.map((t) => (
-                <ListedThread
-                  key={t.threadId}
-                  thread={t}
-                  provider={provider}
-                  now={now}
-                />
+                <ListedThread key={t.threadId} thread={t} provider={provider} />
               ))}
             </div>
           )}
@@ -555,12 +569,7 @@ export function FileDiffCard({
                 <span className={styles.listedCount}>{listed.length}</span>
               </h3>
               {listed.map((t) => (
-                <ListedThread
-                  key={t.threadId}
-                  thread={t}
-                  provider={provider}
-                  now={now}
-                />
+                <ListedThread key={t.threadId} thread={t} provider={provider} />
               ))}
             </div>
           )}
@@ -611,7 +620,7 @@ export function FileDiffCard({
       )}
     </section>
   );
-}
+});
 
 /** The platform's patch as plain lines: the fallback when contents fail. */
 function PatchView({ patch }: { patch: string }) {

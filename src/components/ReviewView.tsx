@@ -14,7 +14,7 @@
  *   n/p the threads and findings (`focusStore`, `usePageFocus`).
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { FileEntry, ReviewRecord, StoredThread } from "../ipc/types";
 import {
@@ -130,12 +130,20 @@ export function ReviewView({
     select(r.id, path);
   };
   const total = files?.files.length ?? 0;
-  const toggleViewed = (f: FileEntry) =>
-    void setViewed(r.id, f.path, !f.viewed);
-  const cardRef = (key: string) => (el: HTMLElement | null) => {
+  // Stable, so the memoized file cards skip re-renders of the page.
+  const toggleViewed = useCallback(
+    (f: FileEntry) => void setViewed(r.id, f.path, !f.viewed),
+    [r.id, setViewed],
+  );
+  const selectFile = useCallback(
+    (path: string) => select(r.id, path),
+    [r.id, select],
+  );
+  const setCard = useCallback((key: string, el: HTMLElement | null) => {
     if (el) cards.current.set(key, el);
     else cards.current.delete(key);
-  };
+  }, []);
+  const cardRef = (key: string) => (el: HTMLElement | null) => setCard(key, el);
   const conversationEntry = {
     count: talkCount,
     selected: selected === CONVERSATION,
@@ -304,10 +312,9 @@ export function ReviewView({
                 provider={r.provider}
                 layout={layout}
                 selected={selected === f.path}
-                now={now}
-                onSelect={() => select(r.id, f.path)}
-                onToggleViewed={() => toggleViewed(f)}
-                cardRef={cardRef(f.path)}
+                onSelect={selectFile}
+                onToggleViewed={toggleViewed}
+                cardRef={setCard}
               />
             ))
           )}

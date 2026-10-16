@@ -1,11 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
-/** The current time in ms, re-read every `intervalMs` (relative ages). */
-export function useNow(intervalMs = 30_000): number {
-  const [now, setNow] = useState(() => Date.now());
+import { useNowStore } from "../state/nowStore";
+
+/** The current time in ms (`nowStore`), re-read on the window's clock tick. */
+export function useNow(): number {
+  return useNowStore((s) => s.now);
+}
+
+/** Tick the window's clock every `intervalMs` (once, in `App`). */
+export function useNowTicker(intervalMs = 30_000): void {
   useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    useNowStore.setState({ now: Date.now() });
+    const id = setInterval(
+      () => useNowStore.setState({ now: Date.now() }),
+      intervalMs,
+    );
     return () => clearInterval(id);
   }, [intervalMs]);
-  return now;
 }

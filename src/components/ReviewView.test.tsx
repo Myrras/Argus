@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -14,6 +15,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 }));
 // CodeMirror needs a real layout engine; the wrapper is smoke-tested on its
 // own. The stub shows what it was given.
+const stubRenders = vi.hoisted(() => ({ count: 0 }));
 vi.mock("./DiffEditor", () => ({
   DiffEditor: (p: {
     path: string;
@@ -28,6 +30,7 @@ vi.mock("./DiffEditor", () => ({
     } | null;
   }) => (
     <>
+      {void (stubRenders.count += 1)}
       <div
         data-testid={`editor-${p.path}`}
         data-layout={p.layout}
@@ -61,7 +64,9 @@ import {
   CONVERSATION,
   useCodeViewStore,
 } from "../state/codeViewStore";
+import { useHistoryStore } from "../state/historyStore";
 import { useLayoutStore } from "../state/layoutStore";
+import { useNowStore } from "../state/nowStore";
 import { useReviewStore } from "../state/reviewStore";
 import { clearCommentableCache, useCommentStore } from "../state/commentStore";
 import { useThreadStore } from "../state/threadStore";
@@ -639,6 +644,43 @@ describe("ReviewView", () => {
         await within(c).findByText("Threads on this file"),
       ).toBeInTheDocument();
       expect(within(c).getByText(author)).toBeInTheDocument();
+    }
+  });
+  it("the clock's tick re-renders no file card; thread ages still move", async () => {
+    useNowStore.setState({ now: NOW });
+    useHistoryStore.setState({ open: { [threads[2].threadId]: true } });
+    const { rerender } = render(<ReviewView review={r} now={NOW} />);
+    await screen.findByTestId("editor-src/cache.rs");
+    await screen.findByTestId("editor-src/widget.rs");
+    const before = stubRenders.count;
+    rerender(<ReviewView review={r} now={NOW + 60_000} />);
+    rerender(<ReviewView review={r} now={NOW + 120_000} />);
+    expect(stubRenders.count).toBe(before);
+    // The outdated thread on src/widget.rs, listed at the top of its card.
+    const widget = card("src/widget.rs");
+    expect(within(widget).getByText("2d")).toBeInTheDocument();
+    act(() => useNowStore.setState({ now: NOW + 7 * 86_400_000 }));
+    expect(within(widget).getByText("1w")).toBeInTheDocument();
+    useHistoryStore.setState({ open: {} });
+  });
+
+  it("watches the cards against the page's own scroller", async () => {
+    const roots: (Element | Document | null | undefined)[] = [];
+    class FakeObserver {
+      constructor(_cb: unknown, opts?: IntersectionObserverInit) {
+        roots.push(opts?.root);
+      }
+      observe() {}
+      disconnect() {}
+    }
+    vi.stubGlobal("IntersectionObserver", FakeObserver);
+    try {
+      const { container } = render(<ReviewView review={r} now={NOW} />);
+      await waitFor(() => expect(roots.length).toBeGreaterThan(0));
+      const scroller = container.querySelector('[data-slot="diff"]');
+      expect(roots.every((root) => root === scroller)).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

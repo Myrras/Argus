@@ -20,7 +20,7 @@ import { isMac, isWindows } from "./lib/platform";
 import { ago, fullTime } from "./lib/time";
 import { useAppShortcuts } from "./lib/useAppShortcuts";
 import { useKeymap } from "./lib/useKeymap";
-import { useNow } from "./lib/useNow";
+import { useNow, useNowTicker } from "./lib/useNow";
 import {
   subscribeBackendSettingsEvents,
   useBackendSettingsStore,
@@ -49,6 +49,7 @@ export default function App() {
   const report = useReviewStore((s) => s.lastRefresh);
   const refresh = useReviewStore((s) => s.refresh);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  useNowTicker();
   const now = useNow();
   const keymap = useKeymap();
 

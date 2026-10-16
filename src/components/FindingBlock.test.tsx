@@ -141,7 +141,6 @@ function renderCard() {
       provider="github"
       layout="unified"
       selected
-      now={Date.parse("2026-10-16T12:00:00Z")}
       onSelect={() => undefined}
       onToggleViewed={() => undefined}
       cardRef={() => undefined}

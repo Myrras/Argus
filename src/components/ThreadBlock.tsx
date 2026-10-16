@@ -33,6 +33,7 @@ import {
   threadOpen,
   useHistoryStore,
 } from "../state/historyStore";
+import { useNow } from "../lib/useNow";
 import { useThreadHistory } from "../lib/useThreadHistory";
 import { threadDescription } from "../lib/focusModel";
 import { useThreadFocus } from "../state/focusStore";
@@ -53,14 +54,17 @@ function preview(t: StoredThread): string {
 export function ThreadBlock({
   thread: t,
   provider,
-  now,
+  now: fixedNow,
   onResize,
 }: {
   thread: StoredThread;
   provider: ProviderId;
-  now: number;
+  /** The time ages count from; the window's clock (`useNow`) by default. */
+  now?: number;
   onResize?: () => void;
 }) {
+  const clock = useNow();
+  const now = fixedNow ?? clock;
   // In the store, not local state: the card may be rebuilt with its widget.
   const open = useHistoryStore((s) => threadOpen(s.open, t));
   const storeOpen = useHistoryStore((s) => s.setOpen);
@@ -232,7 +236,8 @@ export function ListedThread({
 }: {
   thread: StoredThread;
   provider: ProviderId;
-  now: number;
+  /** The time ages count from; the window's clock by default. */
+  now?: number;
 }) {
   const a = t.anchor;
   const sha = a?.headSha ? a.headSha.slice(0, 8) : null;
