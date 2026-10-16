@@ -569,3 +569,28 @@ fn a_partial_clone_never_fetches_and_never_guesses() {
     assert!(clone.commit_diff(&shas[1]).is_err());
     assert_eq!(objects(), before, "nothing was fetched");
 }
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_clone_made_partial_since_it_was_checked_is_checked_again() {
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    fx.commit("a.txt", "a\n", "c1");
+    let git = git_binary().unwrap().path.clone();
+    // An old git (before GIT_NO_LAZY_FETCH): a full clone is fine...
+    let old = (2, 40);
+    assert!(LocalClone::open_with(&git, old, &fx.path, TIMEOUT).is_some());
+    // ...then the directory becomes a partial clone (re-cloned with a
+    // filter, here its config marked so): such a git could fetch.
+    git_in(&fx.path, &["config", "extensions.partialClone", "origin"]);
+    let config = std::fs::File::options()
+        .write(true)
+        .open(fx.path.join(".git/config"))
+        .unwrap();
+    // A different mtime even on a filesystem with coarse timestamps.
+    config
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
+        .unwrap();
+    assert!(LocalClone::open_with(&git, old, &fx.path, TIMEOUT).is_none());
+}
