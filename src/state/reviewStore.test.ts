@@ -156,4 +156,27 @@ describe("reviewStore", () => {
     s.moveCursor(1);
     expect(useReviewStore.getState().cursorId).toBe(c.id);
   });
+  it("keeps the newest list when an older read answers last", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));
+    const older = useReviewStore.getState().reloadList();
+    const newer = useReviewStore.getState().reloadList();
+    answers[1]([b]);
+    await newer;
+    answers[0]([a]);
+    await older;
+    expect(useReviewStore.getState().reviews).toEqual([b]);
+  });
+
+  it("keeps the newest record when an older read of it answers last", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));
+    const older = useReviewStore.getState().applyChanged(a.id);
+    const newer = useReviewStore.getState().applyChanged(a.id);
+    answers[1]({ ...a, title: "A, renamed" });
+    await newer;
+    answers[0](a);
+    await older;
+    expect(useReviewStore.getState().reviews[0].title).toBe("A, renamed");
+  });
 });

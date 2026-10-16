@@ -17,6 +17,7 @@ import {
 } from "../ipc/commands";
 import { onReviewChanged } from "../ipc/events";
 import type { IpcError, ReviewFiles, ReviewId } from "../ipc/types";
+import { latestOnly } from "../lib/latest";
 
 /**
  * The Conversation section's key in `selected` / `order`: the first stop of
@@ -60,6 +61,8 @@ const EMPTY: ReviewCode = {
   order: [],
 };
 
+const reads = latestOnly<ReviewId>();
+
 export const useCodeViewStore = create<CodeViewState>((set, get) => {
   const patch = (id: ReviewId, p: Partial<ReviewCode>) =>
     set((s) => ({
@@ -75,14 +78,15 @@ export const useCodeViewStore = create<CodeViewState>((set, get) => {
 
     load: async (id, since) => {
       const mode = since ?? entry(id).since;
+      // A newer read (another mode, or a re-read at a newer head) wins.
+      const current = reads.begin(id);
       patch(id, { since: mode, loading: true });
       try {
         const files = await listFiles(id, mode);
-        // A mode switch while this was in flight wins.
-        if (entry(id).since !== mode) return;
+        if (!current()) return;
         patch(id, { files, loading: false, error: null });
       } catch (e) {
-        if (entry(id).since !== mode) return;
+        if (!current()) return;
         patch(id, { loading: false, error: toIpcError(e) });
       }
     },

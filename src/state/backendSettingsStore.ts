@@ -5,7 +5,9 @@
  * sidebar's Providers section (Iris's `backendSettingsStore`).
  *
  * `load` re-reads them (on start); `save` writes a patch over what is stored
- * and keeps what the core stored (it normalizes). The GitLab token is
+ * and keeps what the core stored (it normalizes). Saves run one at a time,
+ * each over the last one's result, and show at once (a stepper clicked
+ * three times saves all three steps). The GitLab token is
  * write-only from here: `setGitlabToken` hands it to `set_gitlab_token` and
  * nowhere else (never into `Settings`), and only whether one is stored ever
  * comes back. Failures are error toasts. UI-only preferences live in
@@ -44,6 +46,15 @@ interface BackendSettingsState {
   setGitlabToken: (token: string) => Promise<boolean>;
 }
 
+/** The running saves, in order, and their patches not yet stored. */
+let saving: Promise<unknown> = Promise.resolve();
+const queued: Partial<Settings>[] = [];
+
+/** `base` with the patches still waiting on top (what the user sees). */
+function withQueued(base: Settings): Settings {
+  return Object.assign({ ...base }, ...queued) as Settings;
+}
+
 export const useBackendSettingsStore = create<BackendSettingsState>(
   (set, get) => ({
     settings: null,
@@ -71,18 +82,33 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
       }
     },
 
-    save: async (patch) => {
-      const current = get().settings;
-      if (!current) return false;
-      try {
-        set({ settings: await updateSettings({ ...current, ...patch }) });
-      } catch (e) {
-        toastError("Could not save the settings", toIpcError(e).message);
-        await get().load();
-        return false;
-      }
-      await get().refreshStatus();
-      return true;
+    save: (patch) => {
+      if (!get().settings) return Promise.resolve(false);
+      queued.push(patch);
+      set((s) => ({ settings: s.settings && { ...s.settings, ...patch } }));
+      const run = async (): Promise<boolean> => {
+        // Built from the previous save's result, not from what the store
+        // held when this one was asked for.
+        const current = get().settings;
+        try {
+          if (!current) throw new Error("The settings are not loaded.");
+          const stored = await updateSettings({ ...current, ...patch });
+          queued.shift();
+          set({ settings: withQueued(stored) });
+        } catch (e) {
+          queued.shift();
+          toastError("Could not save the settings", toIpcError(e).message);
+          await get().load();
+          const loaded = get().settings;
+          if (loaded) set({ settings: withQueued(loaded) });
+          return false;
+        }
+        await get().refreshStatus();
+        return true;
+      };
+      const p = saving.then(run);
+      saving = p.catch(() => undefined);
+      return p;
     },
 
     setGitlabToken: async (token) => {

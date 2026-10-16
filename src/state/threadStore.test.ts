@@ -78,4 +78,20 @@ describe("threadStore", () => {
       error: { kind: "notFound", message: "not found" },
     });
   });
+  it("keeps the newest read when an older one answers last", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));
+    const older = useThreadStore.getState().load(OPEN);
+    const newer = useThreadStore.getState().load(OPEN);
+    const fresh = thread({ reviewId: OPEN, threadId: "fresh" });
+    answers[1]([fresh]);
+    await newer;
+    answers[0]([thread({ reviewId: OPEN, threadId: "stale" })]);
+    await older;
+    expect(useThreadStore.getState().byReview[OPEN]).toEqual({
+      threads: [fresh],
+      loading: false,
+      error: null,
+    });
+  });
 });

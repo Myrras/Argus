@@ -52,6 +52,7 @@ import {
   postable,
   sortFindings,
 } from "../lib/findings";
+import { latestOnly } from "../lib/latest";
 import { openExternal } from "../lib/links";
 import { useBackendSettingsStore } from "./backendSettingsStore";
 import { useReviewStore } from "./reviewStore";
@@ -157,6 +158,8 @@ const EMPTY: ReviewAi = {
 };
 
 let revealSeq = 0;
+/** Only the newest output read of a review applies its answer. */
+const outputReads = latestOnly<ReviewId>();
 
 export const useAiStore = create<AiStoreState>((set, get) => {
   const patchReview = (id: ReviewId, p: Partial<ReviewAi>) =>
@@ -196,6 +199,7 @@ export const useAiStore = create<AiStoreState>((set, get) => {
     },
 
     reloadOutput: async (id) => {
+      const current = outputReads.begin(id);
       patchReview(id, { loading: true });
       try {
         const [findings, checklist, verdicts] = await Promise.all([
@@ -203,6 +207,7 @@ export const useAiStore = create<AiStoreState>((set, get) => {
           listChecklist(id),
           listVerdicts(id),
         ]);
+        if (!current()) return;
         patchReview(id, {
           findings: findings ?? [],
           checklist: checklist ?? [],
@@ -211,6 +216,7 @@ export const useAiStore = create<AiStoreState>((set, get) => {
           error: null,
         });
       } catch (e) {
+        if (!current()) return;
         patchReview(id, { loading: false, error: toIpcError(e) });
       }
     },

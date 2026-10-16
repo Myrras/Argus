@@ -347,4 +347,19 @@ describe("aiStore", () => {
     });
     expect(ui[low.id]).toMatchObject({ selected: true, editor: "  " });
   });
+  it("keeps the newest output when an older read answers last", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "list_findings"
+        ? new Promise<unknown>((r) => answers.push(r))
+        : backend(cmd, args)) as typeof invoke);
+    const older = useAiStore.getState().reloadOutput(ID);
+    const newer = useAiStore.getState().reloadOutput(ID);
+    const [fresh, stale] = findings;
+    answers[1]([fresh]);
+    await newer;
+    answers[0]([stale]);
+    await older;
+    expect(useAiStore.getState().byReview[ID]?.findings).toEqual([fresh]);
+  });
 });

@@ -28,6 +28,7 @@ import type {
   ReviewId,
   ReviewRecord,
 } from "../ipc/types";
+import { latestOnly } from "../lib/latest";
 import { reviewRef, reviewsInTab, type ReviewTab } from "../lib/reviews";
 import { toastError, toastSuccess } from "./toastStore";
 
@@ -71,6 +72,13 @@ interface ReviewStoreState {
   applyRefreshed: (report: RefreshReport) => Promise<void>;
 }
 
+/**
+ * Reads can answer out of order: only the newest read of the list (`LIST`)
+ * or of one review applies its answer.
+ */
+const reads = latestOnly<string>();
+const LIST = "\u0000list";
+
 export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   reviews: [],
   loaded: false,
@@ -83,11 +91,19 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   lastRefresh: null,
 
   load: async () => {
+    const current = reads.begin(LIST);
     try {
       const [reviews, report] = await Promise.all([
         listReviews(),
         lastRefresh(),
       ]);
+      if (!current()) {
+        set((s) => ({
+          loaded: true,
+          lastRefresh: newer(s.lastRefresh, report),
+        }));
+        return;
+      }
       set((s) => ({
         reviews,
         loaded: true,
@@ -101,8 +117,10 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   },
 
   reloadList: async () => {
+    const current = reads.begin(LIST);
     try {
-      set({ reviews: await listReviews(), loaded: true });
+      const reviews = await listReviews();
+      if (current()) set({ reviews, loaded: true });
     } catch (e) {
       toastError("Could not load the reviews", toIpcError(e).message);
     }
@@ -177,8 +195,10 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   },
 
   applyChanged: async (id) => {
+    const current = reads.begin(id);
     try {
       const record = await getReview(id);
+      if (!current()) return;
       set((s) => ({
         reviews: s.reviews.map((r) => (r.id === id ? record : r)),
       }));

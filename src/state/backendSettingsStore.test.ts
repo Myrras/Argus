@@ -134,4 +134,50 @@ describe("backendSettingsStore", () => {
     );
     off();
   });
+  it("runs overlapping saves one after another, each over the last", async () => {
+    backend(status(), false);
+    await useBackendSettingsStore.getState().load();
+    const answer = mockInvoke.getMockImplementation()!;
+    const sent: Settings[] = [];
+    const pending: (() => void)[] = [];
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd !== "update_settings") return answer(cmd, args as never);
+      const body = (args as { settings: Settings }).settings;
+      sent.push(body);
+      return new Promise((r) => pending.push(() => r(body)));
+    });
+    const store = useBackendSettingsStore.getState();
+    const first = store.save({ pollIntervalSecs: 240 });
+    // The stepper reads the store: the first click shows at once.
+    expect(useBackendSettingsStore.getState().settings?.pollIntervalSecs).toBe(
+      240,
+    );
+    const second = store.save({
+      pollIntervalSecs:
+        useBackendSettingsStore.getState().settings!.pollIntervalSecs + 60,
+    });
+    const third = store.save({
+      gitlab: { baseUrl: "https://gl.example.test" },
+    });
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    pending[0]();
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent[1].pollIntervalSecs).toBe(300);
+    pending[1]();
+    await vi.waitFor(() => expect(sent).toHaveLength(3));
+    pending[2]();
+    expect(await Promise.all([first, second, third])).toEqual([
+      true,
+      true,
+      true,
+    ]);
+    expect(sent[2]).toMatchObject({
+      pollIntervalSecs: 300,
+      gitlab: { baseUrl: "https://gl.example.test" },
+    });
+    expect(useBackendSettingsStore.getState().settings).toMatchObject({
+      pollIntervalSecs: 300,
+      gitlab: { baseUrl: "https://gl.example.test" },
+    });
+  });
 });

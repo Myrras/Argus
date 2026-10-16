@@ -1,6 +1,7 @@
 /**
  * Threads per review, loaded when a review is opened and re-read when the
- * backend reports that review changed.
+ * backend reports that review changed. Only the newest read of a review
+ * applies its answer.
  */
 
 import { create } from "zustand";
@@ -8,6 +9,7 @@ import { create } from "zustand";
 import { listThreads, toIpcError } from "../ipc/commands";
 import { onReviewChanged } from "../ipc/events";
 import type { IpcError, ReviewId, StoredThread } from "../ipc/types";
+import { latestOnly } from "../lib/latest";
 
 export interface ReviewThreads {
   threads: StoredThread[];
@@ -23,11 +25,13 @@ interface ThreadStoreState {
 }
 
 const EMPTY: ReviewThreads = { threads: [], loading: false, error: null };
+const reads = latestOnly<ReviewId>();
 
 export const useThreadStore = create<ThreadStoreState>((set, get) => ({
   byReview: {},
 
   load: async (id) => {
+    const current = reads.begin(id);
     set((s) => ({
       byReview: {
         ...s.byReview,
@@ -36,6 +40,7 @@ export const useThreadStore = create<ThreadStoreState>((set, get) => ({
     }));
     try {
       const threads = await listThreads(id);
+      if (!current()) return;
       set((s) => ({
         byReview: {
           ...s.byReview,
@@ -43,6 +48,7 @@ export const useThreadStore = create<ThreadStoreState>((set, get) => ({
         },
       }));
     } catch (e) {
+      if (!current()) return;
       set((s) => ({
         byReview: {
           ...s.byReview,
