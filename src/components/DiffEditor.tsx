@@ -4,10 +4,15 @@
  * side (`MergeView`, base left, head right). Read-only, syntax-highlighted
  * by file name, unchanged stretches collapsed (click to expand).
  *
- * Threads sit in block widgets under their line, each its own React root
+ * Threads sit in block widgets under their line, one React root per line
  * (`renderThread`); so do the caller's other line items (`items`: the open
  * composer, pending comments). A collapsed stretch holding one is expanded
- * up front so nothing hides.
+ * up front so nothing hides. A line's widget re-renders into its root when
+ * its blocks change (`updateDOM`), so a thread keeps its React state (an
+ * open reply, the focus) while notes arrive or blocks join its line; the
+ * root is unmounted with the widget's DOM. The blocks sit beside the gutter
+ * as wide as the visible part, from CSS variables the editor keeps current
+ * (`blockGeometry`).
  *
  * Commenting (`comment`): the gutter's "+" shows on the commentable lines
  * only (hover to see it). A click opens a comment on that line, shift-click
@@ -41,6 +46,8 @@ import {
   EditorView,
   gutter,
   GutterMarker,
+  ViewPlugin,
+  type ViewUpdate,
   WidgetType,
 } from "@codemirror/view";
 
@@ -77,46 +84,67 @@ interface Block {
   render: (onResize: () => void) => ReactNode;
 }
 
+/**
+ * Each widget DOM's React root and the block keys it shows. Keyed by the
+ * DOM, not the widget: CodeMirror hands a kept DOM to a new widget instance
+ * (`updateDOM`) and destroys whichever instance holds it last.
+ */
+const roots = new WeakMap<HTMLElement, { root: Root; keys: Set<string> }>();
+
 /** The blocks under one line. */
 class BlocksWidget extends WidgetType {
-  private root: Root | null = null;
-
   constructor(readonly blocks: readonly Block[]) {
     super();
   }
 
-  /** Same blocks in the same state: keep the DOM (and its open/closed). */
-  eq(other: BlocksWidget): boolean {
-    return key(other.blocks) === key(this.blocks);
+  /**
+   * Never equal: the blocks' render closures are new with every placement,
+   * so a kept DOM is always re-rendered (`updateDOM`) rather than left
+   * showing stale props.
+   */
+  eq(): boolean {
+    return false;
   }
 
   toDOM(view: EditorView): HTMLElement {
     const dom = document.createElement("div");
     dom.className = "cm-argusThreads";
-    // The content scrolls sideways under long lines; the threads stay put
-    // beside the gutter, as wide as the visible part.
-    const gutters = view.dom.querySelector<HTMLElement>(".cm-gutters");
-    const left = gutters?.offsetWidth ?? 0;
-    dom.style.left = `${left}px`;
-    dom.style.width = `${Math.max(240, view.scrollDOM.clientWidth - left - 8)}px`;
-    this.root = createRoot(dom);
+    roots.set(dom, { root: createRoot(dom), keys: new Set() });
+    this.show(dom, view);
+    return dom;
+  }
+
+  /**
+   * Re-render into a DOM that shows one of these blocks (React keeps their
+   * state by key); a DOM of other blocks is left for a fresh one.
+   */
+  updateDOM(dom: HTMLElement, view: EditorView): boolean {
+    const r = roots.get(dom);
+    if (!r || !this.blocks.some((b) => r.keys.has(b.key))) return false;
+    this.show(dom, view);
+    return true;
+  }
+
+  private show(dom: HTMLElement, view: EditorView) {
+    const r = roots.get(dom)!;
+    r.keys = new Set(this.blocks.map((b) => b.key));
     const resize = () => view.requestMeasure();
-    this.root.render(
+    r.root.render(
       <>
         {this.blocks.map((b) => (
           <div key={b.key}>{b.render(resize)}</div>
         ))}
       </>,
     );
-    return dom;
   }
 
-  destroy(): void {
-    const root = this.root;
-    this.root = null;
+  destroy(dom: HTMLElement): void {
+    const r = roots.get(dom);
+    if (!r) return;
+    roots.delete(dom);
     // Not during CodeMirror's own update (React warns on a sync unmount
     // inside another render).
-    if (root) queueMicrotask(() => root.unmount());
+    queueMicrotask(() => r.root.unmount());
   }
 
   /** Clicks and keys belong to the blocks' buttons and fields, not the editor. */
@@ -125,13 +153,46 @@ class BlocksWidget extends WidgetType {
   }
 }
 
-function key(blocks: readonly Block[]): string {
-  return blocks.map((b) => b.key).join("|");
+/** A thread's block key: the thread alone, so new notes keep its state. */
+function threadKey(t: StoredThread): string {
+  return `t:${t.threadId}`;
 }
 
-function threadKey(t: StoredThread): string {
-  return `t:${t.threadId}:${t.notes.length}:${t.resolved}`;
-}
+/**
+ * The blocks' place: beside the gutter (the content scrolls sideways under
+ * long lines; the blocks stay put), as wide as the visible part. Measured on
+ * every geometry change (a resize, the file tree or a panel toggled, a wider
+ * gutter) into CSS variables, so every block follows without a redraw.
+ */
+const blockGeometry = ViewPlugin.fromClass(
+  class {
+    constructor(view: EditorView) {
+      this.measure(view);
+    }
+
+    update(u: ViewUpdate) {
+      if (u.geometryChanged || u.viewportChanged) this.measure(u.view);
+    }
+
+    measure(view: EditorView) {
+      view.requestMeasure({
+        key: this,
+        read: (v) => {
+          const gutters = v.dom.querySelector<HTMLElement>(".cm-gutters");
+          const left = gutters?.offsetWidth ?? 0;
+          return {
+            left,
+            width: Math.max(240, v.scrollDOM.clientWidth - left - 8),
+          };
+        },
+        write: ({ left, width }, v) => {
+          v.dom.style.setProperty("--argus-threads-left", `${left}px`);
+          v.dom.style.setProperty("--argus-threads-width", `${width}px`);
+        },
+      });
+    }
+  },
+);
 
 /** Lines (1-based) with their blocks, for one editor. */
 type LineBlocks = Map<number, Block[]>;
@@ -244,6 +305,7 @@ const spacer = new (class extends GutterMarker {
 })();
 
 const commentGutter: Extension = [
+  blockGeometry,
   commentField,
   commentLines,
   gutter({
@@ -283,7 +345,12 @@ const commentGutter: Extension = [
     ".cm-argusFocusedLine": {
       boxShadow: "inset 2px 0 0 var(--border-strong)",
     },
-    ".cm-argusThreads": { padding: "2px 0", position: "sticky" },
+    ".cm-argusThreads": {
+      padding: "2px 0",
+      position: "sticky",
+      left: "var(--argus-threads-left, 0px)",
+      width: "var(--argus-threads-width, 100%)",
+    },
   }),
 ];
 

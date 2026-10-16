@@ -30,6 +30,7 @@ import {
   useFinding,
   useFindingUi,
 } from "../state/aiStore";
+import { FOCUS } from "../lib/focusRequests";
 import { Badge } from "./Badge";
 import { CommentComposer } from "./CommentComposer";
 import { ExternalLinkIcon } from "./icons";
@@ -170,6 +171,7 @@ export function FindingBlock({
             onChange={(text) => setEditorText(f.id, text)}
             onCancel={() => closeEditor(f.id)}
             onResize={onResize}
+            focusKey={FOCUS.finding(f.id)}
             primary={{
               label: "Save edit",
               title: "Keep this text for posting; nothing is posted yet",

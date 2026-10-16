@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 const { openUrlMock } = vi.hoisted(() => ({
@@ -157,5 +158,32 @@ describe("languageForInfo", () => {
     expect((await languageForInfo("jq"))?.language.name).toBe("jq");
     expect(await languageForInfo("no-such-language")).toBeNull();
     expect(await languageForInfo("")).toBeNull();
+  });
+  it("keeps code blocks mounted when it renders again", async () => {
+    let mounts = 0;
+    function Fence({ code }: { code: string }) {
+      useEffect(() => {
+        mounts += 1;
+      }, []);
+      return <p>fence {code}</p>;
+    }
+    const body = "```suggestion\nnew()\n```\n\n```rust\nfn a() {}\n```";
+    // A new renderFence each render, as a thread card makes one.
+    const view = () => (
+      <Markdown
+        renderFence={(info, code) =>
+          info === "suggestion" ? <Fence code={code} /> : null
+        }
+      >
+        {body}
+      </Markdown>
+    );
+    const { container, rerender } = render(view());
+    await screen.findByText("fence new()");
+    const block = container.querySelector("[class*=fence]");
+    rerender(view());
+    rerender(view());
+    expect(mounts).toBe(1);
+    expect(container.querySelector("[class*=fence]")).toBe(block);
   });
 });

@@ -36,6 +36,7 @@ import type {
   ThreadId,
 } from "../ipc/types";
 import { clampRange, type LineRange } from "../lib/commentRanges";
+import { FOCUS, requestFocus } from "../lib/focusRequests";
 import { useHistoryStore } from "./historyStore";
 import {
   toastError,
@@ -330,6 +331,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
         return false;
       }
       if (cur?.busy) return false;
+      requestFocus(FOCUS.composer);
       set({
         composer: {
           ...target,
@@ -380,6 +382,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
               return;
             }
             // A draft posted or deleted since comes back as a new comment.
+            requestFocus(FOCUS.composer);
             const still =
               c.draftId && draftsOf(c.reviewId).some((d) => d.id === c.draftId);
             set({
@@ -464,6 +467,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
         if (d && cur) toastInfo("Finish or cancel the open comment first");
         return;
       }
+      requestFocus(FOCUS.composer);
       set({
         composer: {
           reviewId,
@@ -559,17 +563,16 @@ export const useCommentStore = create<CommentState>((set, get) => {
       }
     },
 
-    openReply: (threadId) =>
-      set((s) =>
-        s.replies[threadId]
-          ? {}
-          : {
-              replies: {
-                ...s.replies,
-                [threadId]: { body: "", busy: false, error: null },
-              },
-            },
-      ),
+    openReply: (threadId) => {
+      if (get().replies[threadId]) return;
+      requestFocus(FOCUS.reply(threadId));
+      set((s) => ({
+        replies: {
+          ...s.replies,
+          [threadId]: { body: "", busy: false, error: null },
+        },
+      }));
+    },
 
     setReplyBody: (threadId, body) =>
       patchReply(threadId, { body, error: null }),
@@ -591,6 +594,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
           onClick: () => {
             const cur = get().replies[threadId];
             if (cur && (cur.busy || cur.body.trim() !== "")) return;
+            requestFocus(FOCUS.reply(threadId));
             set((s) => ({
               replies: {
                 ...s.replies,

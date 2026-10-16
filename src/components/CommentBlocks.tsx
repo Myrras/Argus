@@ -13,6 +13,7 @@
 
 import type { ReviewId, ThreadId } from "../ipc/types";
 import { rangeLabel } from "../lib/commentRanges";
+import { FOCUS } from "../lib/focusRequests";
 import { useCommentStore } from "../state/commentStore";
 import { Badge } from "./Badge";
 import { CommentComposer } from "./CommentComposer";
@@ -39,6 +40,7 @@ export function InlineComposer({ onResize }: { onResize?: () => void }) {
         error={c.error}
         onCancel={close}
         onResize={onResize}
+        focusKey={FOCUS.composer}
         primary={
           c.draftId
             ? { label: "Save", onClick: save }
@@ -157,6 +159,7 @@ export function ReplyComposer({
         error={r.error}
         onCancel={() => close(threadId)}
         onResize={onResize}
+        focusKey={FOCUS.reply(threadId)}
         primary={{
           label: "Reply",
           busyLabel: "Replying…",

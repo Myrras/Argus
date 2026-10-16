@@ -16,6 +16,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { PostError } from "../ipc/types";
+import { takeFocus } from "../lib/focusRequests";
 import { formatBinding, matches } from "../lib/keymap";
 import { currentKeymap, useKeymap } from "../lib/useKeymap";
 import { Markdown } from "./Markdown";
@@ -40,6 +41,7 @@ export function CommentComposer({
   error = null,
   placeholder = "Leave a comment (markdown)",
   onResize,
+  focusKey,
 }: {
   /** What is being written, for the field's name ("Comment on line 12"). */
   label: string;
@@ -54,6 +56,12 @@ export function CommentComposer({
   placeholder?: string;
   /** The block's height may have changed (CodeMirror re-measures). */
   onResize?: () => void;
+  /**
+   * Take the focus on mount only when this request is pending
+   * (`lib/focusRequests`): a widget remount must not steal it. Without
+   * one, it focuses on every mount.
+   */
+  focusKey?: string;
 }) {
   const [preview, setPreview] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
@@ -61,8 +69,15 @@ export function CommentComposer({
   const empty = body.trim() === "";
 
   // Focus on open, and back on the field when leaving the preview.
+  const mounted = useRef(false);
   useEffect(() => {
-    if (!preview) field.current?.focus({ preventScroll: true });
+    const first = !mounted.current;
+    mounted.current = true;
+    if (preview) return;
+    if (first && focusKey !== undefined && !takeFocus(focusKey)) return;
+    field.current?.focus({ preventScroll: true });
+    // Only on open and on leaving the preview.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preview]);
 
   // A new height (preview, error, text growing) after React commits it.

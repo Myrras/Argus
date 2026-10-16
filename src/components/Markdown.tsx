@@ -18,8 +18,10 @@
  */
 
 import {
+  createContext,
   lazy,
   Suspense,
+  useContext,
   useEffect,
   useRef,
   useState,
@@ -155,6 +157,27 @@ export function CodeBlock({ info, code }: { info: string; code: string }) {
   );
 }
 
+/** The caller's fence renderer, for the module-level `pre` below. */
+const FenceContext = createContext<RenderFence | undefined>(undefined);
+
+function MarkdownPre({ node }: ExtraProps) {
+  const renderFence = useContext(FenceContext);
+  const { info, code } = fenceOf(node);
+  return renderFence?.(info, code) ?? <CodeBlock info={info} code={code} />;
+}
+
+/**
+ * One components object for every render: react-markdown takes each entry
+ * as a component type, so a new `pre` per render would remount every code
+ * block (its CodeMirror) and suggested change on each re-render.
+ */
+const COMPONENTS: Components = {
+  a: MarkdownLink,
+  img: MarkdownImage,
+  pre: MarkdownPre,
+};
+const REMARK = [remarkGfm];
+
 export function Markdown({
   children,
   renderFence,
@@ -162,19 +185,13 @@ export function Markdown({
   children: string;
   renderFence?: RenderFence;
 }) {
-  const components: Components = {
-    a: MarkdownLink,
-    img: MarkdownImage,
-    pre: ({ node }) => {
-      const { info, code } = fenceOf(node);
-      return renderFence?.(info, code) ?? <CodeBlock info={info} code={code} />;
-    },
-  };
   return (
     <div className={styles.prose}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
-        {children}
-      </ReactMarkdown>
+      <FenceContext.Provider value={renderFence}>
+        <ReactMarkdown remarkPlugins={REMARK} components={COMPONENTS}>
+          {children}
+        </ReactMarkdown>
+      </FenceContext.Provider>
     </div>
   );
 }

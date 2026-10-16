@@ -606,4 +606,39 @@ describe("ReviewView", () => {
     );
     expect(editor).toHaveAttribute("data-comment-a", "");
   });
+  it("lists the current threads of a file whose diff does not show", async () => {
+    const on = (path: string, author: string) =>
+      thread({
+        reviewId: r.id,
+        author,
+        anchor: { ...anchor, pathNew: path, pathOld: path, lineNew: 1 },
+      });
+    const extra = [
+      on("data/big.json", "big-fixture"),
+      on("assets/logo.png", "png-fixture"),
+      on("src/widget.rs", "err-fixture"),
+    ];
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) => {
+      const a = (args ?? {}) as Record<string, unknown>;
+      if (cmd === "list_threads")
+        return Promise.resolve([...threads, ...extra]);
+      if (cmd === "file_contents" && a.path === "src/widget.rs") {
+        return Promise.reject({ kind: "provider", message: "gone" });
+      }
+      return backend(cmd, args);
+    }) as typeof invoke);
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByTestId("editor-src/cache.rs");
+    for (const [path, author] of [
+      ["data/big.json", "big-fixture"],
+      ["assets/logo.png", "png-fixture"],
+      ["src/widget.rs", "err-fixture"],
+    ]) {
+      const c = card(path);
+      expect(
+        await within(c).findByText("Threads on this file"),
+      ).toBeInTheDocument();
+      expect(within(c).getByText(author)).toBeInTheDocument();
+    }
+  });
 });

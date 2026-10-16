@@ -362,4 +362,18 @@ describe("aiStore", () => {
     await older;
     expect(useAiStore.getState().byReview[ID]?.findings).toEqual([fresh]);
   });
+  it("closing an editor with changed text keeps it one Undo away", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    const s = useAiStore.getState();
+    s.openEditor(low);
+    s.setEditorText(low.id, "Half rewritten");
+    useAiStore.getState().closeEditor(low.id);
+    expect(useAiStore.getState().ui[low.id]?.editor).toBeNull();
+    const toast = useToastStore
+      .getState()
+      .toasts.find((t) => t.message === "Edit discarded");
+    void toast?.action?.onClick();
+    expect(useAiStore.getState().ui[low.id]?.editor).toBe("Half rewritten");
+  });
 });

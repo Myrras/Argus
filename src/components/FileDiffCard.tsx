@@ -7,7 +7,8 @@
  * "Load anyway" renders a large one.
  *
  * Its threads: current ones under their lines in the editor; outdated ones
- * (and any without a usable line) listed at the top of the card.
+ * (and any without a usable line, or all of them when no editor shows)
+ * listed at the top of the card.
  *
  * Commenting: once the diff shows, the file's commentable lines are fetched
  * (`commentable_lines`, cached) and get the gutter's "+"; a click opens the
@@ -200,15 +201,22 @@ export function FileDiffCard({
     () => placeThreads(threads, { since: review.sinceLastReview }),
     [threads, review.sinceLastReview],
   );
+  // No editor will show (binary, large and not loaded, failed to load): its
+  // current threads are listed with the others instead of shown nowhere.
+  const noEditor = f.binary || (large && !forced) || contents.state === "error";
   const fitted = useMemo(() => {
+    if (noEditor) {
+      return { fit: [], rest: placed.inline.map((p) => p.thread) };
+    }
     if (contents.state !== "ready") {
+      // Loading: they wait for the editor rather than flash in the list.
       return { fit: placed.inline, rest: [] as StoredThread[] };
     }
     return fitPlacements(placed.inline, {
       a: lineCount(contents.original),
       b: lineCount(contents.modified),
     });
-  }, [placed, contents]);
+  }, [placed, contents, noEditor]);
   const listed = [...placed.unplaced, ...fitted.rest];
   const count = threadCounts(threads);
 

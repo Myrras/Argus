@@ -52,6 +52,7 @@ import {
   postable,
   sortFindings,
 } from "../lib/findings";
+import { FOCUS, requestFocus } from "../lib/focusRequests";
 import { latestOnly } from "../lib/latest";
 import { openExternal } from "../lib/links";
 import { useBackendSettingsStore } from "./backendSettingsStore";
@@ -307,6 +308,7 @@ export const useAiStore = create<AiStoreState>((set, get) => {
     openEditor: (f) => {
       const ui = get().ui[f.id] ?? NO_UI;
       if (ui.editor !== null || !postable(f)) return;
+      requestFocus(FOCUS.finding(f.id));
       patchUi(f.id, { editor: ui.edit ?? defaultBody(f) });
     },
 
@@ -323,7 +325,29 @@ export const useAiStore = create<AiStoreState>((set, get) => {
       });
     },
 
-    closeEditor: (id) => patchUi(id, { editor: null }),
+    closeEditor: (id) => {
+      const ui = get().ui[id];
+      const text = ui?.editor ?? null;
+      patchUi(id, { editor: null });
+      if (text === null || text.trim() === "") return;
+      const f = Object.values(get().byReview)
+        .flatMap((r) => r.findings)
+        .find((x) => x.id === id);
+      if (f && text === (ui?.edit ?? defaultBody(f))) return;
+      // Esc is one key away from typing: keep the text one Undo away.
+      useToastStore.getState().push({
+        kind: "info",
+        message: "Edit discarded",
+        action: {
+          label: "Undo",
+          onClick: () => {
+            if (get().ui[id]?.editor != null) return;
+            requestFocus(FOCUS.finding(id));
+            patchUi(id, { editor: text });
+          },
+        },
+      });
+    },
 
     resetEdit: (id) => patchUi(id, { edit: null, editor: null }),
 

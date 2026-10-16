@@ -5,8 +5,18 @@
  * (measuring, scrolling, code clicks) is out of reach here.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { useEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
+
+import type { StoredThread } from "../ipc/types";
+import type { Placement } from "../lib/diffThreads";
 
 import { thread } from "../test/fixtures";
 import { DiffEditor } from "./DiffEditor";
@@ -140,5 +150,124 @@ describe("DiffEditor", () => {
         2,
       ),
     );
+  });
+  describe("block lifecycle (real CodeMirror)", () => {
+    /** Counts mounts and unmounts of what a block renders. */
+    function probe() {
+      const counts = { mounted: 0, unmounted: 0 };
+      function Probe({ label }: { label: string }) {
+        useEffect(() => {
+          counts.mounted += 1;
+          return () => {
+            counts.unmounted += 1;
+          };
+        }, []);
+        return <p>{label}</p>;
+      }
+      return { counts, Probe };
+    }
+
+    const at = (t: StoredThread, line = 2): Placement[] => [
+      { thread: t, side: "b", line },
+    ];
+
+    it("keeps a thread mounted while its notes change and blocks join its line", async () => {
+      const { counts, Probe } = probe();
+      const t = thread({ author: "rev-fixture" });
+      const renderThread = (th: StoredThread) => (
+        <Probe label={`${th.author}: ${th.notes.length} notes`} />
+      );
+      const view = (placements: Placement[], items = [] as never[]) => (
+        <DiffEditor
+          path="src/lib.rs"
+          original={original}
+          modified={modified}
+          layout="unified"
+          placements={placements}
+          renderThread={renderThread}
+          items={items}
+        />
+      );
+      const { rerender } = render(view(at(t)));
+      expect(await screen.findByText("rev-fixture: 1 notes")).toBeVisible();
+      // A reply arrives: the same thread with another note.
+      const replied = {
+        ...t,
+        notes: [...t.notes, { ...t.notes[0], id: "n2" }],
+      };
+      rerender(view(at(replied)));
+      expect(await screen.findByText("rev-fixture: 2 notes")).toBeVisible();
+      // A pending comment joins the line.
+      rerender(
+        view(at(replied), [
+          {
+            key: "draft:1",
+            side: "b",
+            line: 2,
+            render: () => <p>pending draft</p>,
+          },
+        ] as never[]),
+      );
+      expect(await screen.findByText("pending draft")).toBeVisible();
+      await act(async () => {});
+      expect(counts).toEqual({ mounted: 1, unmounted: 0 });
+    });
+
+    it("unmounts every block root with the editor", async () => {
+      const { counts, Probe } = probe();
+      const t = thread();
+      const u = thread();
+      const { rerender, unmount } = render(
+        <DiffEditor
+          path="src/lib.rs"
+          original={original}
+          modified={modified}
+          layout="split"
+          placements={[...at(t, 1), ...at(u, 3)]}
+          renderThread={(th) => <Probe label={th.threadId} />}
+        />,
+      );
+      await screen.findByText(u.threadId);
+      // A thread moves to another line: its old block goes.
+      rerender(
+        <DiffEditor
+          path="src/lib.rs"
+          original={original}
+          modified={modified}
+          layout="split"
+          placements={[...at(t, 2), ...at(u, 3)]}
+          renderThread={(th) => <Probe label={th.threadId} />}
+        />,
+      );
+      await act(async () => {});
+      unmount();
+      await act(async () => {});
+      expect(counts.mounted).toBeGreaterThan(0);
+      expect(counts.unmounted).toBe(counts.mounted);
+    });
+
+    it("sizes the blocks from the editor's live geometry", async () => {
+      const { container } = render(
+        <DiffEditor
+          path="src/lib.rs"
+          original={original}
+          modified={modified}
+          layout="unified"
+          placements={at(thread())}
+          renderThread={() => <p>sized</p>}
+        />,
+      );
+      await screen.findByText("sized");
+      const block = container.querySelector<HTMLElement>(".cm-argusThreads")!;
+      // No fixed pixels from the first measure: CSS variables the editor
+      // keeps current as it resizes.
+      expect(block.style.width).toBe("");
+      const editor = container.querySelector<HTMLElement>(".cm-editor")!;
+      await waitFor(() =>
+        expect(editor.style.getPropertyValue("--argus-threads-width")).not.toBe(
+          "",
+        ),
+      );
+    });
   });
 });
