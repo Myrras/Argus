@@ -328,6 +328,11 @@ impl Store {
         )
     }
 
+    /// Record that the review was fetched at `at` without anything to store.
+    pub fn touch_fetched(&self, id: ReviewId, at: DateTime<Utc>) -> CoreResult<()> {
+        touch_fetched(&self.conn(), id, at)
+    }
+
     /// Move the watermark.
     pub fn set_watermark(&self, id: ReviewId, sha: &str, at: DateTime<Utc>) -> CoreResult<()> {
         self.update(
@@ -528,6 +533,15 @@ pub(crate) fn read_review(conn: &Connection, id: ReviewId) -> CoreResult<Option<
             review_row,
         )
         .optional()?)
+}
+
+/// [`Store::touch_fetched`] in the caller's transaction.
+pub(crate) fn touch_fetched(conn: &Connection, id: ReviewId, at: DateTime<Utc>) -> CoreResult<()> {
+    conn.execute(
+        "UPDATE reviews SET fetched_at = ?2 WHERE id = ?1",
+        params![id.to_string(), at],
+    )?;
+    Ok(())
 }
 
 /// Store what the user marking a review reviewed changes: the watermark and

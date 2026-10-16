@@ -25,6 +25,8 @@ struct Fake {
     /// When set, the next `fetch_review` says it started and waits for the
     /// go-ahead: a test runs something in the middle of a refresh.
     gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// `fetch_review` calls per review number.
+    fetches: Mutex<HashMap<u64, usize>>,
 }
 
 impl Fake {
@@ -41,6 +43,7 @@ impl Fake {
             limited: Mutex::new(None),
             calls: AtomicUsize::new(0),
             gate: Mutex::new(None),
+            fetches: Mutex::new(HashMap::new()),
         }
     }
 
@@ -50,6 +53,10 @@ impl Fake {
         let (go_tx, go_rx) = mpsc::channel();
         *self.gate.lock().unwrap() = Some((started_tx, go_rx));
         (started_rx, go_tx)
+    }
+
+    fn fetched(&self, n: u64) -> usize {
+        self.fetches.lock().unwrap().get(&n).copied().unwrap_or(0)
     }
 
     /// List `d` and serve it.
@@ -93,6 +100,7 @@ impl ReviewProvider for Fake {
         Ok(self.list.lock().unwrap().clone())
     }
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+        *self.fetches.lock().unwrap().entry(r.number).or_default() += 1;
         let gate = self.gate.lock().unwrap().take();
         if let Some((started, go)) = gate {
             started.send(()).unwrap();
@@ -500,4 +508,40 @@ fn an_approval_made_in_argus_after_the_fetch_started_survives_it() {
     let rec = store.review(id).unwrap().unwrap();
     assert_eq!(rec.approved_at, None);
     assert_eq!(rec.status, ReviewStatus::NeedsReview);
+}
+
+#[test]
+fn a_review_off_the_list_is_fetched_once_then_daily() {
+    let gh = github();
+    gh.serve(detail_n(2, "h1"), vec![]);
+    gh.serve(detail_n(3, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 12));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (1, 1));
+
+    // #2 no longer involves the user; #3 is deleted.
+    gh.unlist(2);
+    gh.unlist(3);
+    gh.details.lock().unwrap().remove(&3);
+    // Dropping off: fetched once more, to learn why.
+    refresh_all(&providers, &store, at(11, 9));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (2, 2));
+    assert!(!store.review(review_ref(2).id()).unwrap().unwrap().listed);
+    // Then not on every poll...
+    refresh_all(&providers, &store, at(11, 10));
+    refresh_all(&providers, &store, at(11, 20));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (2, 2));
+    // ...but once a day, in case it was merged or closed meanwhile.
+    refresh_all(&providers, &store, at(12, 9));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (3, 3));
+    refresh_all(&providers, &store, at(12, 10));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (3, 3));
+
+    // Listed again: every poll, as before.
+    gh.serve(detail_n(2, "h1"), vec![]);
+    refresh_all(&providers, &store, at(12, 11));
+    refresh_all(&providers, &store, at(12, 12));
+    assert_eq!(gh.fetched(2), 5);
+    assert!(store.review(review_ref(2).id()).unwrap().unwrap().listed);
 }

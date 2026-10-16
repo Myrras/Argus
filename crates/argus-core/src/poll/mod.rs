@@ -114,8 +114,8 @@ type Fetched = (ReviewRef, bool, CoreResult<(ReviewDetail, Vec<Thread>)>);
 
 /// Refresh one provider: what it lists now, plus the stored open reviews it
 /// no longer lists (fetched once more to learn whether they were merged,
-/// closed, or just dropped off). Merged and closed reviews are final and
-/// not fetched again.
+/// closed, or just dropped off, then daily: see [`unlisted_due`]). Merged
+/// and closed reviews are final and not fetched again.
 ///
 /// While the provider is rate-limited nothing is called: one provider-level
 /// "rate limited until HH:MM" error, the stored reviews untouched. A limit
@@ -152,6 +152,7 @@ pub fn refresh_provider(
                     && r.review.host == provider.host()
                     && r.state == ReviewState::Open
                     && !listed_ids.contains(&r.id)
+                    && unlisted_due(r, now)
             })
             .map(|r| (r.review.clone(), false)),
     );
@@ -190,8 +191,18 @@ pub fn refresh_provider(
             // An unlisted review that is gone (deleted, access lost): just
             // no longer listed.
             Err(CoreError::NotFound) if !listed => match prev {
-                Some(p) if p.listed => store.set_listed(id, false).map(|_| true),
-                _ => Ok(false),
+                Some(p) => {
+                    let dropped = p.listed;
+                    let marked = if dropped {
+                        store.set_listed(id, false)
+                    } else {
+                        Ok(())
+                    };
+                    marked
+                        .and_then(|_| store.touch_fetched(id, now))
+                        .map(|_| dropped)
+                }
+                None => Ok(false),
             },
             Err(e) => Err(e),
         };
@@ -212,6 +223,18 @@ pub fn refresh_provider(
         errors.push(RefreshError::for_provider(provider, &e));
     }
     (changed, errors)
+}
+
+/// How often a stored open review the list no longer has is fetched (to
+/// learn whether it was merged or closed meanwhile): once when it drops
+/// off, then at most this often.
+const UNLISTED_EVERY: chrono::Duration = chrono::Duration::days(1);
+
+/// Whether the unlisted review `r` is fetched in a refresh at `now`: right
+/// after it dropped off (the last list still had it), then once per
+/// [`UNLISTED_EVERY`] since its last fetch.
+fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
+    r.listed || now - r.fetched_at >= UNLISTED_EVERY
 }
 
 /// Classify a fresh fetch against the stored record and store it if
@@ -259,6 +282,10 @@ pub(crate) fn persist(
         if changed {
             store::write_review(conn, &next, WriteColumns::Fetched)?;
             store::write_threads(conn, id, threads, me)?;
+        } else if !listed {
+            // An unlisted review is fetched daily (see `unlisted_due`),
+            // timed from its last fetch, changed or not.
+            store::touch_fetched(conn, id, now)?;
         }
         Ok(changed)
     })
