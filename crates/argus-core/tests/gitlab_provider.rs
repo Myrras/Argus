@@ -879,3 +879,44 @@ fn discussions_are_read_past_twenty_pages() {
     let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
     assert_eq!(threads.len(), 30);
 }
+
+#[test]
+fn a_failing_commented_mr_is_skipped_not_the_whole_list() {
+    let (base, _) = serve(|path| match path {
+        "/api/v4/projects/200/merge_requests/5" => status("500 Internal Server Error"),
+        _ => fixture_routes(path),
+    });
+    let list = provider(&base).list_reviews().unwrap();
+    let keys: Vec<(&str, u64)> = list.iter().map(|r| (r.repo.as_str(), r.number)).collect();
+    assert_eq!(keys, [("grp/app", 21)]);
+
+    // A rate limit still stops the listing.
+    let (base, _) = serve(|path| match path {
+        "/api/v4/projects/200/merge_requests/5" => Reply {
+            status: "429 Too Many Requests",
+            headers: "Retry-After: 60\r\n".into(),
+            body: String::new(),
+        },
+        _ => fixture_routes(path),
+    });
+    let err = provider(&base).list_reviews().unwrap_err();
+    assert!(err.to_string().contains("rate limited"), "{err}");
+}
+
+#[test]
+fn a_merged_commented_mr_is_not_fetched_again() {
+    let (base, seen) = serve(fixture_routes);
+    let gl = provider(&base);
+    gl.list_reviews().unwrap();
+    gl.list_reviews().unwrap();
+    let count = |p: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with(&format!("{p} ")))
+            .count()
+    };
+    // !8 is merged: final, read once. !5 is open: read each time.
+    assert_eq!(count("/api/v4/projects/300/merge_requests/8"), 1);
+    assert_eq!(count("/api/v4/projects/200/merge_requests/5"), 2);
+}

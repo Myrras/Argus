@@ -13,7 +13,7 @@
 //! cached body and `X-Next-Page`. A 429 stops all calls until GitLab's
 //! `Retry-After` / `RateLimit-Reset`. Requests time out (connect and total).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -47,6 +47,9 @@ const MAX_PAGES: u32 = 20;
 /// and the untouched count, so far past any real MR (10 000) rather than a
 /// silent cut at 2000.
 const DISCUSSION_PAGES: u32 = 100;
+
+/// How many commented-on MRs the list fetches at the same time.
+const LIST_PARALLELISM: usize = 4;
 
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
@@ -170,6 +173,9 @@ pub struct GitlabProvider {
     /// Conditional-request cache of GETs, keyed by path under `/api/v4`.
     cache: ConditionalCache,
     limit: Backoff,
+    /// Commented-on MRs (project id, iid) seen merged or closed: final, so
+    /// the list never fetches them again. Memory only.
+    done: Mutex<HashSet<(u64, u64)>>,
 }
 
 impl GitlabProvider {
@@ -185,6 +191,7 @@ impl GitlabProvider {
             client: build_client(REQUEST_TIMEOUT),
             cache: ConditionalCache::default(),
             limit: Backoff::default(),
+            done: Mutex::new(HashSet::new()),
         })
     }
 
@@ -450,7 +457,9 @@ impl ReviewProvider for GitlabProvider {
     /// on. GitLab has no "commented by me" filter, and scanning every open MR
     /// on a large instance for the user's notes is far too expensive, so the
     /// second half reads the user's own `commented` events of the last
-    /// [`COMMENTED_DAYS`] days and fetches the MRs they point at.
+    /// [`COMMENTED_DAYS`] days and fetches the MRs they point at, a few at
+    /// a time. One of those failing is skipped (a rate limit stops the
+    /// list), and one seen merged or closed is not fetched again.
     fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
         let me = self.me()?;
         let reviewing: Vec<GlMr> = self.get_all(&format!(
@@ -468,24 +477,61 @@ impl ReviewProvider for GitlabProvider {
         let after = (Utc::now() - chrono::Duration::days(COMMENTED_DAYS)).format("%Y-%m-%d");
         let events: Vec<GlEvent> =
             self.get_all(&format!("/events?action=commented&after={after}"))?;
+        let done = self.done.lock().expect("done lock poisoned").clone();
+        let mut wanted: Vec<(u64, u64)> = Vec::new();
         for e in events {
             let Some(note) = e.note else { continue };
             let (Some(project), Some(iid)) = (e.project_id, note.noteable_iid) else {
                 continue;
             };
-            if note.noteable_type.as_deref() != Some("MergeRequest")
-                || !known.insert((project, iid))
+            if note.noteable_type.as_deref() == Some("MergeRequest")
+                && !done.contains(&(project, iid))
+                && known.insert((project, iid))
             {
-                continue;
+                wanted.push((project, iid));
             }
-            let mr: GlMr = match self.get_json(&format!("/projects/{project}/merge_requests/{iid}"))
-            {
+        }
+        // A few at a time: one per commented MR, every poll.
+        let mut fetched: Vec<CoreResult<GlMr>> = Vec::with_capacity(wanted.len());
+        for chunk in wanted.chunks(LIST_PARALLELISM) {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(project, iid)| {
+                        s.spawn(move || {
+                            self.get_json::<GlMr>(&format!(
+                                "/projects/{project}/merge_requests/{iid}"
+                            ))
+                        })
+                    })
+                    .collect();
+                fetched.extend(handles.into_iter().map(join));
+            });
+        }
+        for ((project, iid), mr) in wanted.into_iter().zip(fetched) {
+            let mr = match mr {
                 Ok(mr) => mr,
+                // The whole provider is paused: so is the list.
+                Err(e) if super::is_rate_limited(&e) => return Err(e),
                 // Gone or no longer visible: just not listed.
                 Err(CoreError::NotFound) => continue,
-                Err(e) => return Err(e),
+                // One MR failing never costs the rest of the list; the
+                // next poll tries it again.
+                Err(e) => {
+                    tracing::debug!("skipping commented MR {project}!{iid}: {e}");
+                    continue;
+                }
             };
-            if mr.state == "opened" && !same_user(&mr.author.username, &me.username) {
+            if mr.state != "opened" {
+                // Merged or closed is final for Argus (the poll treats it
+                // so too): not fetched again.
+                self.done
+                    .lock()
+                    .expect("done lock poisoned")
+                    .insert((project, iid));
+                continue;
+            }
+            if !same_user(&mr.author.username, &me.username) {
                 list.push(self.to_ref(&mr));
             }
         }
