@@ -21,38 +21,88 @@ fn fixtures() -> PathBuf {
 
 /// The fake: routes `gh` argument lines to fixture files and logs every call
 /// (with the token env it saw) to `calls.log` next to it.
-const FAKE: &str = r#"
+///
+/// REST reads come as `api -i [-H 'If-None-Match: <etag>'] <path> [--jq f]`
+/// and are answered like `gh api -i` prints them: status line, headers, a
+/// blank line, the body. Each fixture's ETag is `"fx-<file name>"`; a
+/// request naming it gets a 304 (logged as `304 <path>`), as GitHub answers
+/// an unchanged resource. Pages link to the next through `Link`. A
+/// `graphql-down` file next to the log makes GraphQL fail.
+const FAKE: &str = r##"
 echo "$* token=${GH_TOKEN:-none} ent=${GH_ENTERPRISE_TOKEN:-none} host=${GH_HOST:-none}" >> "$LOG"
 case "$*" in
-  "auth token --hostname github.com --user work") echo fake-gh-token ;;
-  "auth token --hostname ghe.example.test --user work") echo fake-ghe-token ;;
+  "auth token --hostname github.com --user work") echo fake-gh-token; exit 0 ;;
+  "auth token --hostname ghe.example.test --user work") echo fake-ghe-token; exit 0 ;;
   "auth token"*) echo "no account" >&2; exit 1 ;;
-  "api user") cat "$F/user.json" ;;
-  *"--review-requested=@me"*) cat "$F/search_review_requested.json" ;;
-  *"--reviewed-by=@me"*) cat "$F/search_reviewed_by.json" ;;
-  *"--commenter=@me"*) cat "$F/search_commenter.json" ;;
-  "api repos/acme-fixture/widgets/pulls/12") cat "$F/pull_12.json" ;;
-  "api --paginate repos/acme-fixture/widgets/pulls/12/commits?per_page=100")
-    cat "$F/pull_12_commits_page1.json" "$F/pull_12_commits_page2.json" ;;
-  "api --paginate repos/acme-fixture/widgets/pulls/12/reviews?per_page=100") cat "$F/pull_12_reviews.json" ;;
-  "api --paginate repos/acme-fixture/widgets/pulls/12/comments?per_page=100")
-    cat "$F/pull_12_comments_page1.json" "$F/pull_12_comments_page2.json" ;;
-  "api --paginate repos/acme-fixture/widgets/pulls/12/files?per_page=100")
-    cat "$F/pull_12_files_page1.json" "$F/pull_12_files_page2.json" ;;
-  "api repos/acme-fixture/widgets/compare/b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0...c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3 --jq .merge_base_commit.sha")
-    echo "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ;;
-  "api repos/acme-fixture/widgets/compare/c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1...c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3")
-    cat "$F/compare_c1_c3.json" ;;
-  "api repos/acme-fixture/gadgets/pulls/7") cat "$F/pull_7.json" ;;
-  "api --paginate repos/acme-fixture/gadgets/pulls/7/commits?per_page=100") cat "$F/empty.json" ;;
-  "api --paginate repos/acme-fixture/gadgets/pulls/7/reviews?per_page=100") cat "$F/pull_7_reviews.json" ;;
-  "api repos/acme-fixture/widgets/contents/src/cache.rs?ref=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3") cat "$F/contents_cache.json" ;;
-  "api repos/acme-fixture/widgets/contents/big.bin?ref=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3") cat "$F/contents_big.json" ;;
-  "api --paginate repos/acme-fixture/widgets/commits/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2?per_page=100")
-    cat "$F/commit_c2_page1.json" "$F/commit_c2_page2.json" ;;
-  *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  *"--review-requested=@me"*) cat "$F/search_review_requested.json"; exit 0 ;;
+  *"--reviewed-by=@me"*) cat "$F/search_reviewed_by.json"; exit 0 ;;
+  *"--commenter=@me"*) cat "$F/search_commenter.json"; exit 0 ;;
+  "api graphql "*)
+    if [ -e "${LOG%/*}/graphql-down" ]; then
+      echo '{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible"}]}'
+      echo "gh: Resource not accessible" >&2; exit 1
+    fi
+    case "$*" in
+      *"number=12"*"after=Y3Vyc29yOjI="*) cat "$F/graphql_threads_12_page2.json" ;;
+      *"number=12"*) cat "$F/graphql_threads_12_page1.json" ;;
+      *) echo '{"data":{"repository":{"pullRequest":null}}}' ;;
+    esac
+    exit 0 ;;
 esac
-"#;
+[ "$1 $2" = "api -i" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+shift 2
+inm=""; path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H) inm="${2#If-None-Match: }"; shift 2 ;;
+    --jq) shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+# respond FILE [NEXT-PAGE-QUERY]
+respond() {
+  tag="\"fx-${1##*/}\""
+  if [ "$inm" = "$tag" ]; then
+    printf 'HTTP/2.0 304 Not Modified\nEtag: %s\r\n\r\n' "$tag"
+    echo "304 $path" >> "$LOG"
+    echo "gh: HTTP 304" >&2; exit 1
+  fi
+  printf 'HTTP/2.0 200 OK\nContent-Type: application/json; charset=utf-8\r\nEtag: %s\r\n' "$tag"
+  if [ -n "$2" ]; then
+    printf 'Link: <https://api.github.com/repositories/1/x?%s>; rel="next"\r\n' "$2"
+  fi
+  printf '\r\n'
+  cat "$1"
+  exit 0
+}
+P=repos/acme-fixture/widgets/pulls/12
+C1=c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
+C2=c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2
+C3=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3
+B0=b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0
+case "$path" in
+  user) respond "$F/user.json" ;;
+  "$P") respond "$F/pull_12.json" ;;
+  "$P/commits?per_page=100") respond "$F/pull_12_commits_page1.json" "per_page=100&page=2" ;;
+  "$P/commits?per_page=100&page=2") respond "$F/pull_12_commits_page2.json" ;;
+  "$P/reviews?per_page=100") respond "$F/pull_12_reviews.json" ;;
+  "$P/comments?per_page=100") respond "$F/pull_12_comments_page1.json" "per_page=100&page=2" ;;
+  "$P/comments?per_page=100&page=2") respond "$F/pull_12_comments_page2.json" ;;
+  "$P/files?per_page=100") respond "$F/pull_12_files_page1.json" "per_page=100&page=2" ;;
+  "$P/files?per_page=100&page=2") respond "$F/pull_12_files_page2.json" ;;
+  "repos/acme-fixture/widgets/compare/$B0...$C3") respond "$F/compare_b0_c3_merge_base.txt" ;;
+  "repos/acme-fixture/widgets/compare/$C1...$C3") respond "$F/compare_c1_c3.json" ;;
+  repos/acme-fixture/gadgets/pulls/7) respond "$F/pull_7.json" ;;
+  "repos/acme-fixture/gadgets/pulls/7/commits?per_page=100") respond "$F/empty.json" ;;
+  "repos/acme-fixture/gadgets/pulls/7/reviews?per_page=100") respond "$F/pull_7_reviews.json" ;;
+  "repos/acme-fixture/widgets/contents/src/cache.rs?ref=$C3") respond "$F/contents_cache.json" ;;
+  "repos/acme-fixture/widgets/contents/big.bin?ref=$C3") respond "$F/contents_big.json" ;;
+  "repos/acme-fixture/widgets/commits/$C2?per_page=100") respond "$F/commit_c2_page1.json" "per_page=100&page=2" ;;
+  "repos/acme-fixture/widgets/commits/$C2?per_page=100&page=2") respond "$F/commit_c2_page2.json" ;;
+esac
+printf 'HTTP/2.0 404 Not Found\nContent-Type: application/json; charset=utf-8\r\n\r\n{"message":"Not Found"}'
+echo "gh: Not Found (HTTP 404)" >&2; exit 1
+"##;
 
 struct Fake {
     _dir: tempfile::TempDir,
@@ -283,9 +333,9 @@ fn lists_pr_files_across_pages_from_the_merge_base() {
     assert!(big.too_large && !big.binary);
     assert_eq!((big.additions, big.deletions), (4200, 3100));
 
-    assert!(fake
-        .calls()
-        .contains("api --paginate repos/acme-fixture/widgets/pulls/12/files?per_page=100"));
+    let calls = fake.calls();
+    assert!(calls.contains("api -i repos/acme-fixture/widgets/pulls/12/files?per_page=100 "));
+    assert!(calls.contains("api -i repos/acme-fixture/widgets/pulls/12/files?per_page=100&page=2 "));
 }
 
 #[test]
@@ -350,13 +400,13 @@ fn account_token_goes_to_gh_only_via_env() {
         .current_user()
         .unwrap();
     let calls = fake.calls();
-    assert!(calls.contains("api user token=fake-gh-token ent=none host=none"));
+    assert!(calls.contains("api -i user token=fake-gh-token ent=none host=none"));
 
     let fake = script(FAKE);
     fake.provider("github.com", None).current_user().unwrap();
     assert!(fake
         .calls()
-        .contains("api user token=none ent=none host=none"));
+        .contains("api -i user token=none ent=none host=none"));
 
     // GHE: host via GH_HOST, token via GH_ENTERPRISE_TOKEN.
     let fake = script(FAKE);
@@ -365,7 +415,7 @@ fn account_token_goes_to_gh_only_via_env() {
         .unwrap();
     assert!(fake
         .calls()
-        .contains("api user token=none ent=fake-ghe-token host=ghe.example.test"));
+        .contains("api -i user token=none ent=fake-ghe-token host=ghe.example.test"));
 }
 
 #[test]
@@ -485,4 +535,169 @@ fn commit_diff_reads_every_page_and_the_first_parent() {
         gh.commit_diff(&widgets_12(), "--x"),
         Err(CoreError::InvalidInput(_))
     ));
+}
+
+// --- M6: conditional requests, GraphQL thread state, rate limits, timeouts ---
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_second_poll_sends_the_etags_and_replays_the_304s() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let range = DiffRange::Review {
+        base: BASE.into(),
+        head: HEAD.into(),
+    };
+    let poll = || {
+        (
+            gh.fetch_review(&widgets_12()).unwrap(),
+            gh.fetch_threads(&widgets_12()).unwrap(),
+            gh.fetch_files(&widgets_12(), &range).unwrap(),
+        )
+    };
+    let first = poll();
+    let calls = fake.calls();
+    assert!(!calls.contains("If-None-Match"));
+    assert!(!calls.contains("304 "));
+
+    let second = poll();
+    // Exactly what a full fetch gave.
+    assert_eq!(first, second);
+    let calls = fake.calls();
+    let comments = "repos/acme-fixture/widgets/pulls/12/comments?per_page=100";
+    assert!(calls.contains(&format!(
+        "api -i -H If-None-Match: \"fx-pull_12_comments_page1.json\" {comments} "
+    )));
+    // Page 2 was still followed: its link came from the cached page 1.
+    assert!(calls.contains(&format!("304 {comments}&page=2\n")));
+    assert!(calls.contains("304 repos/acme-fixture/widgets/pulls/12\n"));
+    assert!(calls.contains("304 repos/acme-fixture/widgets/pulls/12/files?per_page=100&page=2\n"));
+    // The `--jq` merge base is cached too.
+    assert!(calls.contains("304 repos/acme-fixture/widgets/compare/"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn graphql_marks_resolved_threads_across_pages() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let state: Vec<(&str, bool, bool)> = threads
+        .iter()
+        .map(|t| (t.id.as_str(), t.resolved, t.outdated))
+        .collect();
+    // 501 resolved (page 1), 530 resolved (page 2), 520 outdated per
+    // GraphQL although REST still had a position; a GraphQL thread with no
+    // REST counterpart is ignored.
+    assert_eq!(
+        state,
+        [
+            ("501", true, false),
+            ("510", false, true),
+            ("530", true, false),
+            ("520", false, true),
+        ]
+    );
+    assert_eq!(threads[3].anchor.as_ref().unwrap().current_line, None);
+    assert_eq!(threads[2].anchor.as_ref().unwrap().current_line, Some(33));
+    let calls = fake.calls();
+    assert!(calls.contains("-f owner=acme-fixture -f name=widgets -F number=12 token="));
+    assert!(calls.contains("-F number=12 -f after=Y3Vyc29yOjI= token="));
+    // Still no resolve events: GraphQL has no time for them.
+    assert!(gh.thread_resolutions(&widgets_12()).unwrap().is_empty());
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_failing_graphql_query_leaves_threads_unresolved() {
+    let fake = script(FAKE);
+    std::fs::write(fake.log.with_file_name("graphql-down"), "").unwrap();
+    let gh = fake.provider("github.com", None);
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let ids: Vec<&str> = threads.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["501", "510", "530", "520"]);
+    assert!(threads.iter().all(|t| !t.resolved));
+    // REST's own outdated stands.
+    assert!(threads[1].outdated && !threads[3].outdated);
+}
+
+/// A `gh` whose every API call is rate-limited with `headers`.
+fn limited(headers: &str) -> Fake {
+    script(&format!(
+        r#"
+echo "$*" >> "$LOG"
+printf 'HTTP/2.0 403 Forbidden\nContent-Type: application/json; charset=utf-8\r\n{headers}\r\n{{"message":"API rate limit exceeded for user ID 1."}}'
+echo "gh: API rate limit exceeded for user ID 1. (HTTP 403)" >&2; exit 1
+"#
+    ))
+}
+
+fn local_hhmm(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.with_timezone(&chrono::Local).format("%H:%M").to_string()
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_rate_limit_backs_off_until_the_reset() {
+    use chrono::{TimeZone as _, Utc};
+
+    let reset = Utc.timestamp_opt(Utc::now().timestamp() + 600, 0).unwrap();
+    let fake = limited(&format!(
+        "X-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: {}\r\n",
+        reset.timestamp()
+    ));
+    let gh = fake.provider("github.com", None);
+    let err = gh.current_user().unwrap_err();
+    assert!(!err.is_unavailable());
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "Could not fetch reviews: GitHub is rate limited until {}; Argus tries again then",
+            local_hhmm(reset)
+        )
+    );
+    assert_eq!(gh.rate_limited_until(), Some(reset));
+
+    // Nothing more goes out until then.
+    let before = fake.calls().lines().count();
+    assert!(gh.fetch_review(&widgets_12()).is_err());
+    assert!(gh.list_reviews().is_err());
+    assert_eq!(fake.calls().lines().count(), before);
+
+    // Through the core: one provider-level error, nothing stored.
+    let core = argus_core::Core::with_providers(
+        argus_core::store::Store::in_memory().unwrap(),
+        vec![std::sync::Arc::new(gh)],
+    );
+    let report = core.refresh();
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].review, None);
+    assert!(report.errors[0].message.contains("rate limited until"));
+    assert_eq!(fake.calls().lines().count(), before);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_secondary_rate_limit_waits_for_retry_after() {
+    let fake = limited("Retry-After: 90\r\n");
+    let gh = fake.provider("github.com", None);
+    let start = chrono::Utc::now();
+    let err = gh.current_user().unwrap_err();
+    assert!(err.to_string().contains("GitHub is rate limited until"));
+    let until = gh.rate_limited_until().unwrap();
+    let wait = (until - start).num_seconds();
+    assert!((88..=92).contains(&wait), "{wait}");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_hung_gh_is_killed_after_the_timeout() {
+    let fake = script("exec sleep 10");
+    let gh = fake
+        .provider("github.com", None)
+        .with_timeout(std::time::Duration::from_millis(300));
+    let start = std::time::Instant::now();
+    let err = gh.fetch_review(&widgets_12()).unwrap_err();
+    assert!(err.to_string().contains("gh did not answer in time"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
 }

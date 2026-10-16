@@ -7,19 +7,27 @@
 //! The HTTP client is blocking and never follows redirects, as in Podium: a
 //! redirect would carry the `PRIVATE-TOKEN` header to whatever host it names.
 //! Errors are Argus-owned text, never reqwest's (which holds the URL).
+//!
+//! Every GET is conditional: the last `ETag` (or `Last-Modified`) of the URL
+//! goes out as `If-None-Match` (`If-Modified-Since`) and a 304 replays the
+//! cached body and `X-Next-Page`. A 429 stops all calls until GitLab's
+//! `Retry-After` / `RateLimit-Reset`. Requests time out (connect and total).
 
 use std::collections::BTreeSet;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+use super::conditional::{Cached, ConditionalCache};
 use super::github::check_sha;
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
     ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
+use super::rate_limit::{reset_at, Backoff};
 use super::{
     count_patch, digest, encode_segment, first_line, looks_binary, PostResultOf, ReviewProvider,
 };
@@ -118,14 +126,20 @@ pub fn normalize_base_url(url: &str) -> Option<String> {
     ok.then(|| url.to_string())
 }
 
-static CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
+/// The longest one request may take, start to end of body.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest a connection may take to open (a VPN that is down).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn build_client(timeout: Duration) -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
+        .connect_timeout(CONNECT_TIMEOUT.min(timeout))
         .build()
         // Same failure mode as `Client::new()`: no TLS backend at all.
         .expect("GitLab HTTP client")
-});
+}
 
 /// GitLab for the token's owner on one instance.
 pub struct GitlabProvider {
@@ -133,6 +147,11 @@ pub struct GitlabProvider {
     host: String,
     tokens: Box<dyn TokenSource>,
     me: Mutex<Option<GlUser>>,
+    /// Per provider (it keeps its connections alive between polls).
+    client: reqwest::blocking::Client,
+    /// Conditional-request cache of GETs, keyed by path under `/api/v4`.
+    cache: ConditionalCache,
+    limit: Backoff,
 }
 
 impl GitlabProvider {
@@ -145,29 +164,49 @@ impl GitlabProvider {
             base,
             tokens: Box::new(tokens),
             me: Mutex::new(None),
+            client: build_client(REQUEST_TIMEOUT),
+            cache: ConditionalCache::default(),
+            limit: Backoff::default(),
         })
+    }
+
+    /// Give up on a request after `timeout` instead of the default 30 s.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.client = build_client(timeout);
+        self
     }
 
     pub fn base_url(&self) -> &str {
         &self.base
     }
 
-    /// Send a GET, retrying connection-level failures (VPN or Wi-Fi coming
-    /// back after sleep) twice with a short backoff, as Podium does. A
-    /// response with any status is never retried.
-    fn send(&self, url: &str, token: &str) -> CoreResult<reqwest::blocking::Response> {
+    /// Send a GET (with `validator` as a conditional header), retrying
+    /// connection-level failures (VPN or Wi-Fi coming back after sleep)
+    /// twice with a short backoff, as Podium does. A response with any
+    /// status is never retried, and neither is a timeout: a server that hung
+    /// for the whole timeout would only hang again.
+    fn send(
+        &self,
+        url: &str,
+        token: &str,
+        validator: Option<(&str, &str)>,
+    ) -> CoreResult<reqwest::blocking::Response> {
         let mut last = "connection failed";
         for delay_ms in [0, 500, 1500] {
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            match CLIENT.get(url).header("PRIVATE-TOKEN", token).send() {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            let mut req = self.client.get(url).header("PRIVATE-TOKEN", token);
+            if let Some((name, value)) = validator {
+                req = req.header(name, value);
+            }
+            match req.send() {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     tracing::debug!("GitLab request failed: {e}");
-                    last = if e.is_timeout() {
-                        "timed out"
-                    } else {
-                        "connection failed"
-                    };
+                    if e.is_timeout() {
+                        last = "timed out";
+                        break;
+                    }
+                    last = "connection failed";
                 }
             }
         }
@@ -176,32 +215,59 @@ impl GitlabProvider {
         )))
     }
 
-    /// One GET of `path` (under `/api/v4`): the body and the next page, if
-    /// the `X-Next-Page` header names one.
+    /// One conditional GET of `path` (under `/api/v4`): the body (from the
+    /// cache on a 304) and the next page, if the `X-Next-Page` header names
+    /// one.
     fn get(&self, path: &str) -> CoreResult<(String, Option<u32>)> {
+        self.limit.check(ProviderId::Gitlab)?;
         let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
-        let response = self.send(&format!("{}/api/v4{path}", self.base), &token)?;
+        let cached = self.cache.get(path);
+        let response = self.send(
+            &format!("{}/api/v4{path}", self.base),
+            &token,
+            cached.as_deref().and_then(Cached::validator),
+        )?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(|v| v.trim().to_string())
+        };
+        let parse_next = |v: Option<&str>| v.and_then(|v| v.trim().parse().ok());
         match response.status().as_u16() {
             200 => {
-                let next = response
-                    .headers()
-                    .get("x-next-page")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.trim().parse().ok());
+                let next_raw = header("x-next-page").filter(|v| !v.is_empty());
+                let etag = header("etag");
+                let last_modified = header("last-modified");
                 let body = response
                     .text()
                     .map_err(|_| CoreError::Provider("could not read GitLab's response".into()))?;
+                let next = parse_next(next_raw.as_deref());
+                self.cache.put(
+                    path,
+                    Cached {
+                        etag,
+                        last_modified,
+                        body: body.clone(),
+                        next: next_raw,
+                    },
+                );
                 Ok((body, next))
             }
+            // Unchanged: the cached response stands.
+            304 => cached
+                .map(|c| (c.body.clone(), parse_next(c.next.as_deref())))
+                .ok_or_else(unexpected),
+            429 => Err(self
+                .limit
+                .hit(ProviderId::Gitlab, reset_at(header, Utc::now()))),
             300..=399 => Err(CoreError::Provider(
                 "GitLab redirected the request; check the URL in Settings (https, host and path)"
                     .into(),
             )),
             401 | 403 => Err(CoreError::GitlabAuth),
             404 => Err(CoreError::NotFound),
-            429 => Err(CoreError::Provider(
-                "GitLab rate limit reached, try again later".into(),
-            )),
             _ => Err(CoreError::Provider(
                 "GitLab could not fetch the merge request".into(),
             )),
@@ -543,6 +609,10 @@ impl ReviewProvider for GitlabProvider {
                 })
             })
             .collect())
+    }
+
+    fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
+        self.limit.active()
     }
 }
 
@@ -1006,8 +1076,8 @@ impl GitlabProvider {
         let payload = body.map(|b| b.to_string()).unwrap_or_default();
         let mut response = None;
         for delay_ms in [0, 500, 1500] {
-            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            let mut req = CLIENT.post(&url).header("PRIVATE-TOKEN", &token);
+            std::thread::sleep(Duration::from_millis(delay_ms));
+            let mut req = self.client.post(&url).header("PRIVATE-TOKEN", &token);
             if body.is_some() {
                 req = req
                     .header("Content-Type", "application/json")

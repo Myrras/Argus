@@ -3,7 +3,8 @@
 //!
 //! Providers are blocking (as in Podium), so the loop is a plain thread, not
 //! a tokio task. Each provider refreshes on its own thread; one failing
-//! never stops the other.
+//! never stops the other, and one review failing never drops the others.
+//! A rate-limited provider is skipped until its limit lifts.
 
 use std::collections::HashSet;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -16,7 +17,10 @@ use serde::Serialize;
 
 use crate::error::{CoreError, CoreResult};
 use crate::ids::ReviewId;
-use crate::provider::{ProviderId, ReviewDetail, ReviewProvider, ReviewRef, ReviewState, Thread};
+use crate::provider::{
+    is_rate_limited, rate_limited, ProviderId, ReviewDetail, ReviewProvider, ReviewRef,
+    ReviewState, Thread,
+};
 use crate::review::advance_with;
 use crate::store::{ReviewRecord, Store};
 
@@ -97,6 +101,10 @@ type Fetched = (ReviewRef, bool, CoreResult<(ReviewDetail, Vec<Thread>)>);
 /// no longer lists (fetched once more to learn whether they were merged,
 /// closed, or just dropped off). Merged and closed reviews are final and
 /// not fetched again.
+///
+/// While the provider is rate-limited nothing is called: one provider-level
+/// "rate limited until HH:MM" error, the stored reviews untouched. A limit
+/// hit halfway is one such error too, not one per review it cut off.
 pub fn refresh_provider(
     provider: &dyn ReviewProvider,
     store: &Store,
@@ -104,6 +112,9 @@ pub fn refresh_provider(
 ) -> (Vec<ReviewId>, Vec<RefreshError>) {
     let pid = provider.id();
     let fail = |e: CoreError| (Vec::new(), vec![RefreshError::new(pid, None, &e)]);
+    if let Some(until) = provider.rate_limited_until().filter(|u| *u > now) {
+        return fail(rate_limited(pid, until));
+    }
     let me = match provider.current_user() {
         Ok(me) => me,
         Err(e) => return fail(e),
@@ -155,6 +166,7 @@ pub fn refresh_provider(
 
     let mut changed = Vec::new();
     let mut errors = Vec::new();
+    let mut limited: Option<CoreError> = None;
     for (r, listed, result) in fetched {
         let id = r.id();
         let prev = stored.iter().find(|s| s.id == id);
@@ -175,8 +187,18 @@ pub fn refresh_provider(
         match outcome {
             Ok(true) => changed.push(id),
             Ok(false) => {}
+            Err(e) if is_rate_limited(&e) => {
+                limited.get_or_insert(e);
+            }
             Err(e) => errors.push(RefreshError::new(pid, Some(id), &e)),
         }
+    }
+    if let Some(e) = limited {
+        // The latest reset, when calls in parallel hit different ones.
+        let e = provider
+            .rate_limited_until()
+            .map_or(e, |until| rate_limited(pid, until));
+        errors.push(RefreshError::new(pid, None, &e));
     }
     (changed, errors)
 }

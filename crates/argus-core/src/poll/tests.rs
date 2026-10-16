@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -16,6 +16,12 @@ struct Fake {
     details: Mutex<HashMap<u64, CoreResult<ReviewDetail>>>,
     threads: Mutex<HashMap<u64, Vec<Thread>>>,
     down: Mutex<Option<fn() -> CoreError>>,
+    /// Reviews whose thread fetch fails, and those whose fetch panics.
+    threads_fail: Mutex<HashSet<u64>>,
+    threads_panic: Mutex<HashSet<u64>>,
+    limited: Mutex<Option<DateTime<Utc>>>,
+    /// `current_user` calls: the first call of every refresh.
+    calls: AtomicUsize,
 }
 
 impl Fake {
@@ -27,6 +33,10 @@ impl Fake {
             details: Mutex::new(HashMap::new()),
             threads: Mutex::new(HashMap::new()),
             down: Mutex::new(None),
+            threads_fail: Mutex::new(HashSet::new()),
+            threads_panic: Mutex::new(HashSet::new()),
+            limited: Mutex::new(None),
+            calls: AtomicUsize::new(0),
         }
     }
 
@@ -48,6 +58,7 @@ impl Fake {
 fn clone_err(e: &CoreError) -> CoreError {
     match e {
         CoreError::NotFound => CoreError::NotFound,
+        CoreError::Provider(m) => CoreError::Provider(m.clone()),
         _ => CoreError::Provider("scripted failure".into()),
     }
 }
@@ -60,6 +71,7 @@ impl ReviewProvider for Fake {
         &self.host
     }
     fn current_user(&self) -> CoreResult<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         match *self.down.lock().unwrap() {
             Some(e) => Err(e()),
             None => Ok(ME.into()),
@@ -76,6 +88,14 @@ impl ReviewProvider for Fake {
         }
     }
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        if self.threads_panic.lock().unwrap().contains(&r.number) {
+            panic!("scripted panic");
+        }
+        if self.threads_fail.lock().unwrap().contains(&r.number) {
+            return Err(CoreError::Provider(
+                "could not reach GitLab (timed out)".into(),
+            ));
+        }
         Ok(self
             .threads
             .lock()
@@ -93,6 +113,9 @@ impl ReviewProvider for Fake {
         _: &crate::provider::DiffRange,
     ) -> CoreResult<crate::provider::FileDiff> {
         Err(CoreError::NotFound)
+    }
+    fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
+        *self.limited.lock().unwrap()
     }
 }
 
@@ -281,4 +304,82 @@ fn the_loop_refreshes_on_an_interval_and_on_demand_and_stops() {
     // Only the first refresh changed anything.
     assert_eq!(*changed.lock().unwrap(), [review_ref(12).id()]);
     assert!(store.review(review_ref(12).id()).unwrap().is_some());
+}
+
+#[test]
+fn a_review_whose_threads_fail_or_panic_does_not_drop_the_others() {
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    for n in [21, 22, 23, 24, 25] {
+        gl.serve(gitlab_detail(n, "a1"), vec![]);
+    }
+    gl.threads_fail.lock().unwrap().insert(22);
+    gl.threads_panic.lock().unwrap().insert(24);
+    let store = Store::in_memory().unwrap();
+    let report = refresh_all(&as_providers(&[gl]), &store, at(10, 12));
+    let id = |n| gitlab_detail(n, "a1").review.id();
+    // Results keep the listing order.
+    assert_eq!(report.changed, [id(21), id(23), id(25)]);
+    let failed: Vec<_> = report.errors.iter().map(|e| e.review).collect();
+    assert_eq!(failed, [Some(id(22)), Some(id(24))]);
+    assert!(store.review(id(22)).unwrap().is_none());
+}
+
+#[test]
+fn a_rate_limited_provider_is_skipped_until_the_reset() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    gl.serve(gitlab_detail(21, "a1"), vec![]);
+    let until = at(10, 13);
+    *gl.limited.lock().unwrap() = Some(until);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(&[gh.clone(), gl.clone()]);
+
+    let report = refresh_all(&providers, &store, at(10, 12));
+    // GitHub refreshed; GitLab was not called at all.
+    assert_eq!(report.changed, [review_ref(12).id()]);
+    assert_eq!(gl.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(report.errors.len(), 1);
+    let e = &report.errors[0];
+    assert_eq!(
+        (e.provider, e.review, e.unavailable),
+        (ProviderId::Gitlab, None, false)
+    );
+    let hhmm = until
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert!(
+        e.message
+            .contains(&format!("GitLab is rate limited until {hhmm}")),
+        "{}",
+        e.message
+    );
+
+    // Past the reset it is refreshed again.
+    let report = refresh_all(&providers, &store, at(10, 14));
+    assert!(report.errors.is_empty());
+    assert_eq!(report.changed, [gitlab_detail(21, "a1").review.id()]);
+    assert_eq!(gl.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_limit_hit_halfway_is_one_provider_error() {
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    for n in [21, 22, 23] {
+        gl.serve(gitlab_detail(n, "a1"), vec![]);
+    }
+    let until = at(10, 13);
+    for n in [22, 23] {
+        gl.details.lock().unwrap().insert(
+            n,
+            Err(crate::provider::rate_limited(ProviderId::Gitlab, until)),
+        );
+    }
+    let store = Store::in_memory().unwrap();
+    let report = refresh_all(&as_providers(&[gl]), &store, at(10, 12));
+    assert_eq!(report.changed, [gitlab_detail(21, "a1").review.id()]);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].review, None);
+    assert!(report.errors[0].message.contains("rate limited until"));
 }

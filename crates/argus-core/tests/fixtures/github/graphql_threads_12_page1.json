@@ -1,0 +1,28 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "Y3Vyc29yOjI=" },
+          "nodes": [
+            {
+              "isResolved": true,
+              "isOutdated": false,
+              "comments": { "nodes": [{ "url": "https://github.com/acme-fixture/widgets/pull/12#discussion_r501" }] }
+            },
+            {
+              "isResolved": false,
+              "isOutdated": true,
+              "comments": { "nodes": [{ "url": "https://github.com/acme-fixture/widgets/pull/12#discussion_r510" }] }
+            },
+            {
+              "isResolved": true,
+              "isOutdated": false,
+              "comments": { "nodes": [{ "url": "https://github.com/acme-fixture/widgets/pull/12#discussion_r9999" }] }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

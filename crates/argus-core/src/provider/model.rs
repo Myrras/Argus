@@ -237,7 +237,8 @@ pub struct Thread {
     pub id: String,
     pub author: String,
     pub created_at: DateTime<Utc>,
-    /// GitHub's REST API does not expose this; always `false` there for now.
+    /// GitHub: GraphQL's `isResolved` (REST has no such field); `false`
+    /// when that query fails.
     pub resolved: bool,
     pub outdated: bool,
     /// `None` for a GitLab discussion on the MR as a whole.
