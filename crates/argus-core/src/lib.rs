@@ -22,12 +22,15 @@
 //! - [`post`] — posting comments, replies and approvals (explicit only).
 //! - [`history`] — then/now thread history: line walk, snapshots, timeline.
 //! - [`ai`] — the AI pass: headless agent runs, findings, checklist, verdicts.
+//! - [`git`] — a configured local clone, read-only: history walks and file
+//!   contents without the API, which stays the fallback.
 
 #![forbid(unsafe_code)]
 
 pub mod ai;
 pub mod error;
 pub mod files;
+pub mod git;
 pub mod history;
 pub mod ids;
 mod platform;
@@ -258,11 +261,19 @@ impl Core {
             .ok_or_else(|| CoreError::Provider(format!("{} is not set up", record.review.provider)))
     }
 
-    /// The content of `path` at `sha` in the review's repository (blocking).
+    /// The content of `path` at `sha` in the review's repository (blocking):
+    /// from the local clone when one is configured and has the commit, from
+    /// the provider otherwise.
     pub fn file_at(&self, id: ReviewId, sha: &str, path: &str) -> CoreResult<String> {
         let record = self.review(id)?;
-        self.provider_for(&record)?
-            .file_at(&record.review, sha, path)
+        let settings = self.settings();
+        let clone = settings
+            .clone_path(&record.review)
+            .and_then(git::LocalClone::open);
+        git::file_or(clone.as_ref(), sha, path, || {
+            self.provider_for(&record)?
+                .file_at(&record.review, sha, path)
+        })
     }
 
     /// The review's changed files with their viewed marks (blocking): its

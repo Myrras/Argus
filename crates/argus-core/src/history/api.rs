@@ -7,8 +7,14 @@
 //! (thread, head) unless a provider call failed on the way, so a network
 //! hiccup is retried on the next call instead of sticking until the head
 //! moves.
+//!
+//! With a local clone configured for the repository, a thread whose commit
+//! and head are both in the clone is walked through git ([`LocalClone`]),
+//! and files are read from it; anything the clone cannot answer goes to the
+//! provider, per thread and per file.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use super::cache::{CachedHistory, CachedMapping};
@@ -19,6 +25,7 @@ use super::{
     CodeSnapshot, LineStatus, SnapshotSource, SnapshotText, ThreadHistory, ThreadResolution,
 };
 use crate::error::{CoreError, CoreResult};
+use crate::git::{file_or, LocalClone};
 use crate::ids::{ReviewId, ThreadId};
 use crate::provider::{Anchor, CommitInfo, ReviewProvider, ReviewRef, Side, Thread};
 use crate::review::{untouched_with, RoundInput};
@@ -77,18 +84,22 @@ impl Core {
     fn histories(&self, id: ReviewId, only: Option<&[ThreadId]>) -> CoreResult<Vec<ThreadHistory>> {
         let record = self.review(id)?;
         let provider = self.provider_for(&record);
-        compute_histories(&self.store, &record, &provider, only)
+        let settings = self.settings();
+        let clone = settings.clone_path(&record.review);
+        compute_histories(&self.store, &record, &provider, clone, only)
     }
 }
 
 /// The histories of `record`'s threads (or just those in `only`): cached ones as
-/// they are, the rest computed through `provider` and cached. Free of
-/// [`Core`] so the AI pass can run it from its job thread, where it holds
-/// the store and the provider but no `Core`.
+/// they are, the rest computed through `provider` (and the local clone at
+/// `clone`, when set) and cached. Free of [`Core`] so the AI pass can run
+/// it from its job thread, where it holds the store and the provider but no
+/// `Core`.
 pub(crate) fn compute_histories(
     store: &Store,
     record: &ReviewRecord,
     provider: &CoreResult<Arc<dyn ReviewProvider>>,
+    clone: Option<&Path>,
     only: Option<&[ThreadId]>,
 ) -> CoreResult<Vec<ThreadHistory>> {
     let threads: Vec<StoredThread> = store
@@ -108,7 +119,7 @@ pub(crate) fn compute_histories(
         .collect();
     if !misses.is_empty() {
         let wanted: Vec<&Thread> = misses.iter().map(|&i| &threads[i].thread).collect();
-        let computed = compute(provider, record, &wanted);
+        let computed = compute(provider, record, clone, &wanted);
         for (&i, (history, cacheable)) in misses.iter().zip(computed) {
             if cacheable {
                 store.put_history(threads[i].thread_id, &record.head_sha, &history)?;
@@ -129,6 +140,7 @@ pub(crate) fn compute_histories(
 fn compute(
     provider: &CoreResult<Arc<dyn ReviewProvider>>,
     record: &ReviewRecord,
+    clone: Option<&Path>,
     threads: &[&Thread],
 ) -> Vec<(CachedHistory, bool)> {
     let provider = match provider {
@@ -155,6 +167,7 @@ fn compute(
         head: &record.head_sha,
         commits: &detail.commits,
         source: ApiSource::new(provider.as_ref(), &record.review, &detail.commits),
+        clone: clone.and_then(LocalClone::open),
         resolutions,
         resolutions_ok,
     };
@@ -215,6 +228,8 @@ struct Ctx<'a> {
     head: &'a str,
     commits: &'a [CommitInfo],
     source: ApiSource<'a>,
+    /// The repository's local clone, when one is configured and usable.
+    clone: Option<LocalClone>,
     resolutions: HashMap<String, Vec<ThreadResolution>>,
     /// The resolve events could be read (or were not needed).
     resolutions_ok: bool,
@@ -392,7 +407,7 @@ fn compute_one(ctx: &Ctx<'_>, thread: &Thread) -> (CachedHistory, bool) {
                 start_line: start,
                 line: end,
             };
-            let mut mapping = match walk_line(&ctx.source, &walk_start, ctx.head) {
+            let mut mapping = match walk(ctx, &thread.id, &walk_start) {
                 Ok(m) => m,
                 Err(e) => {
                     transient |= is_transient(&e);
@@ -439,6 +454,39 @@ fn compute_one(ctx: &Ctx<'_>, thread: &Thread) -> (CachedHistory, bool) {
     (history, !transient)
 }
 
+/// Follow the lines to head: through the local clone when it has both ends
+/// (exact, and no API calls), through the provider otherwise or when git
+/// fails on the way. Why the clone was passed over is logged at debug
+/// level.
+fn walk(ctx: &Ctx<'_>, thread: &str, start: &WalkStart) -> CoreResult<LineMapping> {
+    if let Some(clone) = &ctx.clone {
+        let missing = [start.sha.as_str(), ctx.head]
+            .into_iter()
+            .find(|sha| !clone.has_commit(sha));
+        match missing {
+            None => match walk_line(clone, start, ctx.head) {
+                Ok(m) => return Ok(m),
+                Err(e) => tracing::debug!(
+                    "thread {thread}: the local clone walk failed ({e}); using the API"
+                ),
+            },
+            Some(sha) => tracing::debug!(
+                "thread {thread}: commit {sha} is not in the local clone (not fetched?); \
+                 using the API"
+            ),
+        }
+    }
+    walk_line(&ctx.source, start, ctx.head)
+}
+
+/// `path` at `sha`: from the local clone when it can answer, else from the
+/// provider.
+fn file_at(ctx: &Ctx<'_>, sha: &str, path: &str) -> CoreResult<String> {
+    file_or(ctx.clone.as_ref(), sha, path, || {
+        ctx.provider.file_at(ctx.review, sha, path)
+    })
+}
+
 fn unlocated_mapping(reason: impl Into<String>) -> LineMapping {
     LineMapping {
         status: LineStatus::unlocated(reason),
@@ -459,7 +507,7 @@ fn fetch_window(
     end: u32,
     transient: &mut bool,
 ) -> Option<CodeSnapshot> {
-    match ctx.provider.file_at(ctx.review, sha, path) {
+    match file_at(ctx, sha, path) {
         Ok(text) => window(sha, path, &text, start, end),
         Err(e) => {
             *transient |= is_transient(&e);
@@ -497,7 +545,7 @@ fn now_window(
             touched,
             ..
         } => {
-            let text = match ctx.provider.file_at(ctx.review, ctx.head, path) {
+            let text = match file_at(ctx, ctx.head, path) {
                 Ok(t) => t,
                 Err(e) => {
                     *transient |= is_transient(&e);
@@ -517,7 +565,7 @@ fn now_window(
         }
         LineStatus::Deleted { path, .. } => {
             let near = mapping.near?;
-            match ctx.provider.file_at(ctx.review, ctx.head, path) {
+            match file_at(ctx, ctx.head, path) {
                 Ok(text) => around(ctx.head, path, &text, near),
                 Err(e) => {
                     *transient |= is_transient(&e);
