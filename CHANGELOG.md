@@ -26,28 +26,35 @@ when it merges.
   was re-requested) and how many of your threads nobody has touched since.
   "Mark round reviewed" moves the item to Waiting on author, with a
   confirmation; items you approved drop off the list.
-- A detail view per review, with a Threads and a Files tab: its title, a link
-  that opens it in the browser,
-  status and round, and every comment thread, yours first and the others
-  folded under their own heading. Each thread shows its file and line (or
-  that it is on the merge request as a whole), whether it is resolved or
-  outdated, and all its comments in order. Outdated threads are never hidden.
-- The Files tab shows the review's code like a platform's "Files changed"
-  tab, better organised: a file tree (folders or a flat list, with a filter)
-  showing per file whether it was added, changed, removed or renamed, its
-  added and removed lines, its threads (yours highlighted) and a Viewed
-  checkbox, beside a syntax-highlighted diff of every file, unified or side
-  by side (remembered), with unchanged code folded until you expand it.
-  Threads sit under their line, yours open and the others folded to one
-  line; outdated threads are listed at the top of their file with the code
-  they were made on and a link to their history in the Threads tab. Viewed
-  marks are kept per review and clear when the file changes again, with
-  "N of M files viewed" above the diff. From the second round, "Since my
-  last review" shows only what changed since you last marked a round
-  reviewed. Binary files and very large diffs stay folded ("Load anyway"),
-  and files load as you scroll to them. `j`/`k` move between files, `v`
-  marks the selected one viewed. Commenting from a line comes in a later
-  release.
+- A detail view per review, on one scrolling page like a platform's "Files
+  changed" tab combined with its conversation, better organised: its title,
+  a link that opens it in the browser, status and round, then a
+  Conversation section with the comments on the review as a whole (yours
+  first, the others folded to one line), then every changed file with its
+  threads. A file tree (folders or a flat list, with a filter) starts with
+  the Conversation and shows per file whether it was added, changed, removed
+  or renamed, its added and removed lines, its threads (yours highlighted)
+  and a Viewed checkbox; clicking an entry scrolls to it. Each file shows a
+  syntax-highlighted diff, unified or side by side (remembered), with
+  unchanged code folded until you expand it. Threads sit under their line,
+  yours open and the others folded; outdated threads are listed at the top
+  of their file with the code they were made on, and are never hidden.
+  Threads on files the diff does not show are listed under the
+  Conversation. Each thread on code can expand its then/now history in
+  place. Viewed marks are kept per review and clear when the file changes
+  again, with "N of M files viewed" above the page. From the second round,
+  "Since my last review" shows only what changed since you last marked a
+  round reviewed. Binary files and very large diffs stay folded ("Load
+  anyway"), and files load as you scroll to them. `j`/`k` move through the
+  Conversation and the files, `v` marks the selected file viewed.
+  Commenting from a line comes in a later release.
+- Comments render as markdown: headings, lists, task lists, tables, quotes,
+  links (they open in your browser) and code blocks highlighted by language
+  (jq included) with a copy button. Images show as links; HTML in a comment
+  shows as text and never runs. Suggested changes (GitHub's and GitLab's
+  `suggestion` blocks) show as a small diff of the lines they replace and
+  the suggested lines, or just the suggested lines when the original ones
+  are unavailable. Argus never applies them.
 - Reviews refresh in the background every 3 minutes, or on demand with the
   refresh button or `r`, with the time of the last refresh in the title bar.
   The sidebar's Providers section shows each provider's state and says when
@@ -64,7 +71,7 @@ when it merges.
   repository), and Shortcuts. Switches apply at once, text fields have their
   own Save.
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` (or
-  `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in the Files tab,
+  `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in a review,
   `⌘,` for Settings. Every shortcut
   can be rebound in Settings → Shortcuts.
 

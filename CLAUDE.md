@@ -31,9 +31,8 @@ sibling app Iris (`../Iris`).
     (Argus violet is the only brand difference), title bar on the canvas
     (`titleBarStyle: Overlay` on macOS, own `WindowControls` on Windows),
     sidebar island (`Sidebar`: Reviews = `ReviewList`, Providers =
-    `ProvidersSection`), resizer, the work column (`DetailTabBar` chips
-    Threads / Files over the detail island; `WelcomeScreen` without a
-    selection), `Modal`, `Toasts` (`toastStore`), `ContextMenu`, lucide
+    `ProvidersSection`), resizer, the work column (the detail island;
+    `WelcomeScreen` without a selection), `Modal`, `Toasts` (`toastStore`), `ContextMenu`, lucide
     `icons.tsx`. UI prefs are localStorage-only: `themeStore` → `argus.theme`
     (dark/light/retro), `layoutStore` → `argus.layout`.
   - Settings as in Iris: `SettingsModal` (tabs General / GitHub / GitLab /
@@ -47,19 +46,31 @@ sibling app Iris (`../Iris`).
     keymap's `openSettings` (Ctrl+, elsewhere). Shortcuts: `lib/keymap`
     (rebindable, bare keys allowed unlike Iris), `useAppShortcuts`,
     `ShortcutsTab`. Local clones use the dialog plugin's folder picker.
-  - Code view (Files tab): `FilesTab` = `FileTree` (`data-slot="file-tree"`,
-    tree/flat + filter) beside the diff column (`data-slot="diff"`): one
-    `FileDiffCard` per file, contents loaded lazily (IntersectionObserver or
-    selection; cached per review/sha/path in `codeViewStore`), binary and
-    large (>1500 lines or no patch) diffs as cards. `DiffEditor` wraps
-    `@codemirror/merge` (`unifiedMergeView` / `MergeView`, layout in
-    `layoutStore.diffLayout`); the editor setup (`lib/codemirror`) is
-    Selene's, themed on the tokens (`--diff-*`). Threads: `lib/diffThreads`
-    places current ones in CodeMirror block widgets (`ThreadBlock`, its own
-    React root), outdated ones are listed at the top of their file (GitHub
-    `diff_hunk` / GitLab line + commit) with a "Then/now history" link that
-    focuses the thread in the Threads tab (`codeViewStore.focusThread`).
-    The gutter "+" is the disabled M4 comment hook. Core: `fetch_files`
+  - Review view (one page, no tabs): `ReviewDetail` = header + `ReviewView`
+    = `FileTree` (`data-slot="file-tree"`, a Conversation entry first, then
+    tree/flat + filter) beside the page (`data-slot="diff"`):
+    `ConversationCard` (threads without a code reference, mine first; plus
+    "On other files" for anchored threads whose file the list does not show,
+    `diffThreads.conversationThreads`) then one `FileDiffCard` per file,
+    contents loaded lazily (IntersectionObserver or selection; cached per
+    review/sha/path in `codeViewStore`), binary and large (>1500 lines or no
+    patch) diffs as cards. `codeViewStore.selected`/`order` hold the
+    `CONVERSATION` key first, so j/k stop there before the files.
+    `DiffEditor` wraps `@codemirror/merge` (`unifiedMergeView` /
+    `MergeView`, layout in `layoutStore.diffLayout`; the old `detailTab` key
+    is ignored); the editor setup (`lib/codemirror`) is Selene's, themed on
+    the tokens (`--diff-*`). Threads: `lib/diffThreads` places current ones
+    in CodeMirror block widgets (`ThreadBlock`, its own React root), outdated
+    ones are listed at the top of their file (GitHub `diff_hunk` / GitLab
+    line + commit). `ThreadBlock` is the one thread card everywhere; its
+    "Then/now history" toggle expands the M3 slot (`data-slot="then-now"`)
+    in place. Comment bodies: `Markdown` (Podium's react-markdown +
+    remark-gfm, no raw HTML; links via the opener plugin; images as links;
+    fences highlighted by `CodeEditorBlock` with `languageForInfo`, jq as a
+    stream mode). Suggestions: `lib/suggestions` (pure: GitHub
+    `suggestion` = start_line..line, GitLab `suggestion:-N+M`; original
+    lines from `file_contents` at the anchor's commit, else `diff_hunk`)
+    rendered by `SuggestedChange`; never applied. The gutter "+" is the disabled M4 comment hook. Core: `fetch_files`
     (`DiffRange::Review` / `Compare`) per provider; left side = GitHub merge
     base (compare API), GitLab latest version `base_sha`; since-last-review
     = GitHub `compare/last...head` (left: its merge base), GitLab
@@ -67,8 +78,8 @@ sibling app Iris (`../Iris`).
     (migration 2), keyed path + `content_sha` (GitHub blob sha, GitLab diff
     digest) of the review's own diff. Keys `nextFile`/`prevFile`/
     `toggleViewed` (scope `files`).
-  - Next: M3 (then/now thread history; the thread card has a
-    `data-slot="then-now"` placeholder).
+  - Next: M3 (then/now thread history; the thread card's "Then/now
+    history" toggle expands the `data-slot="then-now"` placeholder).
 
 ## Architecture
 
