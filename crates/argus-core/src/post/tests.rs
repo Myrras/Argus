@@ -394,6 +394,8 @@ struct Fake {
     /// Whether an approval shows on the next fetch.
     approval_shows: Mutex<bool>,
     fetches: Mutex<u32>,
+    /// `fetch_files` calls.
+    file_reads: Mutex<u32>,
 }
 
 impl Fake {
@@ -428,6 +430,7 @@ impl ReviewProvider for Fake {
         Err(CoreError::NotFound)
     }
     fn fetch_files(&self, _: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+        *self.file_reads.lock().unwrap() += 1;
         Ok(match range {
             DiffRange::Review { head, .. } => {
                 diff("mergebase", head, self.files.lock().unwrap().clone())
@@ -499,6 +502,7 @@ fn setup() -> (Core, Arc<Fake>, ReviewId) {
         approved_heads: Mutex::new(Vec::new()),
         approval_shows: Mutex::new(true),
         fetches: Mutex::new(0),
+        file_reads: Mutex::new(0),
     });
     let core = Core::with_providers(Store::in_memory().unwrap(), vec![fake.clone()]);
     assert!(core.refresh().errors.is_empty());
@@ -729,6 +733,24 @@ fn commentable_lines_come_from_the_stored_heads_diff() {
         core.commentable_lines(id, "src/none.rs"),
         Err(CoreError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn commentable_lines_read_the_diff_once_per_head() {
+    let (core, fake, id) = setup();
+    let reads = || *fake.file_reads.lock().unwrap();
+    let before = reads();
+    core.commentable_lines(id, "src/cache.rs").unwrap();
+    core.commentable_lines(id, "src/cache.rs").unwrap();
+    let _ = core.commentable_lines(id, "src/none.rs");
+    assert_eq!(reads(), before + 1);
+    // A new stored head reads it again.
+    push_h2(&fake);
+    core.refresh();
+    let after_refresh = reads();
+    let lines = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(lines.head_sha, "h2");
+    assert_eq!(reads(), after_refresh + 1);
 }
 
 #[test]

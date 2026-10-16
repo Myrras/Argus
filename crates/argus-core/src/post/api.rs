@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 
 use super::anchor;
 use super::{
-    commentable_hunks, CommentableLines, NewComment, PostError, PostErrorKind, PostResult,
-    PostedComment, PostedNote,
+    commentable_hunks, CommentableCache, CommentableLines, NewComment, PostError, PostErrorKind,
+    PostResult, PostedComment, PostedNote,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::files;
@@ -150,25 +150,50 @@ impl Core {
 
     /// The lines of `path` a new comment can go on, per hunk of the review's
     /// diff at its stored head (what the code view shows). Blocking.
+    ///
+    /// The diff is read once per review and stored head, not once per file:
+    /// the cache lock is held while reading, so the code view's calls for
+    /// each file of a review share one fetch.
     pub fn commentable_lines(&self, id: ReviewId, path: &str) -> CoreResult<CommentableLines> {
         let record = self.review(id)?;
-        let diff = self
-            .provider_for(&record)?
-            .fetch_files(&record.review, &files::review_range(&record))?;
-        let file =
-            diff.files.iter().find(|f| f.path == path).ok_or_else(|| {
-                CoreError::InvalidInput("not a changed file of this review".into())
-            })?;
+        let mut cache = self.commentable.lock().expect("commentable lock poisoned");
+        let fresh = cache
+            .as_ref()
+            .is_some_and(|c| c.review == id && c.stored_head == record.head_sha);
+        if !fresh {
+            let diff = self
+                .provider_for(&record)?
+                .fetch_files(&record.review, &files::review_range(&record))?;
+            *cache = Some(CommentableCache {
+                review: id,
+                stored_head: record.head_sha.clone(),
+                files: diff
+                    .files
+                    .iter()
+                    .map(|f| {
+                        let hunks = f
+                            .patch
+                            .as_deref()
+                            .map(commentable_hunks)
+                            .unwrap_or_default();
+                        (f.path.clone(), hunks)
+                    })
+                    .collect(),
+                base_sha: diff.base_sha,
+                head_sha: diff.head_sha,
+            });
+        }
+        let c = cache.as_ref().expect("filled above");
+        let hunks = c
+            .files
+            .get(path)
+            .ok_or_else(|| CoreError::InvalidInput("not a changed file of this review".into()))?;
         Ok(CommentableLines {
             review_id: id,
-            path: file.path.clone(),
-            hunks: file
-                .patch
-                .as_deref()
-                .map(commentable_hunks)
-                .unwrap_or_default(),
-            base_sha: diff.base_sha,
-            head_sha: diff.head_sha,
+            path: path.to_string(),
+            hunks: hunks.clone(),
+            base_sha: c.base_sha.clone(),
+            head_sha: c.head_sha.clone(),
         })
     }
 

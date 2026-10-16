@@ -82,6 +82,10 @@ pub struct Core {
     /// (path → content sha) — what a viewed mark is stored with. Memory
     /// only; refetched when the head moved.
     content_keys: Mutex<HashMap<ReviewId, (String, files::ContentKeys)>>,
+    /// The commentable lines of the last review asked for, per file, at its
+    /// stored head: the code view asks once per file, and every file would
+    /// otherwise refetch the whole diff. Memory only.
+    commentable: Mutex<Option<post::CommentableCache>>,
 }
 
 impl Default for Core {
@@ -130,6 +134,7 @@ impl Core {
             providers: Mutex::new(providers),
             poller: Mutex::new(None),
             content_keys: Mutex::new(HashMap::new()),
+            commentable: Mutex::new(None),
         }
     }
 

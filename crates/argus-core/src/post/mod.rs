@@ -149,6 +149,18 @@ pub struct CommentableLines {
     pub hunks: Vec<CommentableHunk>,
 }
 
+/// [`Core::commentable_lines`](crate::Core::commentable_lines)'s cache: one
+/// review's hunks per path, at the diff they were read from.
+#[derive(Debug, Clone)]
+pub(crate) struct CommentableCache {
+    pub review: ReviewId,
+    pub base_sha: String,
+    pub head_sha: String,
+    /// The head the review was stored at when read (the cache key).
+    pub stored_head: String,
+    pub files: std::collections::HashMap<String, Vec<CommentableHunk>>,
+}
+
 /// What a post failure is, for the UI to branch on. The [`CoreError`] kinds
 /// keep the names the shell's `IpcError` gives them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
