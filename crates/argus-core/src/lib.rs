@@ -21,9 +21,11 @@
 //! - [`files`] — the code view's file list and viewed marks.
 //! - [`post`] — posting comments, replies and approvals (explicit only).
 //! - [`history`] — then/now thread history: line walk, snapshots, timeline.
+//! - [`ai`] — the AI pass: headless agent runs, findings, checklist, verdicts.
 
 #![forbid(unsafe_code)]
 
+pub mod ai;
 pub mod error;
 pub mod files;
 pub mod history;
@@ -45,6 +47,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
+pub use ai::{
+    AiRunState, AiRunStatus, AiStateCallback, ChecklistId, ChecklistItem, Finding, FindingId,
+    Severity, Verdict, VerdictLabel,
+};
 pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
 pub use history::{LineStatus, ThreadHistory};
@@ -85,6 +91,8 @@ pub struct Core {
     /// (path → content sha) — what a viewed mark is stored with. Memory
     /// only; refetched when the head moved.
     content_keys: Mutex<HashMap<ReviewId, (String, files::ContentKeys)>>,
+    /// The AI pass' scheduler (see [`ai`]).
+    ai: ai::runtime::AiRuntime,
 }
 
 impl Default for Core {
@@ -126,13 +134,21 @@ impl Core {
         providers: Option<Vec<Arc<dyn ReviewProvider>>>,
     ) -> Self {
         let providers = providers.unwrap_or_else(|| provider::from_settings(&settings));
+        let store = Arc::new(store);
+        let ai = ai::runtime::AiRuntime::new(
+            store.clone(),
+            settings.ai.enabled,
+            Arc::new(ai::job::execute),
+            ai::MAX_CONCURRENT,
+        );
         Self {
-            store: Arc::new(store),
+            store,
             settings_path,
             settings: Mutex::new(settings),
             providers: Mutex::new(providers),
             poller: Mutex::new(None),
             content_keys: Mutex::new(HashMap::new()),
+            ai,
         }
     }
 
@@ -158,6 +174,7 @@ impl Core {
             settings.save(path)?;
         }
         *self.settings.lock().expect("settings lock poisoned") = settings.clone();
+        self.ai.set_enabled(settings.ai.enabled);
         *self.providers.lock().expect("providers lock poisoned") =
             provider::from_settings(&settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();

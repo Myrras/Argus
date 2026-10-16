@@ -144,6 +144,15 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (review_id, path)
     );
     "#,
+    // 3 and 4: intentionally empty. M3 (thread history) and M4 (posting)
+    // needed no schema change, but the numbers were reserved for them while
+    // the three cores were built in parallel. Never replace these with real
+    // steps: later steps exist, so databases already past them would skip
+    // the change. New schema goes at the end.
+    "-- 3: reserved (M3)",
+    "-- 4: reserved (M4)",
+    // 5: AI run state and the side of a finding (see `ai::store`).
+    crate::ai::store::MIGRATION,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus
