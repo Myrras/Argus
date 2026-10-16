@@ -84,6 +84,7 @@ impl RunRow {
             last_done_round: self.last_done_round,
             dropped_findings: self.dropped_findings,
             dropped_verdicts: self.dropped_verdicts,
+            read_only_guaranteed: true,
         }
     }
 }

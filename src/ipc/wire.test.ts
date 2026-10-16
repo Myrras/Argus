@@ -325,6 +325,7 @@ const aiState: AiRunState = {
   lastDoneRound: 2,
   droppedFindings: 0,
   droppedVerdicts: 0,
+  readOnlyGuaranteed: true,
 };
 
 const finding: Finding = {

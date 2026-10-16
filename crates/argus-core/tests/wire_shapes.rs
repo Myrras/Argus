@@ -429,6 +429,7 @@ fn current() -> Value {
         last_done_round: Some(2),
         dropped_findings: 0,
         dropped_verdicts: 0,
+        read_only_guaranteed: true,
     };
     let finding_id = FindingId::new();
     let finding = Finding {

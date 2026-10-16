@@ -102,6 +102,7 @@ fn ctx(settings: Settings, provider: Arc<dyn ReviewProvider>) -> JobContext {
         settings,
         provider,
         timeout: Duration::from_secs(20),
+        child: Default::default(),
     }
 }
 
@@ -527,6 +528,10 @@ impl Probe {
         )
     }
 
+    fn into_executor(self) -> Executor {
+        Arc::new(self).executor()
+    }
+
     fn open(&self) {
         *self.gate.lock().unwrap() = true;
         self.opened.notify_all();
@@ -620,6 +625,90 @@ fn cancel_stops_running_and_drops_queued_runs() {
     assert!(rt.wait_idle(Duration::from_secs(5)));
     assert_eq!(rt.state(ids[1]).unwrap().status, AiRunStatus::Done);
     assert_eq!(rt.state(ids[2]).unwrap().status, AiRunStatus::NotStarted);
+}
+
+#[test]
+fn nothing_starts_while_the_ai_pass_is_off() {
+    let (store, ids) = store_with(&[1]);
+    let probe = Arc::new(Probe::default());
+    let rt = AiRuntime::new(store, false, probe.executor(), MAX_CONCURRENT);
+    let c = ctx(Settings::default(), FakeProvider::new(&["src/a.rs"]));
+    assert!(!rt.enqueue(ids[0], c.clone()));
+    // A run that reached the queue before the pass was turned off (the
+    // race of an enqueue with `set_enabled(false)`) still never starts.
+    rt.queue_unchecked(ids[0], c);
+    rt.pump();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shutdown_cancels_everything_and_starts_nothing_after() {
+    let (store, ids) = store_with(&[1, 2, 3]);
+    let probe = Arc::new(Probe::default());
+    let rt = AiRuntime::new(store.clone(), true, probe.executor(), MAX_CONCURRENT);
+    let c = ctx(Settings::default(), FakeProvider::new(&["src/a.rs"]));
+    for id in &ids {
+        rt.enqueue(*id, c.clone());
+    }
+    probe.wait_starts(2);
+    let start = Instant::now();
+    assert!(rt.shutdown(Duration::from_secs(5)));
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(!rt.busy(ids[0]) && !rt.busy(ids[2]));
+    for id in &ids[..2] {
+        let st = rt.state(*id).unwrap();
+        assert_eq!(
+            (st.status, st.error.as_deref()),
+            (AiRunStatus::Failed, Some(CANCELLED))
+        );
+    }
+    assert!(!rt.enqueue(ids[2], c));
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn a_secret_in_the_answer_never_reaches_the_store() {
+    let (store, ids) = store_with(&[1]);
+    let token = format!("ghp_{}", "F1xture".repeat(5));
+    let t2 = token.clone();
+    let ex: Executor = Arc::new(
+        move |_: &Store, _: &ReviewRecord, _: &JobContext, _: &AtomicBool| {
+            Ok(RunOutput {
+                findings: vec![RawFinding {
+                    body: format!("~/.config/gh/hosts.yml holds {t2}"),
+                    ..finding("src/a.rs", 1, Severity::High, "Token in a file")
+                }],
+                checklist: vec![format!("Rotate {t2}")],
+                ..RunOutput::default()
+            })
+        },
+    );
+    let rt = AiRuntime::new(store.clone(), true, ex, MAX_CONCURRENT);
+    rt.enqueue(ids[0], ctx(Settings::default(), FakeProvider::new(&[])));
+    assert!(rt.wait_idle(Duration::from_secs(5)));
+    let f = &ai_store::findings(&store, ids[0]).unwrap()[0];
+    assert_eq!(f.body, "~/.config/gh/hosts.yml holds [redacted]");
+    let items = ai_store::checklist(&store, ids[0]).unwrap();
+    assert_eq!(items[0].text, "Rotate [redacted]");
+    assert!(!format!("{f:?}{items:?}").contains(&token));
+}
+
+#[test]
+fn the_state_says_whether_the_agent_is_read_only_for_certain() {
+    let (store, ids) = store_with(&[1]);
+    let rt = AiRuntime::new(
+        store,
+        true,
+        Probe::default().into_executor(),
+        MAX_CONCURRENT,
+    );
+    rt.set_adapter("claude");
+    assert!(rt.state(ids[0]).unwrap().read_only_guaranteed);
+    rt.set_adapter("auggie");
+    assert!(!rt.state(ids[0]).unwrap().read_only_guaranteed);
+    rt.set_enabled(false);
+    assert!(!rt.state(ids[0]).unwrap().read_only_guaranteed);
 }
 
 #[test]
@@ -1110,6 +1199,11 @@ n=$((n + 1))
 echo "$n" > "$dir/count"
 printf '%s\n' "$@" > "$dir/argv$n.txt"
 pwd -P > "$dir/cwd$n.txt"
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "--settings" ]; then cp "$a" "$dir/settings$n.json"; fi
+  prev="$a"
+done
 cat > "$dir/stdin$n.txt"
 find . -type f > "$dir/ls$n.txt" 2>/dev/null
 echo '{"type":"system","subtype":"init","session_id":"fake"}'
@@ -1189,6 +1283,11 @@ fn claude_run_in_a_snapshot_dir() {
     assert!(stdin.contains(prompt::FIRST_ROUND_TASK));
     assert!(stdin.contains("+let ttl = 0;"));
     assert!(!stdin.contains("Repository conventions"));
+    assert!(!argv.contains("--add-dir"));
+    assert!(
+        argv.contains("--setting-sources\nuser\n--settings\n"),
+        "{argv}"
+    );
     let ls = read("ls1.txt");
     assert!(ls.contains("./threads.json"), "{ls}");
     assert!(ls.contains("./diff/src/a.rs.diff"), "{ls}");
@@ -1248,13 +1347,49 @@ fn claude_runs_in_the_clone_with_its_conventions_in_a_later_round() {
         DiffRange::Compare { from, .. } if from == "h0"
     ));
     let read = |name: &str| std::fs::read_to_string(bin.path().join(name)).unwrap();
-    assert_eq!(
-        PathBuf::from(read("cwd1.txt").trim()),
-        clone.path().canonicalize().unwrap()
+    // Run in its own temp dir, the clone given as an extra directory: the
+    // checkout's own agent settings never load.
+    let cwd = PathBuf::from(read("cwd1.txt").trim());
+    assert!(cwd.to_string_lossy().contains("argus-ai-"), "{cwd:?}");
+    let canonical_clone = clone.path().canonicalize().unwrap();
+    let argv: Vec<String> = read("argv1.txt").lines().map(str::to_string).collect();
+    let after = |flag: &str| {
+        argv.iter()
+            .position(|a| a == flag)
+            .map(|i| argv[i + 1].clone())
+            .unwrap_or_else(|| panic!("no {flag} in {argv:?}"))
+    };
+    assert_eq!(PathBuf::from(after("--add-dir")), canonical_clone);
+    assert_eq!(after("--setting-sources"), "user");
+    let settings: serde_json::Value = serde_json::from_str(&read("settings1.json")).unwrap();
+    assert_eq!(settings["disableAllHooks"], true);
+    let deny: Vec<String> = settings["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap().to_string())
+        .collect();
+    // The clone and the run's dir stay readable, their surroundings not.
+    for open in [&canonical_clone, &cwd] {
+        let rule = format!("Read(/{})", open.display());
+        assert!(
+            !deny.iter().any(|r| r.starts_with(&rule)),
+            "{rule} in {deny:?}"
+        );
+    }
+    #[cfg(unix)]
+    assert!(
+        deny.iter()
+            .any(|r| r == "Read(//etc/**)" || r == "Read(//private/etc/**)"),
+        "{deny:?}"
     );
     let stdin = read("stdin1.txt");
     assert!(stdin.contains(prompt::LATER_ROUND_TASK));
     assert!(stdin.contains("Fixture rule: no unwrap."));
+    assert!(stdin.contains(&format!(
+        "local clone of the repository is at {}",
+        canonical_clone.display()
+    )));
     assert!(stdin.contains(&format!("threadId: {t1}")));
     // Nothing was written into the clone.
     let entries: Vec<_> = std::fs::read_dir(clone.path()).unwrap().collect();
@@ -1539,7 +1674,10 @@ printf 'Sure.\n```json\n{"findings":[],"checklist":[{"text":"Check the rollout"}
     let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
     assert_eq!(out.checklist, vec!["Check the rollout"]);
     let argv = std::fs::read_to_string(bin.path().join("argv.txt")).unwrap();
-    assert!(argv.starts_with("--print\n--quiet\n--ask\n--dont-save-session\n--instruction-file\n"));
+    assert!(argv.starts_with("--print\n--quiet\n--ask\n--dont-save-session\n--workspace-root\n"));
+    assert!(argv.contains("--remove-tool\nlaunch-process\n"), "{argv}");
+    assert!(argv.contains("--instruction-file\n"), "{argv}");
+    assert!(!argv.contains("--add-workspace"), "{argv}");
     let prompt = std::fs::read_to_string(bin.path().join("prompt.txt")).unwrap();
     assert!(prompt.contains(prompt::OUTPUT_CONTRACT));
 }
@@ -1668,4 +1806,123 @@ fn snapshot_paths_cannot_escape_the_temp_dir() {
     assert!(path.join("threads.json").is_file());
     drop(dir);
     assert!(!path.exists());
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn an_answer_is_not_held_up_by_a_grandchild_keeping_stdout_open() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(
+        bin.path(),
+        "claude",
+        "#!/bin/sh\nsleep 20 &\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\"}'\nexit 0\n",
+    );
+    let inv = invocation(script, adapter::sanitized_env(std::env::vars_os(), None));
+    let start = Instant::now();
+    assert_eq!(adapter::run(&inv, &AtomicBool::new(false)).unwrap(), "ok");
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn shutting_the_core_down_kills_a_running_agent() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(
+        bin.path(),
+        "claude",
+        "#!/bin/sh\necho $$ > \"$(dirname \"$0\")/pid\"\nexec sleep 30\n",
+    );
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let provider: Arc<dyn ReviewProvider> = FakeProvider::new(&["src/a.rs"]);
+    let core = Core::with_providers(store, vec![provider]);
+    // Settings set in place: `update_settings` would rebuild the providers.
+    *core.settings.lock().unwrap() = fake_settings(&script, "claude");
+    core.run_ai(r.id).unwrap();
+    let pid_file = bin.path().join("pid");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pid_file.exists() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .to_string();
+    let start = Instant::now();
+    core.shutdown();
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!alive, "the agent {pid} still runs");
+    let st = core.ai_state(r.id).unwrap();
+    assert_eq!(st.error.as_deref(), Some(CANCELLED));
+    assert!(core.run_ai(r.id).is_ok_and(|s| !s.queued));
+}
+
+#[test]
+fn stale_run_dirs_are_swept_and_nothing_else() {
+    let base = tempfile::tempdir().unwrap();
+    let stale = base
+        .path()
+        .join(format!("argus-ai-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(stale.join("diff")).unwrap();
+    std::fs::write(stale.join("threads.json"), "[]").unwrap();
+    let lookalikes = ["argus-ai-notauuid", "argus-ai-keep.txt", "other-dir"];
+    for name in lookalikes {
+        std::fs::create_dir_all(base.path().join(name)).unwrap();
+    }
+    assert_eq!(job::sweep_temp_dirs_in(base.path()), 1);
+    assert!(!stale.exists());
+    for name in lookalikes {
+        assert!(base.path().join(name).exists(), "{name}");
+    }
+}
+
+#[test]
+fn over_long_names_do_not_fail_the_snapshot() {
+    let dir = job::TempDir::new().unwrap();
+    let long = "n".repeat(252);
+    let diff = FileDiff {
+        base_sha: "b".into(),
+        head_sha: "h".into(),
+        files: vec![
+            changed(&format!("src/{long}")),
+            changed(&format!("{}/x.rs", "d".repeat(300))),
+        ],
+        truncated: false,
+    };
+    job::write_snapshot(dir.path(), &diff, &[]).unwrap();
+    let hashed = |name: &str, suffix: &str| {
+        format!(
+            "{}{suffix}",
+            sha1_smol::Sha1::from(name.as_bytes()).digest()
+        )
+    };
+    assert!(dir
+        .path()
+        .join("diff/src")
+        .join(hashed(&long, ".diff"))
+        .is_file());
+    assert!(dir
+        .path()
+        .join("diff")
+        .join(hashed(&"d".repeat(300), ""))
+        .join("x.rs.diff")
+        .is_file());
+    assert!(dir.path().join("threads.json").is_file());
 }

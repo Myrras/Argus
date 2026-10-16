@@ -115,6 +115,7 @@ mod tests {
             last_done_round: Some(1),
             dropped_findings: 0,
             dropped_verdicts: 0,
+            read_only_guaranteed: true,
         }
     }
 
