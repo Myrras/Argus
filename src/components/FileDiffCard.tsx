@@ -165,7 +165,7 @@ export function FileDiffCard({
   const count = threadCounts(threads);
 
   const renderThread = (t: StoredThread, onResize: () => void) => (
-    <ThreadBlock thread={t} now={now} onResize={onResize} />
+    <ThreadBlock thread={t} provider={provider} now={now} onResize={onResize} />
   );
 
   return (

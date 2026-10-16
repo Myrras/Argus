@@ -95,7 +95,12 @@ export function ConversationCard({
               {conversation.length > 0 && (
                 <div className={styles.threads}>
                   {conversation.map((t) => (
-                    <ThreadBlock key={t.threadId} thread={t} now={now} />
+                    <ThreadBlock
+                      key={t.threadId}
+                      thread={t}
+                      provider={provider}
+                      now={now}
+                    />
                   ))}
                 </div>
               )}

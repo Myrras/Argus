@@ -3,7 +3,8 @@
  * "Outdated threads" / "Threads on this file" section, or in the
  * Conversation: the user's own threads open and accent-edged, everyone
  * else's folded to one line (author, count, first words) until clicked.
- * Notes in order, rendered as markdown (`Markdown`). A thread with a code
+ * Notes in order, rendered as markdown (`Markdown`), ` ```suggestion `
+ * blocks as a diff (`SuggestedChange`). A thread with a code
  * reference has a "Then/now history" toggle that expands its then/now slot
  * (M3) in place.
  *
@@ -16,11 +17,13 @@ import { useState } from "react";
 import type { ProviderId, StoredThread } from "../ipc/types";
 import { previewText } from "../lib/commentText";
 import { isConversationThread } from "../lib/diffThreads";
+import { parseSuggestionInfo } from "../lib/suggestions";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
 import { Badge } from "./Badge";
 import { CaretIcon } from "./icons";
-import { Markdown } from "./Markdown";
+import { Markdown, type RenderFence } from "./Markdown";
+import { SuggestedChange } from "./SuggestedChange";
 import styles from "./ThreadBlock.module.css";
 
 function preview(t: StoredThread): string {
@@ -30,10 +33,12 @@ function preview(t: StoredThread): string {
 
 export function ThreadBlock({
   thread: t,
+  provider,
   now,
   onResize,
 }: {
   thread: StoredThread;
+  provider: ProviderId;
   now: number;
   onResize?: () => void;
 }) {
@@ -46,6 +51,18 @@ export function ThreadBlock({
   const toggle = () => {
     setOpen((o) => !o);
     resized();
+  };
+  const renderFence: RenderFence = (info, code) => {
+    const spec = parseSuggestionInfo(info);
+    return spec ? (
+      <SuggestedChange
+        spec={spec}
+        body={code}
+        thread={t}
+        provider={provider}
+        onResize={onResize}
+      />
+    ) : null;
   };
   const toggleHistory = () => {
     setHistory((h) => !h);
@@ -111,7 +128,7 @@ export function ThreadBlock({
                 </span>
               </div>
               <div className={styles.noteBody}>
-                <Markdown>{n.body}</Markdown>
+                <Markdown renderFence={renderFence}>{n.body}</Markdown>
               </div>
             </li>
           ))}
@@ -178,7 +195,7 @@ export function ListedThread({
           ))}
         </pre>
       )}
-      <ThreadBlock thread={t} now={now} />
+      <ThreadBlock thread={t} provider={provider} now={now} />
     </div>
   );
 }
