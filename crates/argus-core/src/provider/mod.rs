@@ -5,9 +5,11 @@
 //! `spawn_blocking` task, never on the UI thread.
 
 pub mod github;
+pub mod gitlab;
 pub mod model;
 
 pub use github::GithubProvider;
+pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
 pub use model::{
     Anchor, CommitInfo, DiffVersion, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState,
     Reviewer, ReviewerState, Side, Thread,

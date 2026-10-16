@@ -1,0 +1,56 @@
+{
+  "id": 9021,
+  "iid": 21,
+  "project_id": 100,
+  "title": "Add retry to the importer",
+  "description": "Add retry to the importer.",
+  "state": "opened",
+  "created_at": "2026-10-08T10:00:00.000Z",
+  "updated_at": "2026-10-10T09:00:00.000Z",
+  "merged_at": null,
+  "target_branch": "main",
+  "source_branch": "feature",
+  "author": {
+    "id": 43,
+    "username": "alice-fixture",
+    "name": "Alice Fixture",
+    "state": "active",
+    "avatar_url": null,
+    "web_url": "https://gitlab.example.test/alice-fixture"
+  },
+  "assignees": [],
+  "reviewers": [
+    {
+      "id": 42,
+      "username": "rev-fixture",
+      "name": "Rev Fixture",
+      "state": "active",
+      "avatar_url": null,
+      "web_url": "https://gitlab.example.test/rev-fixture"
+    },
+    {
+      "id": 45,
+      "username": "dana-fixture",
+      "name": "Dana Fixture",
+      "state": "active",
+      "avatar_url": null,
+      "web_url": "https://gitlab.example.test/dana-fixture"
+    }
+  ],
+  "draft": false,
+  "work_in_progress": false,
+  "merge_status": "can_be_merged",
+  "sha": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+  "references": {
+    "short": "!21",
+    "relative": "!21",
+    "full": "grp/app!21"
+  },
+  "web_url": "https://gitlab.example.test/grp/app/-/merge_requests/21",
+  "diff_refs": {
+    "base_sha": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+    "head_sha": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+    "start_sha": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+  },
+  "user_notes_count": 5
+}

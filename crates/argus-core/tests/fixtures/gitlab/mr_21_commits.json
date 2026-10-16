@@ -1,0 +1,28 @@
+[
+  {
+    "id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+    "short_id": "a2a2a2a2",
+    "title": "Handle the timeout case",
+    "message": "Handle the timeout case\n",
+    "author_name": "Alice Fixture",
+    "author_email": "alice@example.test",
+    "authored_date": "2026-10-10T10:55:00.000+02:00",
+    "committed_date": "2026-10-10T10:55:00.000+02:00",
+    "parent_ids": [
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ]
+  },
+  {
+    "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "short_id": "a1a1a1a1",
+    "title": "Add retry",
+    "message": "Add retry\n\nThree attempts.",
+    "author_name": "Alice Fixture",
+    "author_email": "alice@example.test",
+    "authored_date": "2026-10-08T11:00:00.000+02:00",
+    "committed_date": "2026-10-08T11:00:00.000+02:00",
+    "parent_ids": [
+      "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+    ]
+  }
+]

@@ -1,0 +1,755 @@
+//! GitLab, over its REST API with a personal access token.
+//!
+//! The token lives in the OS keychain (service `com.argus.app.gitlab`, the
+//! account is the instance host), read on demand, never logged and never
+//! written to settings. A [`TokenSource`] seam lets tests inject one.
+//!
+//! The HTTP client is blocking and never follows redirects, as in Podium: a
+//! redirect would carry the `PRIVATE-TOKEN` header to whatever host it names.
+//! Errors are Argus-owned text, never reqwest's (which holds the URL).
+
+use std::collections::BTreeSet;
+use std::sync::{LazyLock, Mutex};
+
+use chrono::{DateTime, Utc};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+
+use super::github::check_sha;
+use super::model::{
+    Anchor, CommitInfo, DiffVersion, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState,
+    Reviewer, ReviewerState, Side, Thread,
+};
+use super::{encode_segment, first_line, ReviewProvider};
+use crate::error::{CoreError, CoreResult};
+
+const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
+
+/// Page size for every list call, and how many pages are followed at most.
+const PER_PAGE: u32 = 100;
+const MAX_PAGES: u32 = 20;
+
+/// How far back the user's own comment events are read to find MRs they
+/// commented on.
+const COMMENTED_DAYS: i64 = 30;
+
+/// Where the GitLab token comes from.
+pub trait TokenSource: Send + Sync {
+    /// The token, or `None` when none is set.
+    fn token(&self) -> Option<String>;
+}
+
+/// A fixed token (tests, or a caller that already holds one).
+pub struct StaticToken(pub String);
+
+impl TokenSource for StaticToken {
+    fn token(&self) -> Option<String> {
+        Some(self.0.clone()).filter(|t| !t.is_empty())
+    }
+}
+
+/// The token in the OS keychain for one GitLab instance.
+pub struct KeychainToken {
+    host: String,
+}
+
+impl KeychainToken {
+    /// The keychain entry for the instance at `base_url`. Keyed by host, so a
+    /// token never goes to a different instance after the URL changes.
+    pub fn for_base_url(base_url: &str) -> Self {
+        Self {
+            host: url_host(base_url).to_string(),
+        }
+    }
+}
+
+impl TokenSource for KeychainToken {
+    fn token(&self) -> Option<String> {
+        keychain_entry(&self.host)
+            .ok()?
+            .get_password()
+            .ok()
+            .filter(|t| !t.is_empty())
+    }
+}
+
+fn keychain_entry(host: &str) -> CoreResult<keyring::Entry> {
+    keyring::Entry::new(KEYCHAIN_SERVICE, host)
+        .map_err(|_| CoreError::Provider("could not open the keychain".into()))
+}
+
+/// Store the token for the instance at `base_url`; a blank token deletes it.
+pub fn gitlab_token_set(base_url: &str, token: &str) -> CoreResult<()> {
+    let entry = keychain_entry(url_host(base_url))?;
+    let result = if token.trim().is_empty() {
+        match entry.delete_credential() {
+            Err(keyring::Error::NoEntry) => Ok(()),
+            other => other,
+        }
+    } else {
+        entry.set_password(token.trim())
+    };
+    result.map_err(|_| CoreError::Provider("could not update the keychain".into()))
+}
+
+/// Whether a token is stored for `base_url` (the token never leaves here).
+pub fn gitlab_token_present(base_url: &str) -> bool {
+    KeychainToken::for_base_url(base_url).token().is_some()
+}
+
+/// `https://host[:port]/path` → `host[:port]`.
+pub fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    rest.split(['/', '?', '#']).next().unwrap_or("")
+}
+
+/// Trim and drop a trailing slash; `None` when not an http(s) URL.
+pub fn normalize_base_url(url: &str) -> Option<String> {
+    let url = url.trim().trim_end_matches('/');
+    let ok =
+        (url.starts_with("https://") || url.starts_with("http://")) && !url_host(url).is_empty();
+    ok.then(|| url.to_string())
+}
+
+static CLIENT: LazyLock<reqwest::blocking::Client> = LazyLock::new(|| {
+    reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        // Same failure mode as `Client::new()`: no TLS backend at all.
+        .expect("GitLab HTTP client")
+});
+
+/// GitLab for the token's owner on one instance.
+pub struct GitlabProvider {
+    base: String,
+    host: String,
+    tokens: Box<dyn TokenSource>,
+    me: Mutex<Option<GlUser>>,
+}
+
+impl GitlabProvider {
+    /// `base_url` is the instance root (`https://gitlab.example.com`). An
+    /// empty or non-http(s) URL is [`CoreError::GitlabNotConfigured`].
+    pub fn new(base_url: &str, tokens: impl TokenSource + 'static) -> CoreResult<Self> {
+        let base = normalize_base_url(base_url).ok_or(CoreError::GitlabNotConfigured)?;
+        Ok(Self {
+            host: url_host(&base).to_string(),
+            base,
+            tokens: Box::new(tokens),
+            me: Mutex::new(None),
+        })
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base
+    }
+
+    /// Send a GET, retrying connection-level failures (VPN or Wi-Fi coming
+    /// back after sleep) twice with a short backoff, as Podium does. A
+    /// response with any status is never retried.
+    fn send(&self, url: &str, token: &str) -> CoreResult<reqwest::blocking::Response> {
+        let mut last = "connection failed";
+        for delay_ms in [0, 500, 1500] {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            match CLIENT.get(url).header("PRIVATE-TOKEN", token).send() {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    tracing::debug!("GitLab request failed: {e}");
+                    last = if e.is_timeout() {
+                        "timed out"
+                    } else {
+                        "connection failed"
+                    };
+                }
+            }
+        }
+        Err(CoreError::Provider(format!(
+            "could not reach GitLab ({last})"
+        )))
+    }
+
+    /// One GET of `path` (under `/api/v4`): the body and the next page, if
+    /// the `X-Next-Page` header names one.
+    fn get(&self, path: &str) -> CoreResult<(String, Option<u32>)> {
+        let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
+        let response = self.send(&format!("{}/api/v4{path}", self.base), &token)?;
+        match response.status().as_u16() {
+            200 => {
+                let next = response
+                    .headers()
+                    .get("x-next-page")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse().ok());
+                let body = response
+                    .text()
+                    .map_err(|_| CoreError::Provider("could not read GitLab's response".into()))?;
+                Ok((body, next))
+            }
+            300..=399 => Err(CoreError::Provider(
+                "GitLab redirected the request; check the URL in Settings (https, host and path)"
+                    .into(),
+            )),
+            401 | 403 => Err(CoreError::GitlabAuth),
+            404 => Err(CoreError::NotFound),
+            429 => Err(CoreError::Provider(
+                "GitLab rate limit reached, try again later".into(),
+            )),
+            _ => Err(CoreError::Provider(
+                "GitLab could not fetch the merge request".into(),
+            )),
+        }
+    }
+
+    fn get_json<T: DeserializeOwned>(&self, path: &str) -> CoreResult<T> {
+        let (body, _) = self.get(path)?;
+        serde_json::from_str(&body).map_err(|_| unexpected())
+    }
+
+    /// Every page of a list endpoint, following `X-Next-Page`.
+    fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
+        let sep = if path.contains('?') { '&' } else { '?' };
+        let mut all = Vec::new();
+        let mut page = 1;
+        for _ in 0..MAX_PAGES {
+            let (body, next) = self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}"))?;
+            let items: Vec<T> = serde_json::from_str(&body).map_err(|_| unexpected())?;
+            all.extend(items);
+            match next {
+                Some(n) if n > page => page = n,
+                _ => break,
+            }
+        }
+        Ok(all)
+    }
+
+    fn me(&self) -> CoreResult<GlUser> {
+        let mut me = self.me.lock().expect("me lock poisoned");
+        if let Some(m) = me.as_ref() {
+            return Ok(m.clone());
+        }
+        let user: GlUser = self.get_json("/user")?;
+        *me = Some(user.clone());
+        Ok(user)
+    }
+
+    fn mr_path(r: &ReviewRef) -> String {
+        format!(
+            "/projects/{}/merge_requests/{}",
+            encode_segment(&r.repo),
+            r.number
+        )
+    }
+
+    fn to_ref(&self, mr: &GlMr) -> ReviewRef {
+        ReviewRef {
+            provider: ProviderId::Gitlab,
+            host: self.host.clone(),
+            repo: mr.project_path(),
+            number: mr.iid,
+            url: mr.web_url.clone(),
+            title: mr.title.clone(),
+            author: mr.author.username.clone(),
+            updated_at: mr.updated_at,
+        }
+    }
+}
+
+fn unexpected() -> CoreError {
+    CoreError::Provider("unexpected response from GitLab".into())
+}
+
+fn same_user(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+impl ReviewProvider for GitlabProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Gitlab
+    }
+
+    fn current_user(&self) -> CoreResult<String> {
+        Ok(self.me()?.username)
+    }
+
+    /// Open MRs with the user as reviewer, plus open MRs the user commented
+    /// on. GitLab has no "commented by me" filter, and scanning every open MR
+    /// on a large instance for the user's notes is far too expensive, so the
+    /// second half reads the user's own `commented` events of the last
+    /// [`COMMENTED_DAYS`] days and fetches the MRs they point at.
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        let me = self.me()?;
+        let reviewing: Vec<GlMr> = self.get_all(&format!(
+            "/merge_requests?reviewer_id={}&state=opened&scope=all",
+            me.id
+        ))?;
+        let mut known: BTreeSet<(u64, u64)> =
+            reviewing.iter().map(|m| (m.project_id, m.iid)).collect();
+        let mut list: Vec<ReviewRef> = reviewing
+            .iter()
+            .filter(|m| !same_user(&m.author.username, &me.username))
+            .map(|m| self.to_ref(m))
+            .collect();
+
+        let after = (Utc::now() - chrono::Duration::days(COMMENTED_DAYS)).format("%Y-%m-%d");
+        let events: Vec<GlEvent> =
+            self.get_all(&format!("/events?action=commented&after={after}"))?;
+        for e in events {
+            let Some(note) = e.note else { continue };
+            let (Some(project), Some(iid)) = (e.project_id, note.noteable_iid) else {
+                continue;
+            };
+            if note.noteable_type.as_deref() != Some("MergeRequest")
+                || !known.insert((project, iid))
+            {
+                continue;
+            }
+            let mr: GlMr = match self.get_json(&format!("/projects/{project}/merge_requests/{iid}"))
+            {
+                Ok(mr) => mr,
+                // Gone or no longer visible: just not listed.
+                Err(CoreError::NotFound) => continue,
+                Err(e) => return Err(e),
+            };
+            if mr.state == "opened" && !same_user(&mr.author.username, &me.username) {
+                list.push(self.to_ref(&mr));
+            }
+        }
+        list.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
+        Ok(list)
+    }
+
+    fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+        let me = self.me()?.username;
+        let p = Self::mr_path(r);
+        let (mr, commits, versions, reviewers, approvals) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.get_json::<GlMr>(&p));
+            let b = s.spawn(|| self.get_all::<GlCommit>(&format!("{p}/commits")));
+            let c = s.spawn(|| self.get_all::<GlVersion>(&format!("{p}/versions")));
+            let d = s.spawn(|| self.get_all::<GlReviewer>(&format!("{p}/reviewers")));
+            let e = s.spawn(|| self.get_json::<GlApprovals>(&format!("{p}/approvals")));
+            (join(a), join(b), join(c), join(d), join(e))
+        });
+        let mr = mr?;
+        // Reviewer states and approvals enrich the detail; an instance or
+        // licence without them still yields a usable review.
+        let reviewers = reviewers.ok();
+        let approved_by: Vec<String> = approvals
+            .map(|a| a.approved_by.into_iter().map(|u| u.user.username).collect())
+            .unwrap_or_default();
+        Ok(assemble_detail(
+            self.to_ref(&mr),
+            &me,
+            mr,
+            commits?,
+            versions?,
+            reviewers,
+            approved_by,
+        ))
+    }
+
+    fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        let p = Self::mr_path(r);
+        let (mr, discussions) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.get_json::<GlMr>(&p));
+            let b = s.spawn(|| self.get_all::<GlDiscussion>(&format!("{p}/discussions")));
+            (join(a), join(b))
+        });
+        let head = mr?.head_sha();
+        Ok(discussions?
+            .into_iter()
+            .filter_map(|d| discussion_thread(d, &head))
+            .collect())
+    }
+
+    fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String> {
+        check_sha(sha)?;
+        let (body, _) = self.get(&format!(
+            "/projects/{}/repository/files/{}/raw?ref={sha}",
+            encode_segment(&r.repo),
+            encode_segment(path)
+        ))?;
+        Ok(body)
+    }
+}
+
+fn join<T>(h: std::thread::ScopedJoinHandle<'_, CoreResult<T>>) -> CoreResult<T> {
+    h.join()
+        .unwrap_or_else(|_| Err(CoreError::Provider("a GitLab fetch panicked".into())))
+}
+
+fn reviewer_state(s: &str) -> ReviewerState {
+    match s {
+        "approved" => ReviewerState::Approved,
+        "requested_changes" => ReviewerState::ChangesRequested,
+        "reviewed" | "unapproved" => ReviewerState::Commented,
+        // `unreviewed`, `review_started`: the review is still owed.
+        _ => ReviewerState::Requested,
+    }
+}
+
+fn assemble_detail(
+    review: ReviewRef,
+    me: &str,
+    mr: GlMr,
+    commits: Vec<GlCommit>,
+    versions: Vec<GlVersion>,
+    reviewers: Option<Vec<GlReviewer>>,
+    approved_by: Vec<String>,
+) -> ReviewDetail {
+    let i_approved = approved_by.iter().any(|u| same_user(u, me));
+    let (mut list, requested_from_me) = match reviewers {
+        Some(rs) => {
+            let list: Vec<Reviewer> = rs
+                .into_iter()
+                .map(|r| Reviewer {
+                    is_me: same_user(&r.user.username, me),
+                    state: reviewer_state(&r.state),
+                    username: r.user.username,
+                })
+                .collect();
+            // A re-request resets the entry to `unreviewed`.
+            let requested = list
+                .iter()
+                .any(|r| r.is_me && r.state == ReviewerState::Requested);
+            (list, requested)
+        }
+        None => {
+            // No per-reviewer state: being listed counts as requested until
+            // the user's approval shows up.
+            let list: Vec<Reviewer> = mr
+                .reviewers
+                .iter()
+                .map(|u| Reviewer {
+                    is_me: same_user(&u.username, me),
+                    state: ReviewerState::Requested,
+                    username: u.username.clone(),
+                })
+                .collect();
+            let requested = !i_approved && list.iter().any(|r| r.is_me);
+            (list, requested)
+        }
+    };
+    for user in &approved_by {
+        match list.iter_mut().find(|r| same_user(&r.username, user)) {
+            Some(r) if !(r.is_me && requested_from_me) => r.state = ReviewerState::Approved,
+            Some(_) => {}
+            None => list.push(Reviewer {
+                is_me: same_user(user, me),
+                username: user.clone(),
+                state: ReviewerState::Approved,
+            }),
+        }
+    }
+    let state = match mr.state.as_str() {
+        "merged" => ReviewState::Merged,
+        "closed" => ReviewState::Closed,
+        _ => ReviewState::Open,
+    };
+    let head_sha = mr.head_sha();
+    let refs = mr.diff_refs.clone();
+    let mut commits: Vec<CommitInfo> = commits
+        .into_iter()
+        .map(|c| CommitInfo {
+            title: c.title.unwrap_or_else(|| first_line(&c.message)),
+            author: c.author_name,
+            authored_at: c.authored_date,
+            sha: c.id,
+        })
+        .collect();
+    // GitLab lists commits newest first; the model is oldest first.
+    commits.reverse();
+    let mut versions: Vec<DiffVersion> = versions
+        .into_iter()
+        .map(|v| DiffVersion {
+            head_sha: v.head_commit_sha,
+            base_sha: v.base_commit_sha,
+            start_sha: v.start_commit_sha,
+            created_at: v.created_at,
+        })
+        .collect();
+    versions.reverse();
+    ReviewDetail {
+        review,
+        description: mr.description.unwrap_or_default(),
+        state,
+        draft: mr.draft || mr.work_in_progress,
+        base_sha: refs
+            .as_ref()
+            .and_then(|r| r.base_sha.clone())
+            .unwrap_or_default(),
+        start_sha: refs.and_then(|r| r.start_sha),
+        head_sha,
+        commits,
+        versions,
+        reviewers: list,
+        requested_from_me,
+        approved_by_me: i_approved && !requested_from_me,
+    }
+}
+
+/// A discussion as a thread; `None` for one made only of system notes
+/// ("added 2 commits", "approved this merge request", ...). Outdated means
+/// the thread's position was taken against a head that is no longer the MR
+/// head.
+fn discussion_thread(d: GlDiscussion, head: &str) -> Option<Thread> {
+    let first = d.notes.iter().find(|n| !n.system)?;
+    let anchor = d
+        .notes
+        .iter()
+        .find_map(|n| n.position.as_ref())
+        .filter(|p| p.position_type.as_deref().unwrap_or("text") == "text")
+        .map(position_anchor);
+    let resolvable: Vec<&GlNote> = d.notes.iter().filter(|n| n.resolvable).collect();
+    let resolved = !resolvable.is_empty() && resolvable.iter().all(|n| n.resolved);
+    Some(Thread {
+        id: d.id.clone(),
+        author: first.author.username.clone(),
+        created_at: first.created_at,
+        resolved,
+        outdated: anchor
+            .as_ref()
+            .is_some_and(|a| !head.is_empty() && a.head_sha != head),
+        anchor,
+        notes: d
+            .notes
+            .iter()
+            .map(|n| Note {
+                id: n.id.to_string(),
+                author: n.author.username.clone(),
+                body: n.body.clone(),
+                created_at: n.created_at,
+                system: n.system,
+            })
+            .collect(),
+    })
+}
+
+fn position_anchor(p: &GlPosition) -> Anchor {
+    // A line only on the new side is added, only on the old side removed;
+    // both means an unchanged (context) line, anchored on the new side.
+    let side = if p.new_line.is_some() {
+        Side::New
+    } else {
+        Side::Old
+    };
+    let start_line = p.line_range.as_ref().and_then(|r| {
+        let start = match side {
+            Side::New => r.start.new_line.or(r.start.old_line),
+            Side::Old => r.start.old_line,
+        }?;
+        let end = match side {
+            Side::New => p.new_line,
+            Side::Old => p.old_line,
+        };
+        (Some(start) != end).then_some(start)
+    });
+    Anchor {
+        path_old: p.old_path.clone(),
+        path_new: p.new_path.clone(),
+        line_old: p.old_line,
+        line_new: p.new_line,
+        start_line,
+        side,
+        base_sha: p.base_sha.clone(),
+        start_sha: p.start_sha.clone(),
+        head_sha: p.head_sha.clone().unwrap_or_default(),
+        diff_hunk: None,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GlUser {
+    #[serde(default)]
+    id: u64,
+    username: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct GlDiffRefs {
+    base_sha: Option<String>,
+    head_sha: Option<String>,
+    start_sha: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GlReferences {
+    full: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GlMr {
+    iid: u64,
+    project_id: u64,
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    work_in_progress: bool,
+    web_url: String,
+    author: GlUser,
+    updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default)]
+    diff_refs: Option<GlDiffRefs>,
+    #[serde(default)]
+    references: Option<GlReferences>,
+    #[serde(default)]
+    reviewers: Vec<GlUser>,
+}
+
+impl GlMr {
+    /// `group/sub/project` from `references.full` (`group/sub/project!12`),
+    /// else from the web URL.
+    fn project_path(&self) -> String {
+        if let Some(full) = self.references.as_ref().and_then(|r| r.full.as_deref()) {
+            if let Some((path, _)) = full.rsplit_once('!') {
+                return path.to_string();
+            }
+        }
+        let rest = self
+            .web_url
+            .split_once("://")
+            .map_or(&*self.web_url, |(_, r)| r);
+        let path = rest.split_once('/').map_or("", |(_, p)| p);
+        path.split("/-/").next().unwrap_or("").to_string()
+    }
+
+    fn head_sha(&self) -> String {
+        self.diff_refs
+            .as_ref()
+            .and_then(|r| r.head_sha.clone())
+            .or_else(|| self.sha.clone())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Deserialize)]
+struct GlCommit {
+    id: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    author_name: String,
+    authored_date: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+struct GlVersion {
+    head_commit_sha: String,
+    base_commit_sha: String,
+    start_commit_sha: String,
+    created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Deserialize)]
+struct GlReviewer {
+    user: GlUser,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct GlApprover {
+    user: GlUser,
+}
+
+#[derive(Deserialize)]
+struct GlApprovals {
+    #[serde(default)]
+    approved_by: Vec<GlApprover>,
+}
+
+#[derive(Deserialize)]
+struct GlEventNote {
+    noteable_type: Option<String>,
+    noteable_iid: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GlEvent {
+    project_id: Option<u64>,
+    note: Option<GlEventNote>,
+}
+
+#[derive(Deserialize)]
+struct GlLinePoint {
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct GlLineRange {
+    start: GlLinePoint,
+}
+
+#[derive(Deserialize)]
+struct GlPosition {
+    base_sha: Option<String>,
+    start_sha: Option<String>,
+    head_sha: Option<String>,
+    old_path: Option<String>,
+    new_path: Option<String>,
+    position_type: Option<String>,
+    old_line: Option<u32>,
+    new_line: Option<u32>,
+    line_range: Option<GlLineRange>,
+}
+
+#[derive(Deserialize)]
+struct GlNote {
+    id: u64,
+    body: String,
+    author: GlUser,
+    created_at: DateTime<Utc>,
+    #[serde(default)]
+    system: bool,
+    #[serde(default)]
+    resolvable: bool,
+    #[serde(default)]
+    resolved: bool,
+    #[serde(default)]
+    position: Option<GlPosition>,
+}
+
+#[derive(Deserialize)]
+struct GlDiscussion {
+    id: String,
+    notes: Vec<GlNote>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_url_and_host() {
+        assert_eq!(
+            normalize_base_url(" https://gitlab.example.test/ ").as_deref(),
+            Some("https://gitlab.example.test")
+        );
+        assert_eq!(normalize_base_url(""), None);
+        assert_eq!(normalize_base_url("gitlab.example.test"), None);
+        assert_eq!(url_host("http://127.0.0.1:8080/x"), "127.0.0.1:8080");
+        assert!(matches!(
+            GitlabProvider::new("", StaticToken("t".into())),
+            Err(CoreError::GitlabNotConfigured)
+        ));
+    }
+
+    #[test]
+    fn reviewer_states_map() {
+        assert_eq!(reviewer_state("unreviewed"), ReviewerState::Requested);
+        assert_eq!(reviewer_state("approved"), ReviewerState::Approved);
+        assert_eq!(
+            reviewer_state("requested_changes"),
+            ReviewerState::ChangesRequested
+        );
+        assert_eq!(reviewer_state("reviewed"), ReviewerState::Commented);
+    }
+}
