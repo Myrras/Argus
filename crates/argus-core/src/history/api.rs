@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::cache::{read_line_touches, CachedHistory, CachedMapping};
+use super::cache::{read_line_touches, CacheKey, CachedHistory, CachedMapping};
 use super::snapshot::{anchored_text, around, diff_rows, from_diff_hunk, window};
 use super::timeline::{commit_entries, merge, note_entries, resolution_entries};
 use super::walk::{walk_line, ApiSource, LineMapping, WalkStart};
@@ -107,11 +107,22 @@ pub(crate) fn compute_histories(
         .into_iter()
         .filter(|t| only.is_none_or(|o| o.contains(&t.thread_id)))
         .collect();
+    let key_of = |t: &StoredThread| CacheKey {
+        base_sha: record.base_sha.clone(),
+        outdated: t.thread.outdated,
+        clone: clone.map(|p| p.display().to_string()),
+    };
     let mut cached: Vec<Option<CachedHistory>> = Vec::with_capacity(threads.len());
     for t in &threads {
+        // Stale when the thread was resolved or reopened since, or when
+        // what else it was computed from changed (see `CacheKey`).
         let hit = store
-            .cached_history(t.thread_id, &record.head_sha)?
-            .filter(|c| c.mapping.resolved == t.thread.resolved);
+            .cached_history_keyed(t.thread_id, &record.head_sha)?
+            .filter(|(c, key)| {
+                c.mapping.resolved == t.thread.resolved
+                    && key.as_ref().is_none_or(|k| *k == key_of(t))
+            })
+            .map(|(c, _)| c);
         cached.push(hit);
     }
     let misses: Vec<usize> = (0..threads.len())
@@ -124,8 +135,13 @@ pub(crate) fn compute_histories(
             // A failed cache write only means not cached: the history
             // itself stands, and the next call computes it again.
             if cacheable {
-                if let Err(e) = store.put_history(threads[i].thread_id, &record.head_sha, &history)
-                {
+                let key = key_of(&threads[i]);
+                if let Err(e) = store.put_history_keyed(
+                    threads[i].thread_id,
+                    &record.head_sha,
+                    Some(&key),
+                    &history,
+                ) {
                     tracing::debug!("caching a thread history failed: {e}");
                 }
             }

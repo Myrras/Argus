@@ -50,6 +50,41 @@ pub(crate) struct CachedHistory {
     pub entries: Vec<TimelineEntry>,
 }
 
+/// What else a cached history was computed from, besides the thread and
+/// the head it is keyed by: a different value now means it is stale. Kept
+/// in the `status` JSON next to the [`CachedMapping`] (no schema change); a
+/// row without one (written before it existed) stands until the head moves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CacheKey {
+    /// The review's base: a retarget changes what the lines are diffed
+    /// against.
+    pub base_sha: String,
+    /// The platform's outdated flag on the thread (GitHub's current-line
+    /// fallback only applies to a thread that is not outdated).
+    pub outdated: bool,
+    /// The local clone configured when computed: one configured since can
+    /// answer exactly what the API could not.
+    pub clone: Option<String>,
+}
+
+/// The `status` column: the mapping, plus the key it was computed under.
+#[derive(Serialize)]
+struct StatusOut<'a> {
+    #[serde(flatten)]
+    mapping: &'a CachedMapping,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<&'a CacheKey>,
+}
+
+#[derive(Deserialize)]
+struct StatusIn {
+    #[serde(flatten)]
+    mapping: CachedMapping,
+    #[serde(default)]
+    key: Option<CacheKey>,
+}
+
 fn to_json<T: Serialize>(v: &T) -> CoreResult<String> {
     serde_json::to_string(v).map_err(|e| CoreError::Store(e.to_string()))
 }
@@ -74,6 +109,16 @@ impl Store {
         thread: ThreadId,
         head: &str,
     ) -> CoreResult<Option<CachedHistory>> {
+        Ok(self.cached_history_keyed(thread, head)?.map(|(h, _)| h))
+    }
+
+    /// [`cached_history`](Self::cached_history) with the key it was
+    /// computed under (`None` for a row written without one).
+    pub(crate) fn cached_history_keyed(
+        &self,
+        thread: ThreadId,
+        head: &str,
+    ) -> CoreResult<Option<(CachedHistory, Option<CacheKey>)>> {
         let conn = self.conn();
         let row: Option<(Option<String>, Option<String>, String)> = conn
             .query_row(
@@ -94,8 +139,9 @@ impl Store {
             .query_map(params![thread.to_string(), head], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         let parsed = (|| {
-            Some(CachedHistory {
-                mapping: serde_json::from_str(&status).ok()?,
+            let status: StatusIn = serde_json::from_str(&status).ok()?;
+            let history = CachedHistory {
+                mapping: status.mapping,
                 then_snapshot: then_code
                     .map(|c| serde_json::from_str(&c))
                     .transpose()
@@ -109,7 +155,8 @@ impl Store {
                     .map(|p| serde_json::from_str(p))
                     .collect::<Result<_, _>>()
                     .ok()?,
-            })
+            };
+            Some((history, status.key))
         })();
         Ok(parsed)
     }
@@ -117,16 +164,32 @@ impl Store {
     /// Cache `history` for `thread` at `head`, replacing what it had. A
     /// thread no longer stored (a refresh dropped it while the history was
     /// computed) gets nothing cached: there is nothing to hang it off.
+    /// Without a [`CacheKey`] (tests); the history computation stores one.
+    #[cfg(test)]
     pub(crate) fn put_history(
         &self,
         thread: ThreadId,
         head: &str,
         history: &CachedHistory,
     ) -> CoreResult<()> {
+        self.put_history_keyed(thread, head, None, history)
+    }
+
+    /// [`put_history`](Self::put_history) under `key` (see [`CacheKey`]).
+    pub(crate) fn put_history_keyed(
+        &self,
+        thread: ThreadId,
+        head: &str,
+        key: Option<&CacheKey>,
+        history: &CachedHistory,
+    ) -> CoreResult<()> {
         let id = thread.to_string();
         let then_code = history.then_snapshot.as_ref().map(to_json).transpose()?;
         let now_code = history.now_snapshot.as_ref().map(to_json).transpose()?;
-        let status = to_json(&history.mapping)?;
+        let status = to_json(&StatusOut {
+            mapping: &history.mapping,
+            key,
+        })?;
         let (now_path, now_line) = match &history.mapping.status {
             LineStatus::Located { path, line, .. } => (Some(path.clone()), Some(*line)),
             _ => (history.now_snapshot.as_ref().map(|s| s.path.clone()), None),

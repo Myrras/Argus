@@ -1286,3 +1286,40 @@ fn githubs_current_line_on_a_file_gone_at_head_is_unlocated() {
     );
     assert!(h.now_snapshot.is_none());
 }
+
+#[test]
+fn a_retarget_an_outdated_flag_or_a_new_clone_recomputes() {
+    let repo = repo();
+    let core = core_over(&repo);
+    let id = core.reviews().unwrap()[0].id;
+    let calls = || repo.file_calls.load(Ordering::SeqCst);
+    core.review_histories(id).unwrap();
+    let before = calls();
+    core.review_histories(id).unwrap();
+    assert_eq!(calls(), before, "a plain hit");
+
+    // Retargeted: same head, another base.
+    repo.detail.lock().unwrap().base_sha = "base2".into();
+    core.refresh();
+    core.review_histories(id).unwrap();
+    let after_retarget = calls();
+    assert!(after_retarget > before);
+
+    // The platform now calls the thread outdated.
+    repo.threads.lock().unwrap()[0].outdated = true;
+    core.refresh();
+    core.review_histories(id).unwrap();
+    let after_outdated = calls();
+    assert!(after_outdated > after_retarget);
+
+    // A local clone configured since: computed again (through it, where
+    // it can).
+    let record = core.review(id).unwrap();
+    let provider: CoreResult<Arc<dyn ReviewProvider>> = Ok(repo.clone());
+    let clone = std::path::Path::new("/nonexistent/argus-fixture-clone");
+    super::api::compute_histories(&core.store, &record, &provider, Some(clone), None).unwrap();
+    assert!(calls() > after_outdated);
+    let with_clone = calls();
+    super::api::compute_histories(&core.store, &record, &provider, Some(clone), None).unwrap();
+    assert_eq!(calls(), with_clone, "a hit again");
+}
