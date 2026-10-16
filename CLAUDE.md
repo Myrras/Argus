@@ -142,6 +142,28 @@ sibling app Iris (`../Iris`).
     overrides, Argus-only), pure rules in `lib/findings`. Keys
     `toggleFindings` (`a`, scope `files`) and `toggleFindingSelected` (`x`).
     Only the "Post selected" button posts.
+- ✅ **Milestone 6 — Local clone.** Core `git/`: with a clone configured per
+  repository (`Settings::clone_paths`), the history walk and `Core::file_at`
+  read through plain `git` (`rev-list`, `diff-tree`, `cat-file --batch`)
+  instead of the API: faster, exact, never truncated. Read-only by
+  construction: object reads only (no checkout, fetch or status),
+  `GIT_OPTIONAL_LOCKS=0`, no lazy fetch of a partial clone (git >= 2.44),
+  no shell, 30 s timeout, an env without tokens or `GIT_*` redirections.
+  Always a fallback, never a requirement: an unfetched commit, shallow
+  boundary, type change, non-UTF-8 file or any git failure is answered by the
+  API, per thread or per file (`git::file_or`; `compute_histories` takes
+  `clone: Option<&Path>`). Argus never changes or fetches the clone.
+- ✅ **Milestone 6 — Provider polish.** Polling is polite. `provider/conditional`:
+  in-memory ETag / Last-Modified cache per provider (LRU, bounded), so
+  unchanged requests are a 304 (free on GitHub). GitHub: `gh api -i` with
+  own pagination, thread `isResolved` from one GraphQL query (resolved
+  threads show as resolved). GitLab: conditional GETs, own client per
+  provider. `provider/rate_limit`: a 403/429 (`Retry-After`, reset headers)
+  pauses the provider until the reset; `ReviewProvider::rate_limited_until()`;
+  `poll/` skips a limited provider with one provider-level error,
+  `RefreshError.rateLimitedUntil` (RFC 3339) next to the message; the
+  Providers section shows "rate limited until HH:MM". Timeouts on every `gh`
+  and GitLab call: a hung one fails that call, the other reviews still update.
 
 ## Architecture
 
@@ -166,7 +188,8 @@ src/                 # React (presentation only)
   styles/            # tokens.css + global.css
 ```
 
-`argus-core` modules: `provider/` (GitLab/GitHub clients, provider status),
+`argus-core` modules: `provider/` (GitLab/GitHub clients, provider status,
+conditional-GET cache, rate limits), `git/` (read-only local clone access),
 `review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
 code view's file list + viewed marks), `post/` (comments, replies,
 approvals; the only writes, explicit only), `history/` (then/now thread

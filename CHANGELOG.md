@@ -121,6 +121,16 @@ when it merges.
   label stays in Argus and never changes the thread on GitHub or GitLab.
   With the AI analysis off, none of this shows and everything else works
   as before.
+- Polling is lighter: Argus asks GitHub and GitLab only for what changed since
+  the last refresh, so unchanged reviews barely count against your rate limit.
+- GitHub threads now show as resolved when they are resolved on GitHub.
+- When GitHub or GitLab rate-limits Argus, it pauses that provider and shows
+  "rate limited until HH:MM" instead of retrying in vain.
+- A hung `gh` call or an unresponsive GitLab instance no longer stalls
+  refreshing: calls time out and the other reviews still update.
+- Thread history and file contents now read from your local clone when one is
+  set for the repository: faster and exact. Commits you haven't fetched still
+  come from GitHub/GitLab, and Argus never changes or fetches the clone.
 
 ## [0.1.0] - 2026-10-16
 
