@@ -182,7 +182,7 @@ pub fn refresh_provider(
 }
 
 /// Classify a fresh fetch against `prev` and store it if anything changed.
-fn persist(
+pub(crate) fn persist(
     store: &Store,
     prev: Option<&ReviewRecord>,
     detail: &ReviewDetail,

@@ -20,9 +20,11 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::error::CoreResult;
+use crate::post::{PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
 use crate::settings::Settings;
 
-/// Read access to one platform, for the current user.
+/// Read access to one platform for the current user, plus the explicit
+/// writes of M4 (posting, replying, approving).
 pub trait ReviewProvider: Send + Sync {
     fn id(&self) -> ProviderId;
 
@@ -59,8 +61,41 @@ pub trait ReviewProvider: Send + Sync {
     /// rebased); GitLab `repository/compare?straight=true` (left side `from`).
     fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff>;
 
-    // M4: post_comment(&self, r, c: &NewComment) -> CoreResult<PostedComment>,
-    // reply(&self, r, thread: &str, body) and approve(&self, r) go here.
+    // --- M4: writes. Only `Core`'s post API calls these, each on an explicit
+    // user action; nothing else in Argus writes to a platform. The defaults
+    // refuse, so a read-only provider (or a test double) needs none of them.
+
+    /// Post one new line comment, already placed on the current diff (see
+    /// [`post::resolve`](crate::post::resolve)).
+    ///
+    /// GitHub: `POST repos/{o}/{r}/pulls/{n}/comments` with `commit_id`,
+    /// `path`, `line`, `side` (+ `start_line`/`start_side`). GitLab: `POST
+    /// merge_requests/:iid/discussions` with a text position from the latest
+    /// diff version, read right before posting.
+    fn post_comment(&self, _r: &ReviewRef, _c: &PlacedComment) -> PostResultOf<PostedComment> {
+        Err(read_only())
+    }
+
+    /// Reply to the platform thread `thread` (GitHub: the root comment id;
+    /// GitLab: the discussion id).
+    fn reply(&self, _r: &ReviewRef, _thread: &str, _body: &str) -> PostResultOf<PostedNote> {
+        Err(read_only())
+    }
+
+    /// Approve the MR/PR as the current user. Never merges.
+    fn approve(&self, _r: &ReviewRef) -> PostResultOf<()> {
+        Err(read_only())
+    }
+}
+
+/// The result of a provider write.
+pub type PostResultOf<T> = Result<T, PostError>;
+
+fn read_only() -> PostError {
+    PostError::new(
+        PostErrorKind::Provider,
+        "this provider cannot post".to_string(),
+    )
 }
 
 /// The providers `settings` turns on: GitHub unless disabled, GitLab when a

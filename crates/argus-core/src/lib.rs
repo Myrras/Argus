@@ -19,6 +19,7 @@
 //! - [`review`] — round detection, pure.
 //! - [`poll`] — refresh and the background loop.
 //! - [`files`] — the code view's file list and viewed marks.
+//! - [`post`] — posting comments, replies and approvals (explicit only).
 
 #![forbid(unsafe_code)]
 
@@ -27,6 +28,7 @@ pub mod files;
 pub mod ids;
 mod platform;
 pub mod poll;
+pub mod post;
 pub mod provider;
 pub mod review;
 pub mod settings;
@@ -45,6 +47,9 @@ pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
 pub use ids::{ReviewId, ThreadId};
 pub use poll::{RefreshError, RefreshReport};
+pub use post::{
+    CommentableLines, NewComment, PostError, PostErrorKind, PostResult, PostedComment, PostedNote,
+};
 pub use provider::{GithubStatus, GitlabStatus, ProviderStatus};
 pub use review::{ReviewStatus, RoundReason};
 pub use settings::Settings;
