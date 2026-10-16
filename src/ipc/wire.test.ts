@@ -217,6 +217,7 @@ const report: RefreshReport = {
       review: REVIEW,
       message: "GitLab is not set up.",
       unavailable: true,
+      rateLimitedUntil: T,
     },
   ],
   refreshedAt: T,

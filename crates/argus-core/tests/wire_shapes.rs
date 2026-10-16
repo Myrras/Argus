@@ -366,6 +366,7 @@ fn current() -> Value {
             review: Some(review_id),
             message: "GitLab is not set up.".into(),
             unavailable: true,
+            rate_limited_until: Some(t),
         }],
         refreshed_at: t,
     };

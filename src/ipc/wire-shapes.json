@@ -219,6 +219,7 @@
       "errors",
       "errors[].message",
       "errors[].provider",
+      "errors[].rateLimitedUntil",
       "errors[].review",
       "errors[].unavailable",
       "refreshedAt"
