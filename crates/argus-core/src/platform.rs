@@ -2,9 +2,11 @@
 //! `platform.rs` (`gh_binary`, `login_shell`, `command_exists_query`), minus
 //! its WSL backend.
 
+use std::io::{Read, Write as _};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Where `gh` usually lives when the login shell cannot tell us (Homebrew on
 /// Apple Silicon and Intel, MacPorts, a plain Linux install).
@@ -81,10 +83,21 @@ fn login_shell() -> (String, Vec<String>) {
     }
 }
 
-/// Run `cmd` through the login shell; its stdout when it exits successfully.
-/// stderr is discarded, so nothing the shell prints can leak into logs.
+/// How long the login shell may take to answer. A profile that waits on
+/// the network or a prompt would otherwise hang whoever asks (building the
+/// providers, so the core itself); past this the well-known paths answer.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Run `cmd` through the login shell; its stdout when it exits successfully
+/// within [`SHELL_TIMEOUT`]. stderr is discarded, so nothing the shell
+/// prints can leak into logs.
 fn shell_stdout(cmd: &str) -> Option<String> {
     let (shell, prefix) = login_shell();
+    run_shell(&shell, &prefix, cmd, SHELL_TIMEOUT)
+}
+
+/// `shell <prefix…> cmd`, killed after `timeout`; its stdout on success.
+fn run_shell(shell: &str, prefix: &[String], cmd: &str, timeout: Duration) -> Option<String> {
     let mut command = Command::new(shell);
     command
         .args(prefix)
@@ -93,11 +106,82 @@ fn shell_stdout(cmd: &str) -> Option<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     hide_console_window(&mut command);
-    let output = command.spawn().ok()?.wait_with_output().ok()?;
+    let output = run_with_timeout(&mut command, None, timeout).ok()?;
     output
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Why a child process gave no output.
+#[derive(Debug)]
+pub(crate) enum ExecError {
+    /// The program is not there.
+    Missing,
+    /// It could not be started (or waited on).
+    Failed,
+    /// Killed after the timeout.
+    TimedOut,
+}
+
+/// Run `cmd` to completion with `input` on stdin, or kill it once `timeout`
+/// has passed. Both pipes are drained on their own threads so a large output
+/// never stalls the child; on a timeout those threads are left to end when
+/// the pipes close.
+pub(crate) fn run_with_timeout(
+    cmd: &mut Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Output, ExecError> {
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ExecError::Missing,
+        _ => ExecError::Failed,
+    })?;
+    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
+        // A program like gh reads all of stdin before it sends anything. A
+        // write error means it exited early; its status says why.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&data);
+        });
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let mut pause = Duration::from_millis(1);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::debug!("a child process timed out after {timeout:?}");
+                return Err(ExecError::TimedOut);
+            }
+            Ok(None) => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(25));
+            }
+            Err(_) => return Err(ExecError::Failed),
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    })
 }
 
 #[cfg(windows)]
@@ -241,6 +325,41 @@ mod tests {
         assert_eq!(first_existing([missing.as_path()]), None);
         // A directory is not a binary.
         assert_eq!(first_existing([dir.path()]), None);
+    }
+
+    #[test]
+    fn times_out_a_hung_process() {
+        #[cfg(unix)]
+        {
+            let start = Instant::now();
+            let mut cmd = Command::new("sleep");
+            cmd.arg("5").stdout(Stdio::piped()).stderr(Stdio::piped());
+            let r = run_with_timeout(&mut cmd, None, Duration::from_millis(100));
+            assert!(matches!(r, Err(ExecError::TimedOut)));
+            assert!(start.elapsed() < Duration::from_secs(3));
+        }
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore)]
+    fn a_hung_login_shell_is_given_up_on() {
+        let sh = ["-c".to_string()];
+        let start = Instant::now();
+        assert_eq!(
+            run_shell(
+                "/bin/sh",
+                &sh,
+                "sleep 5; echo /late/gh",
+                Duration::from_millis(200)
+            ),
+            None
+        );
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert_eq!(
+            run_shell("/bin/sh", &sh, "echo /opt/homebrew/bin/gh", SHELL_TIMEOUT).as_deref(),
+            Some("/opt/homebrew/bin/gh\n")
+        );
+        assert_eq!(run_shell("/bin/sh", &sh, "exit 1", SHELL_TIMEOUT), None);
     }
 
     #[test]

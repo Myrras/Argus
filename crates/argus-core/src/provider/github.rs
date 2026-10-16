@@ -19,10 +19,9 @@
 //! per PR (REST has none).
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write as _};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -37,6 +36,7 @@ use super::model::{
 use super::rate_limit::{default_reset, reset_at, Backoff};
 use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
+use crate::platform::{run_with_timeout, ExecError};
 use crate::post::{sanitize, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
 
 /// Upper bound per search; a reviewer with more than this many open PRs in
@@ -559,17 +559,6 @@ fn unexpected() -> CoreError {
     CoreError::Provider("unexpected response from gh".into())
 }
 
-/// Why a `gh` process gave no output.
-#[derive(Debug)]
-enum ExecError {
-    /// The program is not there.
-    Missing,
-    /// It could not be started (or waited on).
-    Failed,
-    /// Killed after the timeout.
-    TimedOut,
-}
-
 impl From<ExecError> for CoreError {
     fn from(e: ExecError) -> Self {
         match e {
@@ -578,66 +567,6 @@ impl From<ExecError> for CoreError {
             ExecError::TimedOut => CoreError::Provider("gh did not answer in time".into()),
         }
     }
-}
-
-/// Run `cmd` to completion with `input` on stdin, or kill it once `timeout`
-/// has passed. Both pipes are drained on their own threads so a large output
-/// never stalls the child; on a timeout those threads are left to end when
-/// the pipes close.
-fn run_with_timeout(
-    cmd: &mut Command,
-    input: Option<Vec<u8>>,
-    timeout: Duration,
-) -> Result<Output, ExecError> {
-    if input.is_some() {
-        cmd.stdin(Stdio::piped());
-    }
-    let mut child = cmd.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ExecError::Missing,
-        _ => ExecError::Failed,
-    })?;
-    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
-        // gh reads all of stdin before it sends anything. A write error means
-        // gh exited early; its status says why.
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&data);
-        });
-    }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let mut pause = Duration::from_millis(1);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                tracing::debug!("gh timed out after {timeout:?}");
-                return Err(ExecError::TimedOut);
-            }
-            Ok(None) => {
-                std::thread::sleep(pause);
-                pause = (pause * 2).min(Duration::from_millis(25));
-            }
-            Err(_) => return Err(ExecError::Failed),
-        }
-    };
-    Ok(Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
-
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = pipe {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    })
 }
 
 /// One REST page: its body and the query of the next page, if any.
@@ -1629,19 +1558,6 @@ mod tests {
             root_comment_id("https://github.com/o/r/pull/12#discussion_rx"),
             None
         );
-    }
-
-    #[test]
-    fn times_out_a_hung_process() {
-        #[cfg(unix)]
-        {
-            let start = Instant::now();
-            let mut cmd = Command::new("sleep");
-            cmd.arg("5").stdout(Stdio::piped()).stderr(Stdio::piped());
-            let r = run_with_timeout(&mut cmd, None, Duration::from_millis(100));
-            assert!(matches!(r, Err(ExecError::TimedOut)));
-            assert!(start.elapsed() < Duration::from_secs(3));
-        }
     }
 
     #[test]
