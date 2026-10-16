@@ -1,6 +1,7 @@
 //! IPC command modules. Each command is a thin (de)serialization shim over
 //! [`argus_core::Core`]; no domain logic lives here.
 
+pub mod files;
 pub mod provider;
 pub mod review;
 pub mod settings;

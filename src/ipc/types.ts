@@ -87,6 +87,11 @@ export interface Anchor {
   startSha: string | null;
   headSha: string;
   diffHunk: string | null;
+  /**
+   * GitHub: the line in the current diff on `side` (`null` once outdated;
+   * `lineOld`/`lineNew` are the original line). Always `null` on GitLab.
+   */
+  currentLine: number | null;
 }
 
 /** `provider::Note`: one comment in a thread. */
@@ -118,6 +123,46 @@ export interface StoredThread {
   anchor: Anchor | null;
   /** Oldest first. */
   notes: Note[];
+}
+
+/** `provider::FileStatus`. */
+export type FileStatus = "added" | "modified" | "removed" | "renamed";
+
+/**
+ * `files::FileEntry`: one changed file, with `provider::ChangedFile`
+ * flattened in (`path` … `tooLarge`).
+ */
+export interface FileEntry {
+  /** The path at head (a removed file's former path). */
+  path: string;
+  /** The path before a rename; `null` unless `renamed`. */
+  oldPath: string | null;
+  status: FileStatus;
+  /** 0 when the platform sent no patch. */
+  additions: number;
+  deletions: number;
+  /** Unified patch hunks, when the platform sent them. */
+  patch: string | null;
+  /** The file's content at head (GitHub blob sha, GitLab diff digest). */
+  contentSha: string;
+  binary: boolean;
+  /** The platform left the patch out as too large. */
+  tooLarge: boolean;
+  /** Marked viewed and unchanged at head since. */
+  viewed: boolean;
+}
+
+/** `files::ReviewFiles`: what `list_files` returns. */
+export interface ReviewFiles {
+  reviewId: ReviewId;
+  /** The left side of every file (merge base / GitLab base_sha / watermark). */
+  baseSha: string;
+  headSha: string;
+  /** The diff runs from the last-reviewed commit to head. */
+  sinceLastReview: boolean;
+  /** The platform's file limit was hit; more files changed. */
+  truncated: boolean;
+  files: FileEntry[];
 }
 
 /** `settings::GithubSettings`. */

@@ -65,6 +65,7 @@ export function thread(overrides: Partial<StoredThread> = {}): StoredThread {
       startSha: null,
       headSha: "c".repeat(40),
       diffHunk: null,
+      currentLine: null,
     },
     notes: [
       {

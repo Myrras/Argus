@@ -12,6 +12,7 @@ import type {
   IpcError,
   ProviderStatus,
   RefreshReport,
+  ReviewFiles,
   ReviewId,
   ReviewRecord,
   Settings,
@@ -48,6 +49,35 @@ export function getReview(reviewId: ReviewId): Promise<ReviewRecord> {
 /** The stored threads of a review, oldest first. */
 export function listThreads(reviewId: ReviewId): Promise<StoredThread[]> {
   return invoke("list_threads", { reviewId });
+}
+
+/**
+ * The review's changed files with their viewed marks: its own diff, or with
+ * `sinceLastReview` the diff from the last-reviewed commit to head.
+ */
+export function listFiles(
+  reviewId: ReviewId,
+  sinceLastReview: boolean,
+): Promise<ReviewFiles> {
+  return invoke("list_files", { reviewId, sinceLastReview });
+}
+
+/** The content of `path` at `sha` (a sha `listFiles` returned). */
+export function fileContents(
+  reviewId: ReviewId,
+  sha: string,
+  path: string,
+): Promise<string> {
+  return invoke("file_contents", { reviewId, sha, path });
+}
+
+/** Mark a file viewed or not; resolves to the review's viewed paths. */
+export function setFileViewed(
+  reviewId: ReviewId,
+  path: string,
+  viewed: boolean,
+): Promise<string[]> {
+  return invoke("set_file_viewed", { reviewId, path, viewed });
 }
 
 /** Refresh every provider now; emits the same events a poll does. */

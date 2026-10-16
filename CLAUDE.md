@@ -66,7 +66,7 @@ src-tauri/           # thin IPC adapter: (de)serialize and forward, nothing else
   src/state.rs       # AppState: Arc<Core> + last RefreshReport
   src/error.rs       # IpcError { kind, message } ← CoreError
   src/events.rs      # review:changed / reviews:refreshed emission
-  src/commands/      # review, thread, settings, provider shims
+  src/commands/      # review, thread, files, settings, provider shims
 src/                 # React (presentation only)
   ipc/types.ts       # hand-written wire types (mirror the serde derives)
   ipc/commands.ts    # typed invoke() wrappers
