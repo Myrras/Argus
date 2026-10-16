@@ -19,9 +19,9 @@
   --text-muted: #8b949e;
   --text-faint: #6e7681;
 
-  /* Accent */
-  --accent: #4493f8;
-  --accent-hover: #58a6ff;
+  /* Accent: Argus violet (the siblings Podium, Selene and Iris use blue) */
+  --accent: #a371f7;
+  --accent-hover: #bc8cff;
   --accent-contrast: #ffffff;
 
   /* Semantic */
@@ -98,8 +98,8 @@
   --text-muted: #59636e;
   --text-faint: #818b96;
 
-  --accent: #0969da;
-  --accent-hover: #0a5cc0;
+  --accent: #8250df;
+  --accent-hover: #6e40c9;
   --accent-contrast: #ffffff;
 
   --danger: #cf222e;

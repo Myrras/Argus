@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Argus mark: an almond eye on the 100x100 grid the Podium, Selene and
+       Iris marks use (same opacity steps): the lids as an almond band, the
+       iris as a ring, the pupil as a disc. Argus Panoptes was the
+       hundred-eyed watchman who never slept. Each ring is an outer outline
+       plus a reversed inner one, so the default nonzero fill leaves the hole.
+       LogoMark.tsx draws these paths in currentColor; argus.svg puts them on
+       the app-icon tile. -->
+  <g fill="#a371f7">
+    <path d="M4 50A47.39 47.39 0 0 1 96 50A47.39 47.39 0 0 1 4 50ZM15 50A36.56 36.56 0 0 0 85 50A36.56 36.56 0 0 0 15 50Z" opacity="0.45"/>
+    <path d="M28 50A22 22 0 0 1 72 50A22 22 0 0 1 28 50ZM35 50A15 15 0 0 0 65 50A15 15 0 0 0 35 50Z" opacity="0.72"/>
+    <path d="M39 50A11 11 0 0 1 61 50A11 11 0 0 1 39 50Z"/>
+  </g>
+</svg>

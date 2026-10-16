@@ -16,3 +16,5 @@ when it merges.
 - First Argus build: a desktop window with a placeholder start screen and a
   dark/light theme toggle. Reviewing merge requests and pull requests comes in
   later releases.
+- Argus app icon and logo: a violet eye, shown in the title bar and on the
+  start screen.

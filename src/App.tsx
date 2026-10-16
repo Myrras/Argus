@@ -7,6 +7,7 @@
  * token-driven styling) stays.
  */
 
+import { LogoMark } from "./components/LogoMark";
 import { useThemeStore } from "./state/themeStore";
 import styles from "./App.module.css";
 
@@ -17,7 +18,10 @@ export default function App() {
   return (
     <div className={styles.app}>
       <header className={styles.titlebar}>
-        <span className={styles.product}>Argus</span>
+        <div className={styles.brand}>
+          <LogoMark size={18} className={styles.logo} aria-hidden />
+          <span className={styles.product}>Argus</span>
+        </div>
         <button
           type="button"
           className="ghost"
@@ -30,6 +34,7 @@ export default function App() {
 
       <main className={styles.body}>
         <section className={styles.card}>
+          <LogoMark size={48} className={styles.cardLogo} aria-hidden />
           <h1 className={styles.title}>Argus</h1>
           <p className={styles.description}>
             A review cockpit for GitLab merge requests and GitHub pull requests.

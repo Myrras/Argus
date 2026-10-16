@@ -27,6 +27,13 @@ sweep:
         && echo "recycled stale target/ artifacts" \
         || echo "cargo-sweep not installed; skipping target/ recycle (cargo install cargo-sweep)"
 
+# Regenerate the app icons from src-tauri/icons/source/argus.svg (needs
+# rsvg-convert: `brew install librsvg`). Only the desktop icons are kept.
+icons:
+    rsvg-convert -w 1024 -h 1024 src-tauri/icons/source/argus.svg -o src-tauri/icons/source/argus-1024.png
+    pnpm tauri icon src-tauri/icons/source/argus-1024.png
+    rm -rf src-tauri/icons/android src-tauri/icons/ios
+
 # Type-check the whole Rust workspace without building.
 check:
     cargo check --workspace

@@ -15,6 +15,23 @@
   background: var(--canvas);
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.logo {
+  color: var(--accent);
+  flex-shrink: 0;
+  transition: transform var(--dur-3) var(--ease-spring);
+}
+
+/* Playful tilt when hovering the brand. */
+.brand:hover .logo {
+  transform: rotate(-8deg) translateY(-1px);
+}
+
 .product {
   font-weight: 700;
   font-size: var(--fs-lg);
@@ -48,6 +65,12 @@
     opacity: 0;
     transform: translateY(6px) scale(0.99);
   }
+}
+
+.cardLogo {
+  display: block;
+  margin: 0 auto var(--sp-3);
+  color: var(--accent);
 }
 
 .title {

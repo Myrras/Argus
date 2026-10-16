@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Argus app icon: the LogoMark eye (argus-mark.svg) on a dark tile
+       sized to the macOS icon grid (824 px body, 100 px transparent margin,
+       ~22.5% corner radius), as Iris's and Selene's icons. Source of truth for
+       the generated PNG/ICNS/ICO icons: `just icons` renders it to
+       argus-1024.png and runs `pnpm tauri icon` on that. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1c222b"/>
+      <stop offset="1" stop-color="#0e1116"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a371f7"/>
+      <stop offset="1" stop-color="#bc8cff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-30%" width="140%" height="170%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#tile)"/>
+  <g fill="url(#accent)" filter="url(#shadow)" transform="translate(192,192) scale(6.4)">
+    <path d="M4 50A47.39 47.39 0 0 1 96 50A47.39 47.39 0 0 1 4 50ZM15 50A36.56 36.56 0 0 0 85 50A36.56 36.56 0 0 0 15 50Z" opacity="0.45"/>
+    <path d="M28 50A22 22 0 0 1 72 50A22 22 0 0 1 28 50ZM35 50A15 15 0 0 0 65 50A15 15 0 0 0 35 50Z" opacity="0.72"/>
+    <path d="M39 50A11 11 0 0 1 61 50A11 11 0 0 1 39 50Z"/>
+  </g>
+</svg>
