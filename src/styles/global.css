@@ -246,6 +246,12 @@ label {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+  /* View-transition pseudo-elements are not matched by `*`. */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }
 
 /* Manual override from SettingsModal → settingsStore. The store sets
@@ -259,6 +265,11 @@ html[data-reduce-motion="true"] *::after {
   animation-iteration-count: 1 !important;
   transition-duration: 0.01ms !important;
   scroll-behavior: auto !important;
+}
+html[data-reduce-motion="true"]::view-transition-group(*),
+html[data-reduce-motion="true"]::view-transition-old(*),
+html[data-reduce-motion="true"]::view-transition-new(*) {
+  animation: none !important;
 }
 
 /* Real text stays selectable inside the otherwise unselectable shell. */

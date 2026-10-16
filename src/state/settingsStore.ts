@@ -109,7 +109,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => {
       set({ [section]: next } as Partial<SettingsState>);
     },
     resetSettings: () => {
-      localStorage.removeItem(STORAGE_KEY);
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        /* blocked storage: the defaults apply for this session */
+      }
       applyReduceMotion(DEFAULTS.appearance.reduceMotion);
       set({ ...structuredClone(DEFAULTS) });
     },

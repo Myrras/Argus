@@ -179,4 +179,17 @@ describe("reviewStore", () => {
     await older;
     expect(useReviewStore.getState().reviews[0].title).toBe("A, renamed");
   });
+  it("a second approval while one runs is refused, not reported done", async () => {
+    let finish: (v: unknown) => void = () => {};
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === "approve_review"
+        ? new Promise((r) => (finish = r))
+        : Promise.resolve([a, b, c]),
+    );
+    const first = useReviewStore.getState().approve(a.id, a.headSha);
+    const second = await useReviewStore.getState().approve(b.id, b.headSha);
+    expect(second).toMatchObject({ kind: "busy" });
+    finish({ ...a, approvedAt: "2026-10-16T12:00:00Z" });
+    expect(await first).toBeNull();
+  });
 });

@@ -25,12 +25,20 @@ export const MOTION = {
 } as const;
 
 /**
- * Whether the user (or OS) asked for reduced motion. Guarded so it is safe in
- * non-browser/test environments where `matchMedia` is absent (jsdom): we treat
- * "unknown" as "motion allowed", since the global CSS guard is the real
- * enforcement point and this only shortens JS unmount timers.
+ * Whether the user asked for reduced motion: Settings' toggle
+ * (`data-reduce-motion` on <html>, `settingsStore`) or the OS. Guarded so it
+ * is safe in non-browser/test environments where `matchMedia` is absent
+ * (jsdom): we treat "unknown" as "motion allowed", since the global CSS guard
+ * is the real enforcement point and this only skips JS-driven motion (exit
+ * timers, the theme's view transition).
  */
 export function prefersReducedMotion(): boolean {
+  if (
+    typeof document !== "undefined" &&
+    document.documentElement.dataset.reduceMotion === "true"
+  ) {
+    return true;
+  }
   if (
     typeof window === "undefined" ||
     typeof window.matchMedia !== "function"

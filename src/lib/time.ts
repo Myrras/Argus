@@ -15,7 +15,8 @@ export function age(iso: string | null, now: number = Date.now()): string {
   if (d < HOUR) return `${Math.floor(d / MINUTE)}m`;
   if (d < DAY) return `${Math.floor(d / HOUR)}h`;
   if (d < WEEK) return `${Math.floor(d / DAY)}d`;
-  if (d < 52 * WEEK) return `${Math.floor(d / WEEK)}w`;
+  // Weeks up to a full year: 364 days is "52w", never "0y".
+  if (d < 365 * DAY) return `${Math.floor(d / WEEK)}w`;
   return `${Math.floor(d / (365 * DAY))}y`;
 }
 

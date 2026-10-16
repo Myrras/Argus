@@ -14,7 +14,12 @@ type ViewTransitionDocument = Document & {
 const STORAGE_KEY = "argus.theme";
 
 function initialTheme(): ThemeMode {
-  const stored = localStorage.getItem(STORAGE_KEY);
+  let stored: string | null = null;
+  try {
+    stored = localStorage.getItem(STORAGE_KEY);
+  } catch {
+    // No storage (private mode, blocked): the default theme.
+  }
   if (stored === "light" || stored === "retro") return stored;
   return "dark";
 }
@@ -34,7 +39,11 @@ export const useThemeStore = create<ThemeState>((set) => {
   return {
     mode: initialTheme(),
     setTheme: (next: ThemeMode) => {
-      localStorage.setItem(STORAGE_KEY, next);
+      try {
+        localStorage.setItem(STORAGE_KEY, next);
+      } catch {
+        // Not kept across restarts; this session still switches.
+      }
       // The palette swap is the synchronous `data-theme` flip; flipping it
       // inside a view transition lets the WebView crossfade the whole UI
       // between colour schemes. Falls back to an instant swap when the API is

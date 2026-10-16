@@ -56,7 +56,7 @@ interface ReviewStoreState {
   /**
    * Approve on the platform at `headSha` (the head the confirmation named);
    * resolves to the error, or null once approved (the review then leaves
-   * the active lists).
+   * the active lists). While another approval runs: a `busy` error.
    */
   approve: (id: ReviewId, headSha: string) => Promise<IpcError | null>;
   setTab: (tab: ReviewTab) => void;
@@ -154,7 +154,9 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   },
 
   approve: async (id, headSha) => {
-    if (get().approving) return null;
+    if (get().approving) {
+      return { kind: "busy", message: "Another approval is still running." };
+    }
     set({ approving: id });
     try {
       const record = await approveReview(id, headSha);

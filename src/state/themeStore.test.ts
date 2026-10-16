@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { blockStorage } from "../test/storage";
+
 // The store reads localStorage and applies the theme at creation, so each
 // test imports a fresh module after arranging storage.
 async function freshStore() {
@@ -51,6 +53,33 @@ describe("themeStore", () => {
     } finally {
       delete (document as { startViewTransition?: unknown })
         .startViewTransition;
+    }
+  });
+  it("swaps instantly with reduced motion on in Settings", async () => {
+    const store = await freshStore();
+    const startViewTransition = vi.fn((cb: () => void) => cb());
+    Object.assign(document, { startViewTransition });
+    document.documentElement.dataset.reduceMotion = "true";
+    try {
+      store.getState().setTheme("light");
+      expect(startViewTransition).not.toHaveBeenCalled();
+      expect(store.getState().mode).toBe("light");
+    } finally {
+      delete document.documentElement.dataset.reduceMotion;
+      delete (document as { startViewTransition?: unknown })
+        .startViewTransition;
+    }
+  });
+
+  it("works without storage", async () => {
+    const restore = blockStorage();
+    try {
+      const store = await freshStore();
+      expect(store.getState().mode).toBe("dark");
+      expect(() => store.getState().setTheme("light")).not.toThrow();
+      expect(store.getState().mode).toBe("light");
+    } finally {
+      restore();
     }
   });
 });

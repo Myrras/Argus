@@ -14,6 +14,7 @@ import {
   useCommentStore,
   type CommentTarget,
 } from "./commentStore";
+import { blockStorage } from "../test/storage";
 import { useToastStore } from "./toastStore";
 
 const mockInvoke = vi.mocked(invoke);
@@ -371,5 +372,22 @@ describe("a cancelled reply", () => {
     expect(useCommentStore.getState().replies[THREAD]?.body).toBe(
       "Not sure yet",
     );
+  });
+});
+
+describe("draft storage", () => {
+  it("says once when drafts cannot be kept across restarts", () => {
+    const restore = blockStorage();
+    try {
+      addDraft(3, "One");
+      addDraft(4, "Two");
+    } finally {
+      restore();
+    }
+    expect(drafts()).toHaveLength(2);
+    const warnings = useToastStore
+      .getState()
+      .toasts.filter((t) => t.message.includes("not saved"));
+    expect(warnings).toHaveLength(1);
   });
 });

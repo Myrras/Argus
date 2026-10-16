@@ -188,6 +188,9 @@ export function readStoredDrafts(): Record<ReviewId, Draft[]> {
   return out;
 }
 
+/** The "not saved" warning shows once a session. */
+let warnedPersist = false;
+
 function persist(reviewId: ReviewId, drafts: Draft[]) {
   try {
     if (drafts.length) {
@@ -196,7 +199,15 @@ function persist(reviewId: ReviewId, drafts: Draft[]) {
       localStorage.removeItem(PREFIX + reviewId);
     }
   } catch {
-    // Storage full or blocked: the drafts stay in memory.
+    // Storage full or blocked: the drafts stay in memory, and the user
+    // should know a restart would lose them.
+    if (!warnedPersist) {
+      warnedPersist = true;
+      toastError(
+        "Pending comments not saved",
+        "They stay until Argus closes; post them before you quit.",
+      );
+    }
   }
 }
 
