@@ -49,7 +49,10 @@ const SEARCH_FIELDS: &str = "number,title,url,repository,author,updatedAt";
 const PULL_FILES_LIMIT: usize = 3000;
 const COMPARE_FILES_LIMIT: usize = 300;
 
-/// Pages followed at most per list (100 each: past the 3000-file cap).
+/// Page size of every list read.
+const PER_PAGE: usize = 100;
+/// Pages followed at most per list ([`PER_PAGE`] each: past the 3000-file
+/// cap).
 const MAX_PAGES: usize = 40;
 
 /// How long one `gh` call may run before it is killed. Generous: a large
@@ -355,19 +358,35 @@ impl GithubProvider {
     /// Every page of a list endpoint, one conditional request each, following
     /// the `Link` header's `rel="next"` (its query only: the host stays the
     /// one `gh` is set up for).
+    ///
+    /// A full page (an array of [`PER_PAGE`]) without a next link is
+    /// followed anyway: a 304 replays the link as it was when the page was
+    /// cached, and a last page of exactly [`PER_PAGE`] stays unchanged (a
+    /// 304) when more items arrive after it. An empty next page ends it.
     fn pages(&self, path: &str) -> CoreResult<Vec<String>> {
         let (base, query) = path.split_once('?').unwrap_or((path, ""));
-        let mut url = if query.is_empty() {
-            format!("{base}?per_page=100")
+        let first = if query.is_empty() {
+            format!("{base}?per_page={PER_PAGE}")
         } else {
-            format!("{base}?{query}&per_page=100")
+            format!("{base}?{query}&per_page={PER_PAGE}")
         };
+        let mut url = first.clone();
+        let mut number = 1;
         let mut bodies = Vec::new();
         for _ in 0..MAX_PAGES {
             let page = self.get(&url, None)?;
+            let full = serde_json::from_str::<Vec<serde::de::IgnoredAny>>(&page.body)
+                .is_ok_and(|items| items.len() >= PER_PAGE);
             bodies.push(page.body);
             match page.next {
-                Some(q) if format!("{base}?{q}") != url => url = format!("{base}?{q}"),
+                Some(q) if format!("{base}?{q}") != url => {
+                    number = page_number(&q).unwrap_or(number + 1);
+                    url = format!("{base}?{q}");
+                }
+                None if full => {
+                    number += 1;
+                    url = format!("{first}&page={number}");
+                }
                 _ => break,
             }
         }
@@ -627,6 +646,14 @@ fn next_query(link: &str) -> Option<String> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"=&_-.%+,:".contains(&b))
         .then(|| query.to_string())
+}
+
+/// The `page=` number of a next-page query.
+fn page_number(query: &str) -> Option<usize> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("page="))
+        .and_then(|n| n.parse().ok())
 }
 
 /// The REST id in a review comment URL (`…/pull/12#discussion_r501`).

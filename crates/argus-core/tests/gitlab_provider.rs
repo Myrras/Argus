@@ -684,3 +684,57 @@ fn a_hung_instance_times_out_without_retrying() {
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(*accepted.lock().unwrap(), 1);
 }
+
+/// `n` discussions with one note each, ids `d<from>`…, as JSON.
+fn discussions(from: usize, n: usize) -> String {
+    let items: Vec<String> = (from..from + n)
+        .map(|i| {
+            format!(
+                r#"{{"id":"d{i}","notes":[{{"id":{i},"body":"note {i}","author":{{"username":"alice-fixture"}},"created_at":"2026-10-10T08:00:00Z"}}]}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+#[test]
+fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Exactly 100 discussions, then a 101st. Page 1 does not change, so the
+    // second poll gets a 304 for it, with page 1's old "no next page".
+    let grown = Arc::new(AtomicBool::new(false));
+    let flag = grown.clone();
+    let (base, _) = serve_raw(move |path, req| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        let mr21 = "/api/v4/projects/grp%2Fapp/merge_requests/21";
+        if route != format!("{mr21}/discussions") {
+            return fixture_routes(path);
+        }
+        let (tag, body) = if query.ends_with("page=1") {
+            ("p1", discussions(0, 100))
+        } else if query.ends_with("page=2") && flag.load(Ordering::SeqCst) {
+            ("p2b", discussions(100, 1))
+        } else {
+            ("p2a", "[]".to_string())
+        };
+        if req.contains(&format!("if-none-match: \"{tag}\"")) {
+            return Reply {
+                status: "304 Not Modified",
+                headers: format!("ETag: \"{tag}\"\r\n"),
+                body: String::new(),
+            };
+        }
+        Reply {
+            status: "200 OK",
+            headers: format!("ETag: \"{tag}\"\r\nX-Next-Page: \r\n"),
+            body,
+        }
+    });
+    let gl = provider(&base);
+    let r = mr_ref(&base, 21);
+    assert_eq!(gl.fetch_threads(&r).unwrap().len(), 100);
+    grown.store(true, Ordering::SeqCst);
+    let threads = gl.fetch_threads(&r).unwrap();
+    assert_eq!(threads.len(), 101);
+    assert_eq!(threads[100].id, "d100");
+}

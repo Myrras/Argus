@@ -280,6 +280,11 @@ impl GitlabProvider {
     }
 
     /// Every page of a list endpoint, following `X-Next-Page`.
+    ///
+    /// A full page without a next one is followed anyway: a 304 replays the
+    /// header as it was when the page was cached, and a page that was the
+    /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
+    /// more items arrive after it. An empty next page ends it.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
         let sep = if path.contains('?') { '&' } else { '?' };
         let mut all = Vec::new();
@@ -287,9 +292,11 @@ impl GitlabProvider {
         for _ in 0..MAX_PAGES {
             let (body, next) = self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}"))?;
             let items: Vec<T> = serde_json::from_str(&body).map_err(|_| unexpected())?;
+            let full = items.len() >= PER_PAGE as usize;
             all.extend(items);
             match next {
                 Some(n) if n > page => page = n,
+                None if full => page += 1,
                 _ => break,
             }
         }

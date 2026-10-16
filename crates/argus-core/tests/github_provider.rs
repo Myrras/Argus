@@ -715,3 +715,61 @@ fn a_hung_gh_is_killed_after_the_timeout() {
     assert!(err.to_string().contains("gh did not answer in time"));
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
 }
+
+/// A fake `gh` serving PR 12's review comments from `page1.json` and
+/// `page2.json` next to its log, with an ETag per file content and a 304
+/// for a request that names it; GraphQL is down.
+const PAGED: &str = r##"
+echo "$*" >> "$LOG"
+case "$*" in "auth token"*) exit 1 ;; "api graphql "*) exit 1 ;; esac
+[ "$1 $2" = "api -i" ] || exit 1
+shift 2
+inm=""; path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H) inm="${2#If-None-Match: }"; shift 2 ;;
+    --jq) shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+D="${LOG%/*}"
+case "$path" in
+  "repos/acme-fixture/widgets/pulls/12/comments?per_page=100") f="$D/page1.json" ;;
+  "repos/acme-fixture/widgets/pulls/12/comments?per_page=100&page=2") f="$D/page2.json" ;;
+  *) printf 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}'; exit 1 ;;
+esac
+tag="\"fx-$(cksum < "$f" | cut -d' ' -f1)\""
+if [ "$inm" = "$tag" ]; then
+  printf 'HTTP/2.0 304 Not Modified\r\nEtag: %s\r\n\r\n' "$tag"; exit 1
+fi
+printf 'HTTP/2.0 200 OK\r\nEtag: %s\r\n\r\n' "$tag"
+cat "$f"
+"##;
+
+/// `n` root review comments with ids from `from`, as JSON.
+fn comments(from: u64, n: u64) -> String {
+    let items: Vec<String> = (from..from + n)
+        .map(|i| {
+            format!(
+                r#"{{"id":{i},"in_reply_to_id":null,"user":{{"login":"alice-fixture"}},"body":"c{i}","created_at":"2026-10-10T08:00:00Z","path":"src/cache.rs","position":1,"line":1,"side":"RIGHT","commit_id":"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3","original_commit_id":"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
+    let fake = script(PAGED);
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    std::fs::write(dir.join("page1.json"), comments(1, 100)).unwrap();
+    std::fs::write(dir.join("page2.json"), "[]").unwrap();
+    let gh = fake.provider("github.com", None);
+    assert_eq!(gh.fetch_threads(&widgets_12()).unwrap().len(), 100);
+    // A 101st comment: page 1 is unchanged (a 304 replaying "no next").
+    std::fs::write(dir.join("page2.json"), comments(101, 1)).unwrap();
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    assert_eq!(threads.len(), 101);
+    assert_eq!(threads[100].id, "101");
+}
