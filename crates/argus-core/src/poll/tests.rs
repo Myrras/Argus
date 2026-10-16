@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 
 use super::*;
 use crate::provider::ProviderId;
@@ -22,6 +22,9 @@ struct Fake {
     limited: Mutex<Option<DateTime<Utc>>>,
     /// `current_user` calls: the first call of every refresh.
     calls: AtomicUsize,
+    /// When set, the next `fetch_review` says it started and waits for the
+    /// go-ahead: a test runs something in the middle of a refresh.
+    gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 impl Fake {
@@ -37,7 +40,16 @@ impl Fake {
             threads_panic: Mutex::new(HashSet::new()),
             limited: Mutex::new(None),
             calls: AtomicUsize::new(0),
+            gate: Mutex::new(None),
         }
+    }
+
+    /// Hold the next review fetch: returns (started, go).
+    fn hold_next_fetch(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        *self.gate.lock().unwrap() = Some((started_tx, go_rx));
+        (started_rx, go_tx)
     }
 
     /// List `d` and serve it.
@@ -81,6 +93,11 @@ impl ReviewProvider for Fake {
         Ok(self.list.lock().unwrap().clone())
     }
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((started, go)) = gate {
+            started.send(()).unwrap();
+            go.recv().unwrap();
+        }
         match self.details.lock().unwrap().get(&r.number) {
             Some(Ok(d)) => Ok(d.clone()),
             Some(Err(e)) => {
@@ -393,4 +410,94 @@ fn a_limit_hit_halfway_is_one_provider_error() {
     assert_eq!(report.errors[0].review, None);
     assert!(report.errors[0].message.contains("rate limited until"));
     assert_eq!(report.errors[0].rate_limited_until, Some(until));
+}
+
+#[test]
+fn a_poll_that_overlaps_mark_reviewed_keeps_the_watermark() {
+    let gh = github();
+    let mine = thread("501", ME, "h1", vec![note("501", ME, at(10, 11))]);
+    gh.serve(detail_n(12, "h1"), vec![mine]);
+    let core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    );
+    assert!(core.refresh().errors.is_empty());
+    let id = review_ref(12).id();
+
+    // The poll has read the review (its "before") and fetches a change (a
+    // new title); the user marks it reviewed in the middle; the poll
+    // stores after.
+    let mut d = detail_n(12, "h1");
+    d.review.title = "Renamed".into();
+    gh.serve(d, vec![]);
+    let (started, go) = gh.hold_next_fetch();
+    std::thread::scope(|s| {
+        let poll = s.spawn(|| core.refresh());
+        started.recv().unwrap();
+        let marked = core.mark_reviewed(id).unwrap();
+        assert_eq!(marked.status, ReviewStatus::WaitingOnAuthor);
+        go.send(()).unwrap();
+        assert_eq!(poll.join().unwrap().changed, [id]);
+    });
+    let rec = core.review(id).unwrap();
+    assert_eq!(rec.review.title, "Renamed");
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+    assert!(rec.last_reviewed_at.is_some());
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn the_poll_never_writes_the_watermark_it_did_not_read() {
+    // `persist` with a stale `prev` (no watermark) over a stored one.
+    let store = Store::in_memory().unwrap();
+    let d = detail_n(12, "h1");
+    assert!(persist(&store, None, &d, &[], ME, true, at(10, 12)).unwrap());
+    let stale = store.review(d.review.id()).unwrap().unwrap();
+    store.set_watermark(stale.id, "h1", at(10, 13)).unwrap();
+
+    let mut moved = detail_n(12, "h2");
+    moved.review.title = "Moved".into();
+    assert!(persist(&store, Some(&stale), &moved, &[], ME, true, at(10, 14)).unwrap());
+    let rec = store.review(stale.id).unwrap().unwrap();
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+    assert_eq!(rec.last_reviewed_at, Some(at(10, 13)));
+    // Classified against the stored watermark, not the stale one.
+    assert_eq!(rec.status, ReviewStatus::NeedsReReview);
+    assert_eq!(rec.round_reasons, [RoundReason::NewCommits]);
+    assert_eq!(rec.round, 2);
+}
+
+#[test]
+fn an_approval_made_in_argus_after_the_fetch_started_survives_it() {
+    let store = Store::in_memory().unwrap();
+    let d = detail_n(12, "h1");
+    persist(&store, None, &d, &[], ME, true, at(10, 12)).unwrap();
+    let id = d.review.id();
+    // Approved from Argus at 10:30, while a poll that started at 10:20
+    // still read the review as not approved.
+    store
+        .set_approved_at(id, Some(at(10, 12) + chrono::Duration::minutes(30)))
+        .unwrap();
+    let mut late = d.clone();
+    late.review.title = "Late".into();
+    persist(
+        &store,
+        None,
+        &late,
+        &[],
+        ME,
+        true,
+        at(10, 12) + chrono::Duration::minutes(20),
+    )
+    .unwrap();
+    let rec = store.review(id).unwrap().unwrap();
+    assert!(rec.approved_at.is_some());
+    assert_eq!(rec.status, ReviewStatus::Approved);
+
+    // A poll that started after the approval and still sees none: revoked.
+    late.review.title = "Later".into();
+    persist(&store, None, &late, &[], ME, true, at(10, 14)).unwrap();
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.approved_at, None);
+    assert_eq!(rec.status, ReviewStatus::NeedsReview);
 }

@@ -265,70 +265,48 @@ impl Store {
             .query_row("PRAGMA user_version", [], |r| r.get(0))?)
     }
 
-    /// Insert or update a review (keyed by its id). Threads and notes hang
-    /// off it and are kept.
+    /// Insert or update a review (keyed by its id), every column. Threads
+    /// and notes hang off it and are kept.
+    ///
+    /// A full-row write of a record read earlier loses whatever changed in
+    /// between (a poll's fetch, the user's watermark): code that reads,
+    /// changes and writes back uses [`update_review`](Self::update_review).
     pub fn upsert_review(&self, r: &ReviewRecord) -> CoreResult<()> {
-        let reasons =
-            serde_json::to_string(&r.round_reasons).map_err(|e| CoreError::Store(e.to_string()))?;
-        self.conn().execute(
-            "INSERT INTO reviews (id, provider, host, repo, number, title, author, url, state,
-                draft, head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at,
-                round, round_reasons, status, untouched_threads, requested, rerequested_at,
-                listed, viewer, fingerprint, updated_at, fetched_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
-             ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title, author = excluded.author, url = excluded.url,
-                state = excluded.state, draft = excluded.draft, head_sha = excluded.head_sha,
-                base_sha = excluded.base_sha, last_reviewed_sha = excluded.last_reviewed_sha,
-                last_reviewed_at = excluded.last_reviewed_at, approved_at = excluded.approved_at,
-                round = excluded.round, round_reasons = excluded.round_reasons,
-                status = excluded.status, untouched_threads = excluded.untouched_threads,
-                requested = excluded.requested, rerequested_at = excluded.rerequested_at,
-                listed = excluded.listed, viewer = excluded.viewer,
-                fingerprint = excluded.fingerprint, updated_at = excluded.updated_at,
-                fetched_at = excluded.fetched_at",
-            params![
-                r.id.to_string(),
-                r.review.provider.as_str(),
-                r.review.host,
-                r.review.repo,
-                r.review.number,
-                r.review.title,
-                r.review.author,
-                r.review.url,
-                r.state.as_str(),
-                r.draft,
-                r.head_sha,
-                r.base_sha,
-                r.last_reviewed_sha,
-                r.last_reviewed_at,
-                r.approved_at,
-                r.round,
-                reasons,
-                r.status.as_str(),
-                r.untouched_threads,
-                r.requested,
-                r.rerequested_at,
-                r.listed,
-                r.viewer,
-                r.fingerprint,
-                r.review.updated_at,
-                r.fetched_at,
-            ],
-        )?;
-        Ok(())
+        write_review(&self.conn(), r, WriteColumns::All)
+    }
+
+    /// Read-modify-write one review in one transaction: `f` gets the record
+    /// as stored now and returns what to store (every column). No other
+    /// write lands between the read and the write.
+    pub fn update_review(
+        &self,
+        id: ReviewId,
+        f: impl FnOnce(ReviewRecord) -> CoreResult<ReviewRecord>,
+    ) -> CoreResult<ReviewRecord> {
+        self.transaction(|conn| {
+            let current = read_review(conn, id)?.ok_or(CoreError::NotFound)?;
+            let next = f(current)?;
+            write_review(conn, &next, WriteColumns::All)?;
+            Ok(next)
+        })
+    }
+
+    /// Run `f` in one transaction, holding the connection throughout (every
+    /// other call on this store waits). `IMMEDIATE` takes the write lock up
+    /// front, so what `f` reads is still current when it writes.
+    pub(crate) fn transaction<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> CoreResult<T>,
+    ) -> CoreResult<T> {
+        let mut conn = self.conn();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let out = f(&tx)?;
+        tx.commit()?;
+        Ok(out)
     }
 
     pub fn review(&self, id: ReviewId) -> CoreResult<Option<ReviewRecord>> {
-        Ok(self
-            .conn()
-            .query_row(
-                &format!("SELECT {REVIEW_COLUMNS} FROM reviews WHERE id = ?1"),
-                [id.to_string()],
-                review_row,
-            )
-            .optional()?)
+        read_review(&self.conn(), id)
     }
 
     /// Every stored review, most recently updated on the platform first.
@@ -340,6 +318,14 @@ impl Store {
         ))?;
         let rows = stmt.query_map([], review_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Whether the last list still had the review.
+    pub fn set_listed(&self, id: ReviewId, listed: bool) -> CoreResult<()> {
+        self.update(
+            "UPDATE reviews SET listed = ?2 WHERE id = ?1",
+            params![id.to_string(), listed],
+        )
     }
 
     /// Move the watermark.
@@ -394,126 +380,12 @@ impl Store {
     /// upsert (never a delete + insert) keeps what hangs off a thread —
     /// snapshots, timeline, verdicts — across refreshes.
     pub fn upsert_threads(&self, review: ReviewId, threads: &[Thread], me: &str) -> CoreResult<()> {
-        let mut conn = self.conn();
-        let tx = conn.transaction()?;
-        let mut keep: Vec<String> = Vec::with_capacity(threads.len());
-        for t in threads {
-            let thread_id = ThreadId::from_key(review, &t.id).to_string();
-            let anchor = t
-                .anchor
-                .as_ref()
-                .map(serde_json::to_string)
-                .transpose()
-                .map_err(|e| CoreError::Store(e.to_string()))?;
-            tx.execute(
-                "INSERT INTO threads (id, review_id, provider_thread_id, author, created_at,
-                    resolved, outdated, anchor_json, mine)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(id) DO UPDATE SET
-                    author = excluded.author, created_at = excluded.created_at,
-                    resolved = excluded.resolved, outdated = excluded.outdated,
-                    anchor_json = excluded.anchor_json, mine = excluded.mine",
-                params![
-                    thread_id,
-                    review.to_string(),
-                    t.id,
-                    t.author,
-                    t.created_at,
-                    t.resolved,
-                    t.outdated,
-                    anchor,
-                    t.author.eq_ignore_ascii_case(me),
-                ],
-            )?;
-            let mut note_ids: Vec<&str> = Vec::with_capacity(t.notes.len());
-            for n in &t.notes {
-                tx.execute(
-                    "INSERT INTO notes (id, thread_id, author, body, created_at, system)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-                     ON CONFLICT(thread_id, id) DO UPDATE SET
-                        author = excluded.author, body = excluded.body,
-                        created_at = excluded.created_at, system = excluded.system",
-                    params![n.id, thread_id, n.author, n.body, n.created_at, n.system],
-                )?;
-                note_ids.push(&n.id);
-            }
-            delete_missing(
-                &tx,
-                "notes",
-                "id",
-                "thread_id",
-                &thread_id,
-                &note_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-            )?;
-            keep.push(thread_id);
-        }
-        delete_missing(
-            &tx,
-            "threads",
-            "id",
-            "review_id",
-            &review.to_string(),
-            &keep,
-        )?;
-        tx.commit()?;
-        Ok(())
+        self.transaction(|conn| write_threads(conn, review, threads, me))
     }
 
     /// The stored threads of `review`, oldest first, notes oldest first.
     pub fn threads(&self, review: ReviewId) -> CoreResult<Vec<StoredThread>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT id, provider_thread_id, author, created_at, resolved, outdated,
-                anchor_json, mine
-             FROM threads WHERE review_id = ?1 ORDER BY created_at, provider_thread_id",
-        )?;
-        let mut notes_stmt = conn.prepare(
-            "SELECT id, author, body, created_at, system FROM notes
-             WHERE thread_id = ?1 ORDER BY created_at, id",
-        )?;
-        let rows = stmt.query_map([review.to_string()], |r| {
-            let id: String = r.get(0)?;
-            let anchor: Option<String> = r.get(6)?;
-            let anchor: Option<Anchor> = anchor
-                .map(|a| serde_json::from_str(&a))
-                .transpose()
-                .map_err(|_| invalid("anchor"))?;
-            Ok((
-                id,
-                Thread {
-                    id: r.get(1)?,
-                    author: r.get(2)?,
-                    created_at: r.get(3)?,
-                    resolved: r.get(4)?,
-                    outdated: r.get(5)?,
-                    anchor,
-                    notes: Vec::new(),
-                },
-                r.get::<_, bool>(7)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, mut thread, mine) = row?;
-            thread.notes = notes_stmt
-                .query_map([&id], |r| {
-                    Ok(Note {
-                        id: r.get(0)?,
-                        author: r.get(1)?,
-                        body: r.get(2)?,
-                        created_at: r.get(3)?,
-                        system: r.get(4)?,
-                    })
-                })?
-                .collect::<Result<_, _>>()?;
-            out.push(StoredThread {
-                thread_id: id.parse().map_err(|_| invalid("thread id"))?,
-                review_id: review,
-                mine,
-                thread,
-            });
-        }
-        Ok(out)
+        read_threads(&self.conn(), review)
     }
 }
 
@@ -571,9 +443,245 @@ pub fn viewed_paths(
     out
 }
 
+/// Which columns [`write_review`] writes over an existing row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteColumns {
+    All,
+    /// Everything but the user's own columns (the watermark): what a fetch
+    /// may write. A fetch never moves the watermark, so it never writes it
+    /// back either, not even unchanged.
+    Fetched,
+}
+
+/// Insert or update one review row (see [`Store::upsert_review`]).
+pub(crate) fn write_review(
+    conn: &Connection,
+    r: &ReviewRecord,
+    cols: WriteColumns,
+) -> CoreResult<()> {
+    let reasons =
+        serde_json::to_string(&r.round_reasons).map_err(|e| CoreError::Store(e.to_string()))?;
+    let watermark = match cols {
+        WriteColumns::All => {
+            "last_reviewed_sha = excluded.last_reviewed_sha,
+                last_reviewed_at = excluded.last_reviewed_at,"
+        }
+        WriteColumns::Fetched => "",
+    };
+    conn.execute(
+        &format!(
+            "INSERT INTO reviews (id, provider, host, repo, number, title, author, url, state,
+                draft, head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at,
+                round, round_reasons, status, untouched_threads, requested, rerequested_at,
+                listed, viewer, fingerprint, updated_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title, author = excluded.author, url = excluded.url,
+                state = excluded.state, draft = excluded.draft, head_sha = excluded.head_sha,
+                base_sha = excluded.base_sha, {watermark} approved_at = excluded.approved_at,
+                round = excluded.round, round_reasons = excluded.round_reasons,
+                status = excluded.status, untouched_threads = excluded.untouched_threads,
+                requested = excluded.requested, rerequested_at = excluded.rerequested_at,
+                listed = excluded.listed, viewer = excluded.viewer,
+                fingerprint = excluded.fingerprint, updated_at = excluded.updated_at,
+                fetched_at = excluded.fetched_at"
+        ),
+        params![
+            r.id.to_string(),
+            r.review.provider.as_str(),
+            r.review.host,
+            r.review.repo,
+            r.review.number,
+            r.review.title,
+            r.review.author,
+            r.review.url,
+            r.state.as_str(),
+            r.draft,
+            r.head_sha,
+            r.base_sha,
+            r.last_reviewed_sha,
+            r.last_reviewed_at,
+            r.approved_at,
+            r.round,
+            reasons,
+            r.status.as_str(),
+            r.untouched_threads,
+            r.requested,
+            r.rerequested_at,
+            r.listed,
+            r.viewer,
+            r.fingerprint,
+            r.review.updated_at,
+            r.fetched_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// One stored review.
+pub(crate) fn read_review(conn: &Connection, id: ReviewId) -> CoreResult<Option<ReviewRecord>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {REVIEW_COLUMNS} FROM reviews WHERE id = ?1"),
+            [id.to_string()],
+            review_row,
+        )
+        .optional()?)
+}
+
+/// Store what the user marking a review reviewed changes: the watermark and
+/// the classification it gives. Nothing a fetch owns.
+pub(crate) fn write_mark(conn: &Connection, r: &ReviewRecord) -> CoreResult<()> {
+    let reasons =
+        serde_json::to_string(&r.round_reasons).map_err(|e| CoreError::Store(e.to_string()))?;
+    let n = conn.execute(
+        "UPDATE reviews SET last_reviewed_sha = ?2, last_reviewed_at = ?3, status = ?4,
+            round_reasons = ?5, untouched_threads = ?6 WHERE id = ?1",
+        params![
+            r.id.to_string(),
+            r.last_reviewed_sha,
+            r.last_reviewed_at,
+            r.status.as_str(),
+            reasons,
+            r.untouched_threads
+        ],
+    )?;
+    match n {
+        0 => Err(CoreError::NotFound),
+        _ => Ok(()),
+    }
+}
+
+/// Make the stored threads of `review` exactly `threads` (see
+/// [`Store::upsert_threads`]), in the caller's transaction.
+pub(crate) fn write_threads(
+    conn: &Connection,
+    review: ReviewId,
+    threads: &[Thread],
+    me: &str,
+) -> CoreResult<()> {
+    let mut keep: Vec<String> = Vec::with_capacity(threads.len());
+    for t in threads {
+        let thread_id = ThreadId::from_key(review, &t.id).to_string();
+        let anchor = t
+            .anchor
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| CoreError::Store(e.to_string()))?;
+        conn.execute(
+            "INSERT INTO threads (id, review_id, provider_thread_id, author, created_at,
+                resolved, outdated, anchor_json, mine)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET
+                author = excluded.author, created_at = excluded.created_at,
+                resolved = excluded.resolved, outdated = excluded.outdated,
+                anchor_json = excluded.anchor_json, mine = excluded.mine",
+            params![
+                thread_id,
+                review.to_string(),
+                t.id,
+                t.author,
+                t.created_at,
+                t.resolved,
+                t.outdated,
+                anchor,
+                t.author.eq_ignore_ascii_case(me),
+            ],
+        )?;
+        let mut note_ids: Vec<&str> = Vec::with_capacity(t.notes.len());
+        for n in &t.notes {
+            conn.execute(
+                "INSERT INTO notes (id, thread_id, author, body, created_at, system)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(thread_id, id) DO UPDATE SET
+                    author = excluded.author, body = excluded.body,
+                    created_at = excluded.created_at, system = excluded.system",
+                params![n.id, thread_id, n.author, n.body, n.created_at, n.system],
+            )?;
+            note_ids.push(&n.id);
+        }
+        delete_missing(
+            conn,
+            "notes",
+            "id",
+            "thread_id",
+            &thread_id,
+            &note_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        )?;
+        keep.push(thread_id);
+    }
+    delete_missing(
+        conn,
+        "threads",
+        "id",
+        "review_id",
+        &review.to_string(),
+        &keep,
+    )?;
+    Ok(())
+}
+
+/// The stored threads of `review` (see [`Store::threads`]).
+pub(crate) fn read_threads(conn: &Connection, review: ReviewId) -> CoreResult<Vec<StoredThread>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, provider_thread_id, author, created_at, resolved, outdated,
+            anchor_json, mine
+         FROM threads WHERE review_id = ?1 ORDER BY created_at, provider_thread_id",
+    )?;
+    let mut notes_stmt = conn.prepare(
+        "SELECT id, author, body, created_at, system FROM notes
+         WHERE thread_id = ?1 ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map([review.to_string()], |r| {
+        let id: String = r.get(0)?;
+        let anchor: Option<String> = r.get(6)?;
+        let anchor: Option<Anchor> = anchor
+            .map(|a| serde_json::from_str(&a))
+            .transpose()
+            .map_err(|_| invalid("anchor"))?;
+        Ok((
+            id,
+            Thread {
+                id: r.get(1)?,
+                author: r.get(2)?,
+                created_at: r.get(3)?,
+                resolved: r.get(4)?,
+                outdated: r.get(5)?,
+                anchor,
+                notes: Vec::new(),
+            },
+            r.get::<_, bool>(7)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, mut thread, mine) = row?;
+        thread.notes = notes_stmt
+            .query_map([&id], |r| {
+                Ok(Note {
+                    id: r.get(0)?,
+                    author: r.get(1)?,
+                    body: r.get(2)?,
+                    created_at: r.get(3)?,
+                    system: r.get(4)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        out.push(StoredThread {
+            thread_id: id.parse().map_err(|_| invalid("thread id"))?,
+            review_id: review,
+            mine,
+            thread,
+        });
+    }
+    Ok(out)
+}
+
 /// Delete rows of `table` under `parent` whose `key` is not in `keep`.
 fn delete_missing(
-    tx: &rusqlite::Transaction<'_>,
+    tx: &Connection,
     table: &str,
     key: &str,
     parent_col: &str,

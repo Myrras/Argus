@@ -16,13 +16,14 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::error::{CoreError, CoreResult};
+use crate::history::cache::read_line_touches;
 use crate::ids::ReviewId;
 use crate::provider::{
     is_rate_limited, rate_limited, ProviderId, ReviewDetail, ReviewProvider, ReviewRef,
     ReviewState, Thread,
 };
 use crate::review::advance_with;
-use crate::store::{ReviewRecord, Store};
+use crate::store::{self, ReviewRecord, Store, WriteColumns};
 
 /// How many reviews of one provider are fetched at the same time.
 const FETCH_PARALLELISM: usize = 4;
@@ -189,11 +190,7 @@ pub fn refresh_provider(
             // An unlisted review that is gone (deleted, access lost): just
             // no longer listed.
             Err(CoreError::NotFound) if !listed => match prev {
-                Some(p) if p.listed => {
-                    let mut next = p.clone();
-                    next.listed = false;
-                    store.upsert_review(&next).map(|_| true)
-                }
+                Some(p) if p.listed => store.set_listed(id, false).map(|_| true),
                 _ => Ok(false),
             },
             Err(e) => Err(e),
@@ -217,36 +214,54 @@ pub fn refresh_provider(
     (changed, errors)
 }
 
-/// Classify a fresh fetch against `prev` and store it if anything changed.
+/// Classify a fresh fetch against the stored record and store it if
+/// anything changed. `now` is when the fetch started.
+///
+/// The stored record is re-read, classified against and written in one
+/// transaction, so whatever landed while the fetch was on the network (the
+/// user marking it reviewed, an approval from Argus) is what the fetch is
+/// folded into, never overwritten by an older copy. The poll's own `prev`
+/// is therefore not used (kept for callers that still pass one). The
+/// watermark is never written here (see [`WriteColumns::Fetched`]).
 pub(crate) fn persist(
     store: &Store,
-    prev: Option<&ReviewRecord>,
+    _prev: Option<&ReviewRecord>,
     detail: &ReviewDetail,
     threads: &[Thread],
     me: &str,
     listed: bool,
     now: DateTime<Utc>,
 ) -> CoreResult<bool> {
-    // The cached line walks at this head sharpen the untouched count; none
-    // (or a failed read) falls back to the approximation.
-    let touches = store
-        .line_touches(detail.review.id(), &detail.head_sha)
-        .ok();
-    let mut next = advance_with(prev, detail, threads, me, listed, now, touches.as_ref());
-    next.fingerprint = fingerprint(detail, threads);
-    let changed = match prev {
-        Some(p) => {
-            let mut same_time = p.clone();
-            same_time.fetched_at = next.fetched_at;
-            same_time != next
+    let id = detail.review.id();
+    store.transaction(|conn| {
+        let prev = store::read_review(conn, id)?;
+        // The cached line walks at this head sharpen the untouched count;
+        // none (or a failed read) falls back to the approximation.
+        let touches = read_line_touches(conn, id, &detail.head_sha).ok();
+        let mut next = advance_with(
+            prev.as_ref(),
+            detail,
+            threads,
+            me,
+            listed,
+            now,
+            touches.as_ref(),
+        );
+        next.fingerprint = fingerprint(detail, threads);
+        let changed = match &prev {
+            Some(p) => {
+                let mut same_time = p.clone();
+                same_time.fetched_at = next.fetched_at;
+                same_time != next
+            }
+            None => true,
+        };
+        if changed {
+            store::write_review(conn, &next, WriteColumns::Fetched)?;
+            store::write_threads(conn, id, threads, me)?;
         }
-        None => true,
-    };
-    if changed {
-        store.upsert_review(&next)?;
-        store.upsert_threads(next.id, threads, me)?;
-    }
-    Ok(changed)
+        Ok(changed)
+    })
 }
 
 /// FNV-1a over the fetched data: stable across runs and releases (unlike

@@ -13,6 +13,7 @@ use crate::provider::{
     ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, ProviderId, ReviewDetail,
     ReviewProvider, ReviewRef, Side, Thread,
 };
+use crate::review::ReviewStatus;
 use crate::store::Store;
 use crate::testutil::{at, detail, note, thread, AUTHOR, ME};
 use crate::Core;
@@ -1133,4 +1134,40 @@ fn a_stored_thread_knows_its_review() {
     for t in core.threads(rec.id).unwrap() {
         assert_eq!(core.thread_review(t.thread_id).unwrap(), rec.id);
     }
+}
+
+#[test]
+fn a_history_call_over_a_stale_record_keeps_the_round_and_the_watermark() {
+    let repo = repo();
+    // Head at c2: the walk turns the untouched count from 0 to 1.
+    {
+        let mut d = repo.detail.lock().unwrap();
+        d.head_sha = "c2".into();
+        d.commits.truncate(2);
+    }
+    let core = core_over(&repo);
+    let stale = core.reviews().unwrap()[0].clone();
+    assert_eq!(stale.status, ReviewStatus::NeedsReview);
+    // The user marks it reviewed while a history call holds the old record.
+    let marked = core.mark_reviewed(stale.id).unwrap();
+    assert_eq!(marked.status, ReviewStatus::WaitingOnAuthor);
+
+    let provider: CoreResult<Arc<dyn ReviewProvider>> = Ok(repo.clone());
+    super::api::compute_histories(&core.store, &stale, &provider, None, None).unwrap();
+    let rec = core.review(stale.id).unwrap();
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("c2"));
+    assert_eq!(rec.round, marked.round);
+    // Counted against the stored watermark (at head: nothing touched since).
+    assert_eq!(rec.untouched_threads, 1);
+
+    // Walks for a head the review no longer has never write the count.
+    let mut old = rec.clone();
+    old.head_sha = "c1".into();
+    old.untouched_threads = 7;
+    core.store
+        .set_round(rec.id, rec.round, &rec.round_reasons, rec.status, 0)
+        .unwrap();
+    super::api::compute_histories(&core.store, &old, &provider, None, None).unwrap();
+    assert_eq!(core.review(rec.id).unwrap().untouched_threads, 0);
 }

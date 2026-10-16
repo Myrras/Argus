@@ -13,7 +13,7 @@
 //! cache holds one entry per thread. A row that does not parse (written by
 //! a newer Argus) reads as a miss.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -197,39 +197,48 @@ impl Store {
     /// lines, by platform thread id. Threads without a cached walk at this
     /// head are absent.
     pub fn line_touches(&self, review: ReviewId, head: &str) -> CoreResult<LineTouches> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT t.provider_thread_id, s.status FROM snapshots s
-             JOIN threads t ON t.id = s.thread_id
-             WHERE t.review_id = ?1 AND s.head_sha = ?2",
-        )?;
-        let rows = stmt.query_map(params![review.to_string(), head], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut out = LineTouches::new();
-        for row in rows {
-            let (thread, status) = row?;
-            let Ok(m) = serde_json::from_str::<CachedMapping>(&status) else {
-                continue;
-            };
-            let Some(then_sha) = m.then_sha else { continue };
-            let usable = m.attributed
-                && matches!(
-                    m.status,
-                    LineStatus::Located { .. }
-                        | LineStatus::Deleted { .. }
-                        | LineStatus::FileGone { .. }
-                );
-            out.insert(
-                thread,
-                LineTouch {
-                    then_sha,
-                    commits: m.commits,
-                    touched_by: m.touched_by,
-                    usable,
-                },
-            );
-        }
-        Ok(out)
+        read_line_touches(&self.conn(), review, head)
     }
+}
+
+/// [`Store::line_touches`] on a connection the caller holds (inside its
+/// transaction).
+pub(crate) fn read_line_touches(
+    conn: &Connection,
+    review: ReviewId,
+    head: &str,
+) -> CoreResult<LineTouches> {
+    let mut stmt = conn.prepare(
+        "SELECT t.provider_thread_id, s.status FROM snapshots s
+         JOIN threads t ON t.id = s.thread_id
+         WHERE t.review_id = ?1 AND s.head_sha = ?2",
+    )?;
+    let rows = stmt.query_map(params![review.to_string(), head], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = LineTouches::new();
+    for row in rows {
+        let (thread, status) = row?;
+        let Ok(m) = serde_json::from_str::<CachedMapping>(&status) else {
+            continue;
+        };
+        let Some(then_sha) = m.then_sha else { continue };
+        let usable = m.attributed
+            && matches!(
+                m.status,
+                LineStatus::Located { .. }
+                    | LineStatus::Deleted { .. }
+                    | LineStatus::FileGone { .. }
+            );
+        out.insert(
+            thread,
+            LineTouch {
+                then_sha,
+                commits: m.commits,
+                touched_by: m.touched_by,
+                usable,
+            },
+        );
+    }
+    Ok(out)
 }

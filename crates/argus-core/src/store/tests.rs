@@ -389,3 +389,26 @@ fn a_failed_migration_step_leaves_the_database_as_it_was() {
         .unwrap();
     assert_eq!(reviews, 1);
 }
+
+#[test]
+fn update_review_reads_and_writes_in_one_go() {
+    let store = Store::in_memory().unwrap();
+    let r = record();
+    store.upsert_review(&r).unwrap();
+    store.set_watermark(r.id, "h1", at(11, 8)).unwrap();
+    let next = store
+        .update_review(r.id, |mut cur| {
+            // Sees what is stored now, not `r`.
+            assert_eq!(cur.last_reviewed_sha.as_deref(), Some("h1"));
+            cur.approved_at = Some(at(11, 9));
+            Ok(cur)
+        })
+        .unwrap();
+    assert_eq!(store.review(r.id).unwrap(), Some(next));
+    assert!(matches!(
+        store.update_review(crate::ids::ReviewId::new(), Ok),
+        Err(CoreError::NotFound)
+    ));
+    store.set_listed(r.id, false).unwrap();
+    assert!(!store.review(r.id).unwrap().unwrap().listed);
+}

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::cache::{CachedHistory, CachedMapping};
+use super::cache::{read_line_touches, CachedHistory, CachedMapping};
 use super::snapshot::{anchored_text, around, diff_rows, from_diff_hunk, window};
 use super::timeline::{commit_entries, merge, note_entries, resolution_entries};
 use super::walk::{walk_line, ApiSource, LineMapping, WalkStart};
@@ -29,7 +29,7 @@ use crate::git::{file_or, LocalClone};
 use crate::ids::{ReviewId, ThreadId};
 use crate::provider::{Anchor, CommitInfo, ReviewProvider, ReviewRef, Side, Thread};
 use crate::review::{untouched_with, RoundInput};
-use crate::store::{ReviewRecord, Store, StoredThread};
+use crate::store::{read_review, read_threads, ReviewRecord, Store, StoredThread};
 use crate::Core;
 
 /// How many threads of one review are computed at the same time.
@@ -189,36 +189,46 @@ fn compute(
 }
 
 /// Store the review's untouched count as the cached walks now tell it.
+///
+/// Only the count is written, and only while the review is still at the
+/// head the walks are for: `record` may be older than the store (a poll or
+/// the user marking it reviewed since), so the count is taken from the
+/// stored record, threads and watermark in one transaction, never by
+/// writing `record`'s round or status back.
 fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
-    let threads: Vec<Thread> = store
-        .threads(record.id)?
-        .into_iter()
-        .map(|t| t.thread)
-        .collect();
-    let touches = store.line_touches(record.id, &record.head_sha)?;
-    let n = untouched_with(
-        &RoundInput {
-            state: record.state,
-            head_sha: &record.head_sha,
-            last_reviewed_sha: record.last_reviewed_sha.as_deref(),
-            last_reviewed_at: record.last_reviewed_at,
-            approved_at: record.approved_at,
-            rerequested_at: record.rerequested_at,
-            threads: &threads,
-            me: &record.viewer,
-        },
-        Some(&touches),
-    );
-    if n != record.untouched_threads {
-        store.set_round(
-            record.id,
-            record.round,
-            &record.round_reasons,
-            record.status,
-            n,
-        )?;
-    }
-    Ok(())
+    store.transaction(|conn| {
+        let Some(current) = read_review(conn, record.id)? else {
+            return Ok(());
+        };
+        if current.head_sha != record.head_sha {
+            return Ok(());
+        }
+        let threads: Vec<Thread> = read_threads(conn, record.id)?
+            .into_iter()
+            .map(|t| t.thread)
+            .collect();
+        let touches = read_line_touches(conn, record.id, &current.head_sha)?;
+        let n = untouched_with(
+            &RoundInput {
+                state: current.state,
+                head_sha: &current.head_sha,
+                last_reviewed_sha: current.last_reviewed_sha.as_deref(),
+                last_reviewed_at: current.last_reviewed_at,
+                approved_at: current.approved_at,
+                rerequested_at: current.rerequested_at,
+                threads: &threads,
+                me: &current.viewer,
+            },
+            Some(&touches),
+        );
+        if n != current.untouched_threads {
+            conn.execute(
+                "UPDATE reviews SET untouched_threads = ?3 WHERE id = ?1 AND head_sha = ?2",
+                rusqlite::params![record.id.to_string(), current.head_sha, n],
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// What every thread of one computation shares.

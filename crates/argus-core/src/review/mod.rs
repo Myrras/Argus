@@ -223,7 +223,9 @@ pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> 
 /// then the review is classified.
 ///
 /// - `approved_at` is set (once) while the user's approval stands, and
-///   cleared when the platform no longer shows it.
+///   cleared when the platform no longer shows it — unless it was stored
+///   after `now` (the fetch's start): an approval from Argus the fetch could
+///   not see yet.
 /// - A re-request is a transition: requested now, not requested at the last
 ///   fetch. A request that never went away (the user reviewed in Argus but
 ///   not on the platform) is not one.
@@ -251,10 +253,13 @@ pub fn advance_with(
     now: DateTime<Utc>,
     touches: Option<&LineTouches>,
 ) -> ReviewRecord {
+    // `now` is when the fetch started: an approval stored after that (from
+    // Argus, while this fetch was on its way) is newer than what the fetch
+    // saw, so it stands until a fetch that started later disagrees.
     let approved_at = if detail.approved_by_me {
         prev.and_then(|p| p.approved_at).or(Some(now))
     } else {
-        None
+        prev.and_then(|p| p.approved_at).filter(|a| *a > now)
     };
     let rerequested_at = match prev {
         Some(p) if detail.requested_from_me && !p.requested => Some(now),
