@@ -402,11 +402,25 @@ fn account_token_goes_to_gh_only_via_env() {
     let calls = fake.calls();
     assert!(calls.contains("api -i user token=fake-gh-token ent=none host=none"));
 
+    // No account and no token from `gh auth token`: gh authenticates on its
+    // own.
     let fake = script(FAKE);
     fake.provider("github.com", None).current_user().unwrap();
     assert!(fake
         .calls()
         .contains("api -i user token=none ent=none host=none"));
+
+    // No account: the active account's token, so Argus knows (and can
+    // redact) the token gh sends.
+    let fake = script(&FAKE.replacen(
+        "case \"$*\" in\n",
+        "case \"$*\" in\n  \"auth token --hostname github.com\") echo fake-active-token; exit 0 ;;\n",
+        1,
+    ));
+    fake.provider("github.com", None).current_user().unwrap();
+    let calls = fake.calls();
+    assert!(calls.contains("auth token --hostname github.com token=none"));
+    assert!(calls.contains("api -i user token=fake-active-token ent=none host=none"));
 
     // GHE: host via GH_HOST, token via GH_ENTERPRISE_TOKEN.
     let fake = script(FAKE);

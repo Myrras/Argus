@@ -81,20 +81,29 @@ fn placed(path: &str) -> PlacedComment {
 
 // ------------------------------------------------------------------- GitHub
 
-/// A `gh` that hands out the token for the `work` account and fails every
-/// other call with `stdout` / `stderr` from files next to it.
+/// A `gh` that hands out the token (for the `work` account and for the
+/// active account, as `gh auth token` does without `--user`) and fails every
+/// other call with `stdout` / `stderr` from files next to it. REST reads
+/// (`gh api -i`) get the `status` file as their status line first, the way
+/// `gh api -i` prints a failed response.
 const FAKE_GH: &str = r#"
 case "$*" in
   "auth token --hostname github.com --user work") echo "$TOKEN"; exit 0 ;;
+  "auth token --hostname github.com") echo "$TOKEN"; exit 0 ;;
 esac
 cat > /dev/null
+if [ "$1 $2" = "api -i" ]; then
+  printf 'HTTP/2.0 %s\r\nContent-Type: application/json; charset=utf-8\r\n\r\n' "$(cat "$DIR/status")"
+fi
 cat "$DIR/stdout"
 cat "$DIR/stderr" >&2
 exit 1
 "#;
 
+/// A fake `gh`; `account` is the configured account (`None`: gh's active
+/// one, which Argus then never names).
 #[cfg(unix)]
-fn fake_gh() -> (tempfile::TempDir, GithubProvider) {
+fn fake_gh(account: Option<&str>) -> (tempfile::TempDir, GithubProvider) {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let gh = dir.path().join("gh");
@@ -104,16 +113,17 @@ fn fake_gh() -> (tempfile::TempDir, GithubProvider) {
     );
     std::fs::write(&gh, script).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.path().join("status"), "500 Internal Server Error").unwrap();
     let provider = GithubProvider::with_binary(
         gh.to_string_lossy().into_owned(),
         "github.com",
-        Some("work".into()),
+        account.map(str::to_string),
     );
     (dir, provider)
 }
 
 #[cfg(not(unix))]
-fn fake_gh() -> (tempfile::TempDir, GithubProvider) {
+fn fake_gh(_: Option<&str>) -> (tempfile::TempDir, GithubProvider) {
     unreachable!("fake gh scripts are Unix-only; these tests are ignored on Windows")
 }
 
@@ -175,63 +185,84 @@ fn every_error(p: &dyn ReviewProvider, r: &ReviewRef) -> Vec<(&'static str, Stri
     out
 }
 
-/// Every body through every call, `gh` failing with `stderr` (one test per
-/// stderr shape so they run in parallel).
-fn github_errors_with(stderr: &str) {
-    let (dir, gh) = fake_gh();
-    let mut checked = 0;
-    for body in bodies() {
-        std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
-        std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
-        let errors = every_error(&gh, &github_pr());
-        // All but `thread_resolutions` (no such call on GitHub) fail.
-        assert_eq!(errors.len(), 10, "{body} / {stderr}: {errors:?}");
-        for (what, text) in errors {
-            assert_clean(GH_TOKEN, what, &text);
-            checked += 1;
+/// Every body through every call, `gh` failing with `stderr` and REST
+/// reads answering `status` (one test per shape so they run in parallel),
+/// with the `work` account and without one.
+fn github_errors_with(status: &str, stderr: &str) {
+    for account in [Some("work"), None] {
+        let (dir, gh) = fake_gh(account);
+        std::fs::write(dir.path().join("status"), status).unwrap();
+        let mut checked = 0;
+        for body in bodies() {
+            std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
+            std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
+            let errors = every_error(&gh, &github_pr());
+            // All but `thread_resolutions` (no such call on GitHub) fail.
+            assert_eq!(
+                errors.len(),
+                10,
+                "{account:?} {body} / {stderr}: {errors:?}"
+            );
+            for (what, text) in errors {
+                assert_clean(GH_TOKEN, what, &text);
+                checked += 1;
+            }
         }
+        assert!(checked >= 140);
     }
-    assert!(checked >= 140);
 }
 
 #[test]
 #[cfg_attr(windows, ignore)]
 fn github_rejections_never_carry_the_token() {
-    github_errors_with("gh: Validation Failed (HTTP 422)");
+    github_errors_with(
+        "422 Unprocessable Entity",
+        "gh: Validation Failed (HTTP 422)",
+    );
 }
 
 #[test]
 #[cfg_attr(windows, ignore)]
 fn github_not_found_never_carries_the_token() {
-    github_errors_with("gh: Not Found (HTTP 404)");
+    github_errors_with("404 Not Found", "gh: Not Found (HTTP 404)");
 }
 
 #[test]
 #[cfg_attr(windows, ignore)]
 fn github_auth_failures_never_carry_the_token() {
     // gh itself echoing the token on stderr.
-    github_errors_with("gh: Bad credentials (HTTP 401) {T}");
+    github_errors_with("401 Unauthorized", "gh: Bad credentials (HTTP 401) {T}");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn github_server_errors_never_carry_the_token() {
+    github_errors_with("502 Bad Gateway", "gh: HTTP 502 {T}");
 }
 
 #[test]
 #[cfg_attr(windows, ignore)]
 fn the_platforms_reason_still_comes_through_redacted() {
-    let (dir, gh) = fake_gh();
-    std::fs::write(
-        dir.path().join("stdout"),
-        format!(
-            r#"{{"message":"Validation Failed","errors":[{{"message":"line must be part of the diff ({GH_TOKEN})"}}]}}"#
-        ),
-    )
-    .unwrap();
-    std::fs::write(dir.path().join("stderr"), "gh: (HTTP 422)").unwrap();
-    let err = gh
-        .post_comment(&github_pr(), &placed("src/cache.rs"))
-        .unwrap_err();
-    assert_eq!(
-        err.message,
-        "GitHub: Validation Failed: line must be part of the diff ([redacted])"
-    );
+    // Without an account too: Argus learns the active account's token from
+    // `gh auth token` and hands gh exactly that one, so it can redact it.
+    for account in [Some("work"), None] {
+        let (dir, gh) = fake_gh(account);
+        std::fs::write(
+            dir.path().join("stdout"),
+            format!(
+                r#"{{"message":"Validation Failed","errors":[{{"message":"line must be part of the diff ({GH_TOKEN})"}}]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("stderr"), "gh: (HTTP 422)").unwrap();
+        let err = gh
+            .post_comment(&github_pr(), &placed("src/cache.rs"))
+            .unwrap_err();
+        assert_eq!(
+            err.message, "GitHub: Validation Failed: line must be part of the diff ([redacted])",
+            "{account:?}"
+        );
+    }
 }
 
 // ------------------------------------------------------------------- GitLab

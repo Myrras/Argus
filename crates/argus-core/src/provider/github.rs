@@ -1,10 +1,11 @@
 //! GitHub, via the `gh` CLI — exactly Podium's mechanism, so Argus never
 //! stores a GitHub token.
 //!
-//! With an account configured, `gh auth token --hostname <host> --user
-//! <account>` picks that account's token, which goes to every later `gh` call
-//! through `GH_TOKEN` (`GH_ENTERPRISE_TOKEN` off github.com) and nowhere
-//! else. Without one, `gh` uses its active account. A host other than
+//! `gh auth token --hostname <host> [--user <account>]` picks the configured
+//! account's token, or the active account's without one. It goes to every
+//! later `gh` call through `GH_TOKEN` (`GH_ENTERPRISE_TOKEN` off github.com)
+//! and nowhere else, so Argus knows exactly the token gh sends and can redact
+//! it from any GitHub text it shows. A host other than
 //! github.com is selected with `GH_HOST`, which both `gh search` and `gh api`
 //! honour.
 //!
@@ -84,7 +85,8 @@ pub struct GithubProvider {
     gh: String,
     host: String,
     account: Option<String>,
-    /// The picked account's token, held in memory only.
+    /// The token handed to gh (configured or active account), held in
+    /// memory only, for `GH_TOKEN` and for redaction.
     token: Mutex<Option<String>>,
     me: Mutex<Option<String>>,
     timeout: Duration,
@@ -153,23 +155,35 @@ impl GithubProvider {
         cmd
     }
 
-    /// The configured account's token, fetched once and kept in memory.
-    fn account_token(&self) -> CoreResult<Option<String>> {
-        let Some(account) = &self.account else {
-            return Ok(None);
-        };
+    /// The token gh is to use, fetched once and kept in memory: the
+    /// configured account's, else the active account's. Knowing it even
+    /// without an account matters: GitHub can echo the token in an error
+    /// body, and only a known token can be redacted.
+    ///
+    /// With an account, no token is an error (that account is not logged
+    /// in). Without one, a failed lookup is not: `None` lets gh authenticate
+    /// on its own (an old gh without `auth token`), and fail on its own if it
+    /// cannot.
+    fn token(&self) -> CoreResult<Option<String>> {
         let mut cached = self.token.lock().expect("token lock poisoned");
         if let Some(t) = cached.as_ref() {
             return Ok(Some(t.clone()));
         }
         let mut cmd = self.command();
-        cmd.args(["auth", "token", "--hostname", &self.host, "--user", account])
-            .stderr(Stdio::null());
-        let output = run_with_timeout(&mut cmd, None, self.timeout.min(AUTH_TIMEOUT))
-            .map_err(|_| CoreError::GithubUnavailable)?;
-        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !output.status.success() || token.is_empty() {
-            return Err(CoreError::GithubUnavailable);
+        cmd.args(["auth", "token", "--hostname", &self.host]);
+        if let Some(account) = &self.account {
+            cmd.args(["--user", account]);
+        }
+        cmd.stderr(Stdio::null());
+        let token = match run_with_timeout(&mut cmd, None, self.timeout.min(AUTH_TIMEOUT)) {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+            _ => String::new(),
+        };
+        if token.is_empty() {
+            return match self.account {
+                Some(_) => Err(CoreError::GithubUnavailable),
+                None => Ok(None),
+            };
         }
         *cached = Some(token.clone());
         Ok(Some(token))
@@ -248,7 +262,7 @@ impl GithubProvider {
     /// Run one unconditional `gh` call (searches) and return its stdout.
     fn run(&self, args: &[&str]) -> CoreResult<String> {
         self.limit.check(ProviderId::Github)?;
-        let token = self.account_token()?;
+        let token = self.token()?;
         let output = self.exec(token.as_deref(), args, None)?;
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
@@ -261,7 +275,7 @@ impl GithubProvider {
     /// body, from the cache on a 304, and the next page's query.
     fn get(&self, path: &str, jq: Option<&str>) -> CoreResult<Page> {
         self.limit.check(ProviderId::Github)?;
-        let token = self.account_token()?;
+        let token = self.token()?;
         let key = match jq {
             Some(filter) => format!("{path} --jq {filter}"),
             None => path.to_string(),
@@ -380,7 +394,7 @@ impl GithubProvider {
             return None;
         }
         let (owner, name) = r.repo.split_once('/')?;
-        let token = self.account_token().ok()?;
+        let token = self.token().ok()?;
         let query = format!("query={THREADS_QUERY}");
         let owner = format!("owner={owner}");
         let name = format!("name={name}");
@@ -1274,7 +1288,7 @@ impl GithubProvider {
         path: &str,
         body: &serde_json::Value,
     ) -> PostResultOf<T> {
-        let token = self.account_token()?;
+        let token = self.token()?;
         let output = match self.exec(
             token.as_deref(),
             &["api", "--method", "POST", path, "--input", "-"],
