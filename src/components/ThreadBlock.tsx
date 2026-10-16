@@ -6,7 +6,8 @@
  * Notes in order, rendered as markdown (`Markdown`), ` ```suggestion `
  * blocks as a diff (`SuggestedChange`). A thread with a code
  * reference has a "Then/now history" toggle that expands its then/now slot
- * (M3) in place.
+ * (M3) in place. "Reply" opens a reply composer at the foot of the thread
+ * (`ReplyComposer`; posted only on its Reply button or ⌘↩).
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
@@ -20,7 +21,9 @@ import { isConversationThread } from "../lib/diffThreads";
 import { parseSuggestionInfo } from "../lib/suggestions";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
+import { useCommentStore } from "../state/commentStore";
 import { Badge } from "./Badge";
+import { ReplyComposer } from "./CommentBlocks";
 import { CaretIcon } from "./icons";
 import { Markdown, type RenderFence } from "./Markdown";
 import { SuggestedChange } from "./SuggestedChange";
@@ -44,6 +47,8 @@ export function ThreadBlock({
 }) {
   const [open, setOpen] = useState(t.mine);
   const [history, setHistory] = useState(false);
+  const replying = useCommentStore((s) => !!s.replies[t.threadId]);
+  const openReply = useCommentStore((s) => s.openReply);
   const comments = t.notes.filter((n) => !n.system).length;
   const anchored = !isConversationThread(t);
   // After React commits the new height.
@@ -63,6 +68,11 @@ export function ThreadBlock({
         onResize={onResize}
       />
     ) : null;
+  };
+  const reply = () => {
+    openReply(t.threadId);
+    setOpen(true);
+    resized();
   };
   const toggleHistory = () => {
     setHistory((h) => !h);
@@ -93,6 +103,15 @@ export function ThreadBlock({
           </span>
           {t.resolved && <Badge tone="success">Resolved</Badge>}
           {!open && <span className={styles.preview}>{preview(t)}</span>}
+        </button>
+        <button
+          type="button"
+          className={`ghost ${styles.history}`}
+          aria-label={`Reply to ${t.author}'s thread`}
+          disabled={replying && open}
+          onClick={reply}
+        >
+          Reply
         </button>
         {anchored && (
           <button
@@ -133,6 +152,13 @@ export function ThreadBlock({
             </li>
           ))}
         </ol>
+      )}
+      {open && replying && (
+        <ReplyComposer
+          reviewId={t.reviewId}
+          threadId={t.threadId}
+          onResize={onResize}
+        />
       )}
     </article>
   );

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -17,7 +23,9 @@ vi.mock("./DiffEditor", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import type { PostResult } from "../ipc/types";
 import { clearContentsCache, useCodeViewStore } from "../state/codeViewStore";
+import { useCommentStore, type Draft } from "../state/commentStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
@@ -79,9 +87,58 @@ const files = reviewFiles({
   ],
 });
 
+const WRITES = ["post_comments", "reply_to_thread", "approve_review"];
+const writes = () =>
+  mockInvoke.mock.calls.filter(([cmd]) => WRITES.includes(cmd as string));
+
+const draft = (id: string, line: number, body: string): Draft => ({
+  id,
+  path: "src/cache.rs",
+  side: "new",
+  line,
+  startLine: null,
+  body,
+  headSha: r.headSha,
+  baseSha: r.baseSha,
+  createdAt: "2026-10-16T11:00:00Z",
+  error: null,
+});
+
+/** The default backend, with `extra` answering some commands. */
+function backend(extra: Record<string, (args: unknown) => unknown> = {}) {
+  mockInvoke.mockImplementation(((cmd: string, args?: unknown) => {
+    if (extra[cmd]) {
+      try {
+        return Promise.resolve(extra[cmd](args));
+      } catch (e) {
+        return Promise.reject(e);
+      }
+    }
+    return Promise.resolve(
+      cmd === "list_threads"
+        ? threads
+        : cmd === "list_reviews"
+          ? [r]
+          : cmd === "list_files"
+            ? files
+            : cmd === "file_contents"
+              ? "a\nb\nc"
+              : r,
+    );
+  }) as typeof invoke);
+}
+
 describe("ReviewDetail", () => {
   beforeEach(() => {
     clearContentsCache();
+    localStorage.clear();
+    useCommentStore.setState({
+      drafts: {},
+      composer: null,
+      replies: {},
+      posting: {},
+      focus: null,
+    });
     mockInvoke.mockImplementation((cmd: string) =>
       Promise.resolve(
         cmd === "list_threads"
@@ -183,5 +240,149 @@ describe("ReviewDetail", () => {
       screen.getByRole("button", { name: "Mark round reviewed" }),
     ).toBeDisabled();
     await screen.findAllByRole("article");
+  });
+
+  it("counts pending comments and posts them all only on Post all", async () => {
+    useCommentStore.setState({
+      drafts: {
+        [r.id]: [draft("d1", 1, "Posts fine"), draft("d2", 2, "Gets refused")],
+      },
+    });
+    const results: PostResult[] = [
+      {
+        status: "posted",
+        url: "https://github.com/acme-fixture/widgets/pull/1#r9",
+        providerThreadId: "9",
+        providerNoteId: "9",
+        path: "src/cache.rs",
+        side: "new",
+        line: 1,
+        startLine: null,
+        headSha: r.headSha,
+      },
+      { status: "failed", kind: "postRejected", message: "GitHub: refused" },
+    ];
+    backend({ post_comments: () => results });
+    render(<ReviewDetail now={NOW} />);
+    expect(screen.getByText("2 pending comments")).toBeInTheDocument();
+    await screen.findAllByRole("article");
+    expect(writes()).toEqual([]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Post all" }));
+    expect(writes()).toHaveLength(1);
+    // The posted one is gone, the refused one stays with its reason.
+    expect(await screen.findByText("(1 not posted)")).toBeInTheDocument();
+    expect(screen.getByText("1 pending comment")).toBeInTheDocument();
+    expect(useCommentStore.getState().drafts[r.id]).toMatchObject([
+      { id: "d2", body: "Gets refused", error: { message: "GitHub: refused" } },
+    ]);
+  });
+
+  it("replies in a thread; an error shows inline and keeps the text", async () => {
+    let fail = true;
+    backend({
+      reply_to_thread: () => {
+        if (fail) throw { kind: "postRejected", message: "GitHub: locked" };
+        return { url: "u", providerThreadId: "1", providerNoteId: "2" };
+      },
+    });
+    render(<ReviewDetail now={NOW} />);
+    const conversation = screen.getByRole("region", { name: "Conversation" });
+    fireEvent.click(
+      await within(conversation).findByRole("button", {
+        name: "Reply to rev-fixture's thread",
+      }),
+    );
+    const field = within(conversation).getByRole("textbox", { name: "Reply" });
+    fireEvent.change(field, { target: { value: "Still needed?" } });
+    expect(writes()).toEqual([]);
+    fireEvent.click(
+      within(conversation).getByRole("button", { name: "Reply" }),
+    );
+    expect(await within(conversation).findByRole("alert")).toHaveTextContent(
+      "GitHub: locked",
+    );
+    expect(field).toHaveValue("Still needed?");
+    fail = false;
+    fireEvent.click(
+      within(conversation).getByRole("button", { name: "Reply" }),
+    );
+    await waitFor(() =>
+      expect(
+        within(conversation).queryByRole("textbox", { name: "Reply" }),
+      ).toBeNull(),
+    );
+    expect(writes().map(([cmd, args]) => [cmd, args])).toEqual([
+      [
+        "reply_to_thread",
+        {
+          reviewId: r.id,
+          threadId: threads[2].threadId,
+          body: "Still needed?",
+        },
+      ],
+      [
+        "reply_to_thread",
+        {
+          reviewId: r.id,
+          threadId: threads[2].threadId,
+          body: "Still needed?",
+        },
+      ],
+    ]);
+  });
+
+  it("approves only after confirming, at the head it names", async () => {
+    useCommentStore.setState({
+      drafts: { [r.id]: [draft("d1", 1, "Unposted")] },
+    });
+    let fail = true;
+    backend({
+      approve_review: () => {
+        if (fail) {
+          throw { kind: "headMoved", message: "The review got new commits." };
+        }
+        return { ...r, approvedAt: "2026-10-16T12:00:00Z", status: "approved" };
+      },
+    });
+    render(<ReviewDetail now={NOW} />);
+    await screen.findAllByRole("article");
+    fireEvent.click(screen.getByRole("button", { name: "Approve…" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Approve acme-fixture/widgets#" + r.number,
+    });
+    expect(within(dialog).getByText(r.headSha.slice(0, 7))).toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/1 pending comment is not posted/),
+    ).toBeInTheDocument();
+    expect(writes()).toEqual([]);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent(
+      "The review got new commits.",
+    );
+    fail = false;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(writes()).toEqual([
+      ["approve_review", { reviewId: r.id, headSha: r.headSha }],
+      ["approve_review", { reviewId: r.id, headSha: r.headSha }],
+    ]);
+    // Approving never posts the drafts.
+    expect(useCommentStore.getState().drafts[r.id]).toHaveLength(1);
+  });
+
+  it("cancelling the approval writes nothing", async () => {
+    backend();
+    render(<ReviewDetail now={NOW} />);
+    await screen.findAllByRole("article");
+    fireEvent.click(screen.getByRole("button", { name: "Approve…" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    expect(writes()).toEqual([]);
+    expect(screen.queryByText(/pending comment/)).toBeNull();
   });
 });

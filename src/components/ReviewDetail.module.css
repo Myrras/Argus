@@ -86,3 +86,46 @@
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
+
+/* "N pending comments — Post all": pushed to the right of the actions. */
+.pending {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.failed {
+  color: var(--warning);
+}
+
+.modalText {
+  margin: 0;
+  line-height: 1.55;
+}
+
+.modalText code {
+  padding: 0 2px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.modalWarning {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+}
+
+.modalError {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  -webkit-user-select: text;
+  user-select: text;
+}

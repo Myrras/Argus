@@ -43,6 +43,7 @@
 .head {
   flex: 1;
   min-width: 0;
+  overflow: hidden;
   justify-content: flex-start;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);

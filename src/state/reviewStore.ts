@@ -13,6 +13,7 @@
 import { create } from "zustand";
 
 import {
+  approveReview,
   getReview,
   lastRefresh,
   listReviews,
@@ -21,7 +22,12 @@ import {
   toIpcError,
 } from "../ipc/commands";
 import { onReviewChanged, onReviewsRefreshed } from "../ipc/events";
-import type { RefreshReport, ReviewId, ReviewRecord } from "../ipc/types";
+import type {
+  IpcError,
+  RefreshReport,
+  ReviewId,
+  ReviewRecord,
+} from "../ipc/types";
 import { reviewRef, reviewsInTab, type ReviewTab } from "../lib/reviews";
 import { toastError, toastSuccess } from "./toastStore";
 
@@ -37,6 +43,8 @@ interface ReviewStoreState {
   refreshing: boolean;
   /** The review whose round is being marked reviewed. */
   marking: ReviewId | null;
+  /** The review being approved. */
+  approving: ReviewId | null;
   lastRefresh: RefreshReport | null;
   /** Initial load: the list plus the last refresh the backend saw. */
   load: () => Promise<void>;
@@ -44,6 +52,12 @@ interface ReviewStoreState {
   /** Refresh every provider now (the button and `r`). */
   refresh: () => Promise<void>;
   markReviewed: (id: ReviewId) => Promise<void>;
+  /**
+   * Approve on the platform at `headSha` (the head the confirmation named);
+   * resolves to the error, or null once approved (the review then leaves
+   * the active lists).
+   */
+  approve: (id: ReviewId, headSha: string) => Promise<IpcError | null>;
   setTab: (tab: ReviewTab) => void;
   /** Open a review in the detail pane (moves the cursor there too). */
   select: (id: ReviewId | null) => void;
@@ -65,6 +79,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   cursorId: null,
   refreshing: false,
   marking: null,
+  approving: null,
   lastRefresh: null,
 
   load: async () => {
@@ -117,6 +132,25 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
       toastError("Could not mark the round reviewed", toIpcError(e).message);
     } finally {
       set({ marking: null });
+    }
+  },
+
+  approve: async (id, headSha) => {
+    if (get().approving) return null;
+    set({ approving: id });
+    try {
+      const record = await approveReview(id, headSha);
+      toastSuccess(`Approved ${reviewRef(record)} at ${headSha.slice(0, 7)}`);
+      await get().reloadList();
+      return null;
+    } catch (e) {
+      const err = toIpcError(e);
+      toastError("Could not approve", err.message);
+      // A moved head: show what the backend has now.
+      if (err.kind === "headMoved") await get().reloadList();
+      return err;
+    } finally {
+      set({ approving: null });
     }
   },
 
