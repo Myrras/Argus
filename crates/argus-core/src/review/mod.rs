@@ -307,17 +307,30 @@ pub fn advance_with(
     }
 }
 
-/// The user finished this round: the watermark moves to the current head
-/// and `now`, and the review is classified again (normally to
+/// The user finished this round: the watermark moves to the current head,
+/// and the review is classified again (normally to
 /// [`ReviewStatus::WaitingOnAuthor`]).
+///
+/// The watermark's time is what the user saw, not the click: the last
+/// stored fetch (`fetched_at`), or the newest stored note when that is later
+/// (a fetch holds notes made while it was on the network), never past `now`.
+/// A reply that came in between the last fetch and the click is then after
+/// the watermark and starts a round once fetched, instead of being taken as
+/// seen.
 pub fn mark_reviewed(
     record: &ReviewRecord,
     threads: &[Thread],
     now: DateTime<Utc>,
 ) -> ReviewRecord {
+    let newest_note = threads
+        .iter()
+        .flat_map(|t| &t.notes)
+        .map(|n| n.created_at)
+        .max();
+    let seen = newest_note.map_or(record.fetched_at, |n| n.max(record.fetched_at));
     let mut next = record.clone();
     next.last_reviewed_sha = Some(record.head_sha.clone());
-    next.last_reviewed_at = Some(now);
+    next.last_reviewed_at = Some(seen.min(now));
     let round = classify(&RoundInput {
         state: next.state,
         head_sha: &next.head_sha,
