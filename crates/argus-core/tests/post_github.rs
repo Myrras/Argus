@@ -250,13 +250,16 @@ fn replies_to_the_root_comment() {
 fn approves_with_an_approve_review() {
     let fake = fake();
     let gh = fake.provider();
-    gh.approve(&pr(12)).unwrap();
-    assert_eq!(fake.bodies(), [json!({ "event": "APPROVE" })]);
+    gh.approve(&pr(12), HEAD).unwrap();
+    assert_eq!(
+        fake.bodies(),
+        [json!({ "event": "APPROVE", "commit_id": HEAD })]
+    );
     assert!(fake
         .calls()
         .contains("api --method POST repos/acme-fixture/widgets/pulls/12/reviews --input -"));
 
-    let err = gh.approve(&pr(13)).unwrap_err();
+    let err = gh.approve(&pr(13), HEAD).unwrap_err();
     assert_eq!(err.kind, PostErrorKind::PostRejected);
     assert_eq!(
         err.message,

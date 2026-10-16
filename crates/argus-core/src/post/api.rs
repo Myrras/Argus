@@ -104,14 +104,39 @@ impl Core {
     }
 
     /// Approve a review on its platform (a separate, explicit action; never
-    /// a merge). Then refreshes it: `approved_at` is set (by the platform's
-    /// approval showing up, or right away when it does not show yet), which
-    /// takes the review out of the active lists, and the watermark moves.
-    /// Returns the review as stored afterwards.
-    pub fn approve_review(&self, id: ReviewId) -> Result<ReviewRecord, PostError> {
+    /// a merge), pinned to `seen_head`: the head the user reviewed and was
+    /// shown in the confirmation. Fails with [`PostErrorKind::HeadMoved`]
+    /// (nothing written) when the stored or the platform's head is another
+    /// one, so new commits are never approved unseen.
+    ///
+    /// Then refreshes it: `approved_at` is set (by the platform's approval
+    /// showing up, or right away when it does not show yet), which takes
+    /// the review out of the active lists, and the watermark moves. Returns
+    /// the review as stored afterwards.
+    pub fn approve_review(&self, id: ReviewId, seen_head: &str) -> Result<ReviewRecord, PostError> {
         let record = self.review(id)?;
         let provider = self.provider_for(&record)?;
-        provider.approve(&record.review)?;
+        if seen_head.trim().is_empty() {
+            return Err(PostError::new(
+                PostErrorKind::InvalidInput,
+                "no head to approve",
+            ));
+        }
+        let moved = || {
+            PostError::new(
+                PostErrorKind::HeadMoved,
+                "The review got new commits since you looked; review them before approving.",
+            )
+        };
+        if seen_head != record.head_sha {
+            return Err(moved());
+        }
+        // The platform's head now: GitHub would approve an older commit
+        // without complaint (GitLab refuses by itself, see its `approve`).
+        if provider.fetch_review(&record.review)?.head_sha != seen_head {
+            return Err(moved());
+        }
+        provider.approve(&record.review, seen_head)?;
         Ok(match self.after_write(provider.as_ref(), &record, true) {
             Ok(next) => next,
             Err(e) => {

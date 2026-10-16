@@ -82,8 +82,11 @@ pub trait ReviewProvider: Send + Sync {
         Err(read_only())
     }
 
-    /// Approve the MR/PR as the current user. Never merges.
-    fn approve(&self, _r: &ReviewRef) -> PostResultOf<()> {
+    /// Approve the MR/PR as the current user, pinned to `head_sha` (the
+    /// head the user reviewed): GitHub's review `commit_id`, GitLab's
+    /// approve `sha` (which GitLab refuses when the head moved: then
+    /// [`PostErrorKind::HeadMoved`]). Never merges.
+    fn approve(&self, _r: &ReviewRef, _head_sha: &str) -> PostResultOf<()> {
         Err(read_only())
     }
 }

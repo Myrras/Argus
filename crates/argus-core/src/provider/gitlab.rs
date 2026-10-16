@@ -484,10 +484,12 @@ impl ReviewProvider for GitlabProvider {
         })
     }
 
-    fn approve(&self, r: &ReviewRef) -> PostResultOf<()> {
+    /// `sha` makes GitLab refuse (409) when the source branch's head is no
+    /// longer the one the user reviewed.
+    fn approve(&self, r: &ReviewRef, head_sha: &str) -> PostResultOf<()> {
         let _: serde_json::Value = self.post_json(
             &format!("{}/approve", Self::mr_path(r)),
-            None,
+            Some(&serde_json::json!({ "sha": head_sha })),
             GlWrite::Approve,
         )?;
         Ok(())
@@ -1026,6 +1028,11 @@ fn write_error(status: u16, reason: Option<String>, what: GlWrite) -> PostError 
                 + " (already approved, or you may not approve this merge request)",
         ),
         401 => CoreError::GitlabAuth.into(),
+        // Approving with a `sha` that is not the source branch's head.
+        409 if what == GlWrite::Approve => PostError::new(
+            PostErrorKind::HeadMoved,
+            "The merge request got new commits since you looked; review them before approving.",
+        ),
         404 => PostError::new(PostErrorKind::NotFound, with("404 Not found")),
         429 => CoreError::Provider("GitLab rate limit reached, try again later".into()).into(),
         400..=499 => PostError::new(PostErrorKind::PostRejected, with(&format!("HTTP {status}"))),

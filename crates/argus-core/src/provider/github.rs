@@ -418,10 +418,13 @@ impl ReviewProvider for GithubProvider {
         })
     }
 
-    fn approve(&self, r: &ReviewRef) -> PostResultOf<()> {
+    /// GitHub accepts an approval of an older commit (it shows as approving
+    /// an outdated head), so the core checks the head before calling this;
+    /// `commit_id` records which commit was approved.
+    fn approve(&self, r: &ReviewRef, head_sha: &str) -> PostResultOf<()> {
         let _: serde_json::Value = self.post_json(
             &format!("repos/{}/pulls/{}/reviews", r.repo, r.number),
-            &serde_json::json!({ "event": "APPROVE" }),
+            &serde_json::json!({ "event": "APPROVE", "commit_id": head_sha }),
         )?;
         Ok(())
     }

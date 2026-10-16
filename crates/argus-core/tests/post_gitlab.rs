@@ -469,15 +469,37 @@ fn replies_to_a_discussion() {
 #[test]
 fn approves_and_explains_a_refusal() {
     let (base, log) = serve(instance);
-    provider(&base).approve(&mr(&base)).unwrap();
+    provider(&base).approve(&mr(&base), HEAD_SHA).unwrap();
     let p = &posts(&log)[0];
     assert_eq!(p.path, format!("{MR21}/approve"));
-    assert!(p.body.is_empty() && p.token);
+    assert_eq!(p.json(), json!({ "sha": HEAD_SHA }));
+    assert!(p.token);
 
     let (base, _) = failing("401 Unauthorized", r#"{"message":"401 Unauthorized"}"#);
-    let err = provider(&base).approve(&mr(&base)).unwrap_err();
+    let err = provider(&base).approve(&mr(&base), HEAD_SHA).unwrap_err();
     assert_eq!(err.kind, PostErrorKind::PostRejected);
     assert!(err.message.contains("already approved"));
+}
+
+#[test]
+fn an_approval_of_a_moved_head_is_refused() {
+    // GitLab answers 409 when `sha` is not the source branch's head.
+    let (base, _) = failing(
+        "409 Conflict",
+        r#"{"message":"SHA does not match HEAD of source branch"}"#,
+    );
+    let err = provider(&base).approve(&mr(&base), HEAD_SHA).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    assert!(!err.message.contains(TOKEN));
+    // A 409 on another write stays a rejection with GitLab's reason.
+    let c = placed(
+        "src/importer.rs",
+        Side::New,
+        row(LineKind::Context, 3, 3),
+        None,
+    );
+    let err = provider(&base).post_comment(&mr(&base), &c).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
 }
 
 #[test]
@@ -528,10 +550,12 @@ fn posting_and_approving_through_the_core() {
     assert_eq!(after.last_reviewed_sha.as_deref(), Some(HEAD_SHA));
     assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
 
-    let approved = core.approve_review(id).unwrap();
+    let approved = core.approve_review(id, HEAD_SHA).unwrap();
     assert!(approved.approved_at.is_some());
     assert!(!approved.is_active());
-    assert_eq!(posts(&log).last().unwrap().path, format!("{MR21}/approve"));
+    let approval = posts(&log).last().unwrap().clone();
+    assert_eq!(approval.path, format!("{MR21}/approve"));
+    assert_eq!(approval.json(), json!({ "sha": HEAD_SHA }));
     // Every request carried the token, and no body did.
     let seen = log.lock().unwrap();
     assert!(seen.iter().all(|r| r.token && !r.body.contains(TOKEN)));

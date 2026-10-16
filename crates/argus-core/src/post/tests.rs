@@ -389,6 +389,8 @@ struct Fake {
     posted: Mutex<Vec<PlacedComment>>,
     replies: Mutex<Vec<(String, String)>>,
     approvals: Mutex<u32>,
+    /// The head each approval was pinned to.
+    approved_heads: Mutex<Vec<String>>,
     /// Whether an approval shows on the next fetch.
     approval_shows: Mutex<bool>,
     fetches: Mutex<u32>,
@@ -465,8 +467,12 @@ impl ReviewProvider for Fake {
             provider_note_id: "77".into(),
         })
     }
-    fn approve(&self, _: &ReviewRef) -> Result<(), PostError> {
+    fn approve(&self, _: &ReviewRef, head_sha: &str) -> Result<(), PostError> {
         *self.approvals.lock().unwrap() += 1;
+        self.approved_heads
+            .lock()
+            .unwrap()
+            .push(head_sha.to_string());
         if *self.approval_shows.lock().unwrap() {
             let mut d = self.detail.lock().unwrap();
             d.approved_by_me = true;
@@ -490,6 +496,7 @@ fn setup() -> (Core, Arc<Fake>, ReviewId) {
         posted: Mutex::new(Vec::new()),
         replies: Mutex::new(Vec::new()),
         approvals: Mutex::new(0),
+        approved_heads: Mutex::new(Vec::new()),
         approval_shows: Mutex::new(true),
         fetches: Mutex::new(0),
     });
@@ -635,8 +642,9 @@ fn a_batch_with_nothing_valid_never_reaches_the_platform() {
 #[test]
 fn approving_sets_approved_at_and_hides_the_review() {
     let (core, fake, id) = setup();
-    let record = core.approve_review(id).unwrap();
+    let record = core.approve_review(id, "h1").unwrap();
     assert_eq!(*fake.approvals.lock().unwrap(), 1);
+    assert_eq!(*fake.approved_heads.lock().unwrap(), ["h1"]);
     assert!(record.approved_at.is_some());
     assert_eq!(record.status, ReviewStatus::Approved);
     assert!(!record.is_active());
@@ -651,9 +659,34 @@ fn approving_sets_approved_at_and_hides_the_review() {
 fn an_approval_not_shown_yet_still_counts() {
     let (core, fake, id) = setup();
     *fake.approval_shows.lock().unwrap() = false;
-    let record = core.approve_review(id).unwrap();
+    let record = core.approve_review(id, "h1").unwrap();
     assert!(record.approved_at.is_some());
     assert!(!record.is_active());
+}
+
+#[test]
+fn an_approval_is_pinned_to_the_head_the_user_saw() {
+    let (core, fake, id) = setup();
+    // The user looked at h1; the platform got h2 since (not polled yet).
+    push_h2(&fake);
+    let err = core.approve_review(id, "h1").unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    // A head other than the stored one (the view was stale).
+    let err = core.approve_review(id, "h0").unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    assert_eq!(
+        core.approve_review(id, " ").unwrap_err().kind,
+        PostErrorKind::InvalidInput
+    );
+    assert_eq!(fake.writes(), 0);
+    let record = core.review(id).unwrap();
+    assert!(record.approved_at.is_none());
+    assert!(record.is_active());
+
+    // After a refresh the user sees h2 and can approve exactly that.
+    core.refresh();
+    core.approve_review(id, "h2").unwrap();
+    assert_eq!(*fake.approved_heads.lock().unwrap(), ["h2"]);
 }
 
 #[test]
