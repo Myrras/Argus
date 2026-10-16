@@ -15,7 +15,8 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
-uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [profile.dev]
 # Full DWARF debuginfo is the bulk of `target/debug` (it dwarfs the compiled

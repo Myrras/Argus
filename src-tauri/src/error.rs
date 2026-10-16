@@ -55,6 +55,12 @@ impl From<CoreError> for IpcError {
         let kind = match &err {
             CoreError::NotFound => "notFound",
             CoreError::InvalidInput(_) => "invalidInput",
+            CoreError::GithubUnavailable => "githubUnavailable",
+            CoreError::GitlabNotConfigured => "gitlabNotConfigured",
+            CoreError::GitlabAuth => "gitlabAuth",
+            CoreError::Provider(_) => "provider",
+            CoreError::Store(_) => "store",
+            CoreError::Io(_) => "io",
         };
         Self {
             kind: kind.to_string(),

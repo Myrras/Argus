@@ -18,13 +18,14 @@
 
 pub mod error;
 pub mod ids;
+pub mod provider;
 
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 pub use error::{CoreError, CoreResult};
-pub use ids::NoteId;
+pub use ids::{NoteId, ReviewId, ThreadId};
 
 /// One note. Serializable so it can cross the IPC boundary unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
