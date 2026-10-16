@@ -852,3 +852,30 @@ fn a_version_pushed_while_the_diff_loads_is_read_again() {
         .count();
     assert_eq!(diffs_reads, 2);
 }
+
+#[test]
+fn discussions_are_read_past_twenty_pages() {
+    // 30 pages of one discussion each (the old cap was 20 pages).
+    let (base, _) = serve_raw(|path, _| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
+            return fixture_routes(path);
+        }
+        let page: usize = query
+            .rsplit_once("page=")
+            .and_then(|(_, n)| n.parse().ok())
+            .unwrap_or(1);
+        let next = if page < 30 {
+            (page + 1).to_string()
+        } else {
+            String::new()
+        };
+        Reply {
+            status: "200 OK",
+            headers: format!("X-Next-Page: {next}\r\n"),
+            body: discussions(page, 1),
+        }
+    });
+    let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
+    assert_eq!(threads.len(), 30);
+}

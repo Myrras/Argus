@@ -43,6 +43,10 @@ const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
 /// Page size for every list call, and how many pages are followed at most.
 const PER_PAGE: u32 = 100;
 const MAX_PAGES: u32 = 20;
+/// Pages of discussions followed at most: every thread counts for rounds
+/// and the untouched count, so far past any real MR (10 000) rather than a
+/// silent cut at 2000.
+const DISCUSSION_PAGES: u32 = 100;
 
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
@@ -286,10 +290,16 @@ impl GitlabProvider {
     /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
     /// more items arrive after it. An empty next page ends it.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
+        self.get_pages(path, MAX_PAGES)
+    }
+
+    /// [`get_all`](Self::get_all) with its own page cap; reaching it is
+    /// logged.
+    fn get_pages<T: DeserializeOwned>(&self, path: &str, max_pages: u32) -> CoreResult<Vec<T>> {
         let sep = if path.contains('?') { '&' } else { '?' };
         let mut all = Vec::new();
         let mut page = 1;
-        for _ in 0..MAX_PAGES {
+        for _ in 0..max_pages {
             let (body, next) = self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}"))?;
             let items: Vec<T> = serde_json::from_str(&body).map_err(|_| unexpected())?;
             let full = items.len() >= PER_PAGE as usize;
@@ -297,9 +307,10 @@ impl GitlabProvider {
             match next {
                 Some(n) if n > page => page = n,
                 None if full => page += 1,
-                _ => break,
+                _ => return Ok(all),
             }
         }
+        tracing::warn!("a GitLab list was cut at {max_pages} pages");
         Ok(all)
     }
 
@@ -512,7 +523,9 @@ impl ReviewProvider for GitlabProvider {
         let p = Self::mr_path(r);
         let (mr, discussions) = std::thread::scope(|s| {
             let a = s.spawn(|| self.get_json::<GlMr>(&p));
-            let b = s.spawn(|| self.get_all::<GlDiscussion>(&format!("{p}/discussions")));
+            let b = s.spawn(|| {
+                self.get_pages::<GlDiscussion>(&format!("{p}/discussions"), DISCUSSION_PAGES)
+            });
             (join(a), join(b))
         });
         let head = mr?.head_sha();
@@ -648,8 +661,10 @@ impl ReviewProvider for GitlabProvider {
     /// instance that does not send `resolved_at` has no time and is left
     /// out.
     fn thread_resolutions(&self, r: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
-        let discussions: Vec<GlResolveDiscussion> =
-            self.get_all(&format!("{}/discussions", Self::mr_path(r)))?;
+        let discussions: Vec<GlResolveDiscussion> = self.get_pages(
+            &format!("{}/discussions", Self::mr_path(r)),
+            DISCUSSION_PAGES,
+        )?;
         Ok(discussions
             .into_iter()
             .filter_map(|d| {
