@@ -5,7 +5,8 @@
  * refresh, switch lists) and, while a review is open, the review view's keys
  * (next/previous stop — Conversation, then the files — toggle viewed, and
  * comment on the focused line, which only opens a composer: nothing posts
- * from a shortcut outside a composer).
+ * from a shortcut outside a composer; with the AI pass on, toggle the AI
+ * panel and the last-clicked finding's selection — selecting, not posting).
  * Those are ignored while typing in a field or inside a dialog.
  *
  * It also swallows the browser's own shortcuts (reload, print, find, save):
@@ -15,7 +16,9 @@
 import { useEffect } from "react";
 
 import { TABS } from "./reviews";
+import { useAiStore } from "../state/aiStore";
 import { useCodeViewStore } from "../state/codeViewStore";
+import { useLayoutStore } from "../state/layoutStore";
 import { useCommentStore } from "../state/commentStore";
 import { useReviewStore } from "../state/reviewStore";
 import {
@@ -83,6 +86,13 @@ function runFilesAction(action: ActionId): boolean {
     case "commentLine":
       // The line last clicked in a diff; nothing to do without one.
       return useCommentStore.getState().commentOnFocus(review);
+    case "toggleFindings":
+      if (!useAiStore.getState().runs[review]?.enabled) return false;
+      useLayoutStore.getState().toggleAiPanel();
+      return true;
+    case "toggleFindingSelected":
+      if (!useAiStore.getState().runs[review]?.enabled) return false;
+      return useAiStore.getState().toggleFocused(review);
     default:
       return false;
   }

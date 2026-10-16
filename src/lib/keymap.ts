@@ -39,7 +39,9 @@ export type ActionId =
   | "commentLine"
   | "submitComment"
   | "cancelComment"
-  | "openSettings";
+  | "openSettings"
+  | "toggleFindings"
+  | "toggleFindingSelected";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
@@ -178,6 +180,22 @@ export const ACTIONS: ActionDef[] = [
     scope: "app",
     defaults: ["Mod+Comma"],
     windowsLinuxOnly: true,
+  },
+  {
+    id: "toggleFindings",
+    label: "Show or hide the AI findings",
+    group: "View",
+    scope: "files",
+    defaults: ["KeyA"],
+    note: "In a review with the AI pass on: the AI panel at the right.",
+  },
+  {
+    id: "toggleFindingSelected",
+    label: "Select finding for posting",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyX"],
+    note: "Toggles the AI finding you last clicked. Posting stays a button.",
   },
 ];
 
