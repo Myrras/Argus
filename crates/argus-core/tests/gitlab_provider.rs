@@ -7,9 +7,13 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use argus_core::provider::ReviewProvider as _;
+use argus_core::store::Store;
+use argus_core::{Core, ReviewStatus};
+
 use argus_core::provider::{
-    GitlabProvider, ProviderId, ReviewProvider, ReviewRef, ReviewState, ReviewerState, Side,
-    StaticToken, TokenSource,
+    GitlabProvider, ProviderId, ReviewRef, ReviewState, ReviewerState, Side, StaticToken,
+    TokenSource,
 };
 use argus_core::CoreError;
 
@@ -75,6 +79,11 @@ fn fixture_routes(path: &str) -> Reply {
                 }
             }
         }
+        "/api/v4/projects/grp%2Fsub%2Flib/merge_requests/5" => ok("mr_200_5.json"),
+        r if r.starts_with("/api/v4/projects/grp%2Fsub%2Flib/merge_requests/5/") => Reply {
+            body: "[]".into(),
+            ..ok("user.json")
+        },
         r if r == mr31 => ok("mr_31.json"),
         r if r == format!("{mr31}/reviewers") => ok("mr_31_reviewers.json"),
         r if r == format!("{mr31}/approvals") => ok("mr_31_approvals.json"),
@@ -321,4 +330,39 @@ fn never_follows_a_redirect_with_the_token() {
     let err = provider(&base).current_user().unwrap_err();
     assert!(err.to_string().contains("redirected"));
     assert!(stolen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn refresh_end_to_end_through_the_core() {
+    let (base, _) = serve(fixture_routes);
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    let report = core.refresh();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.changed.len(), 2);
+
+    let reviews = core.reviews().unwrap();
+    let r21 = reviews.iter().find(|r| r.review.number == 21).unwrap();
+    assert_eq!(r21.status, ReviewStatus::NeedsReview);
+    assert!(r21.requested && r21.is_active());
+    // d1: the user answered the author's reply last, so it is untouched
+    // again; d2 is resolved.
+    assert_eq!(r21.untouched_threads, 1);
+    let threads = core.threads(r21.id).unwrap();
+    assert_eq!(threads.len(), 4);
+    assert!(threads[0].mine && !threads[2].mine);
+
+    let marked = core.mark_reviewed(r21.id).unwrap();
+    assert_eq!(marked.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(
+        marked.last_reviewed_sha.as_deref(),
+        Some(r21.head_sha.as_str())
+    );
+
+    // Nothing moved on the instance: the next refresh changes nothing.
+    assert!(core.refresh().changed.is_empty());
+    assert_eq!(
+        core.file_at(r21.id, &r21.head_sha, "src/importer.rs")
+            .unwrap(),
+        "pub fn retries() -> u32 {\n    3\n}\n"
+    );
 }

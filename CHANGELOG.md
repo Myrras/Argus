@@ -20,3 +20,15 @@ when it merges.
   later releases.
 - Argus app icon and logo: a violet eye, shown in the title bar and on the
   start screen.
+- Argus now reads your reviews from GitHub (through the `gh` CLI) and GitLab
+  (with a token kept in the system keychain): merge requests and pull
+  requests where you are a requested reviewer or have commented, with their
+  commits, reviewers and comment threads, including outdated ones.
+- Review rounds: Argus remembers where you last reviewed each item and tells
+  whether it needs your first review, needs another look (new commits, a
+  reply in one of your threads, or a new review request), is waiting on the
+  author, or was merged or closed without your approval. Items you approved
+  drop off the list.
+- Reviews refresh in the background every 3 minutes; settings (GitHub host
+  and account, GitLab URL, poll interval, AI on/off, local clones) are saved
+  between runs.
