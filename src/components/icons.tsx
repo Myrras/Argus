@@ -28,10 +28,13 @@ import {
   Minus,
   PanelLeftClose,
   PanelLeftOpen,
+  PanelRightClose,
+  PanelRightOpen,
   Plug,
   Plus,
   RotateCw,
   Settings,
+  Sparkles,
   Square,
   X,
   type LucideIcon,
@@ -74,6 +77,11 @@ export const ImageIcon = icon(Image, { size: 12 });
 /** Collapse / expand the review view's file tree. */
 export const PanelCloseIcon = icon(PanelLeftClose);
 export const PanelOpenIcon = icon(PanelLeftOpen);
+/** Close / open the AI island right of the review. */
+export const AiPanelCloseIcon = icon(PanelRightClose);
+export const AiPanelOpenIcon = icon(PanelRightOpen);
+/** The AI pass: its status, findings and checklist. */
+export const AiIcon = icon(Sparkles);
 
 // The caret rotates 90° on expand (CSS).
 export const CaretIcon = icon(ChevronRight);

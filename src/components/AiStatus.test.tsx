@@ -1,0 +1,145 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/plugin-log", () => ({
+  warn: vi.fn(() => Promise.resolve()),
+  error: vi.fn(() => Promise.resolve()),
+}));
+
+import { invoke } from "@tauri-apps/api/core";
+
+import type { AiRunState } from "../ipc/types";
+import { useAiStore } from "../state/aiStore";
+import { useLayoutStore } from "../state/layoutStore";
+import { aiRun, finding } from "../test/aiFixtures";
+import { review } from "../test/fixtures";
+import { AiRunIndicator, AiStatus } from "./AiStatus";
+
+const mockInvoke = vi.mocked(invoke);
+const initial = useAiStore.getState();
+const r = review();
+
+let run: AiRunState;
+
+beforeEach(() => {
+  mockInvoke.mockReset();
+  useAiStore.setState({ ...initial, runs: {}, byReview: {}, ui: {} }, true);
+  useLayoutStore.setState({ aiPanelOpen: true });
+  run = aiRun({ reviewId: r.id });
+  mockInvoke.mockImplementation(((cmd: string) => {
+    switch (cmd) {
+      case "ai_state":
+      case "run_ai":
+      case "cancel_ai":
+        return Promise.resolve(run);
+      case "list_findings":
+        return Promise.resolve([
+          finding({ reviewId: r.id }),
+          finding({ reviewId: r.id, dismissed: true }),
+        ]);
+      default:
+        return Promise.resolve([]);
+    }
+  }) as typeof invoke);
+});
+
+const chip = () => screen.getByRole("status");
+
+describe("AiStatus", () => {
+  it("says done with the number of findings shown", async () => {
+    render(<AiStatus review={r} />);
+    await waitFor(() =>
+      expect(chip()).toHaveTextContent("AI: done · 1 finding"),
+    );
+    expect(chip()).toHaveAttribute("data-status", "done");
+    fireEvent.click(screen.getByRole("button", { name: "Run again" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("run_ai", { reviewId: r.id }),
+    );
+  });
+
+  it("shows a running run with a spinner and Cancel", async () => {
+    run = aiRun({ reviewId: r.id, status: "running" });
+    const { container } = render(<AiStatus review={r} />);
+    await waitFor(() => expect(chip()).toHaveTextContent("AI: running…"));
+    expect(container.querySelector(".spinner")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("cancel_ai", { reviewId: r.id }),
+    );
+  });
+
+  it("shows a queued run", async () => {
+    run = aiRun({ reviewId: r.id, status: "done", queued: true });
+    render(<AiStatus review={r} />);
+    await waitFor(() => expect(chip()).toHaveTextContent("AI: queued"));
+    expect(chip()).toHaveAttribute("data-status", "queued");
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
+  it("shows a failure with its reason and Retry", async () => {
+    run = aiRun({
+      reviewId: r.id,
+      status: "failed",
+      error: "`claude` was not found: install it or set its path in Settings",
+    });
+    render(<AiStatus review={r} />);
+    await waitFor(() =>
+      expect(chip()).toHaveTextContent(
+        "AI: failed — `claude` was not found: install it or set its path in Settings",
+      ),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith("run_ai", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("run_ai", { reviewId: r.id }),
+    );
+  });
+
+  it("follows ai:state through the store", async () => {
+    render(<AiStatus review={r} />);
+    await waitFor(() => expect(chip()).toHaveTextContent("AI: done"));
+    useAiStore
+      .getState()
+      .applyState(aiRun({ reviewId: r.id, status: "running" }));
+    await waitFor(() => expect(chip()).toHaveTextContent("AI: running…"));
+  });
+
+  it("toggles the AI panel", async () => {
+    render(<AiStatus review={r} />);
+    const toggle = await screen.findByRole("button", { name: /Findings/ });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(toggle);
+    expect(useLayoutStore.getState().aiPanelOpen).toBe(false);
+  });
+
+  it("renders nothing with the AI pass off", async () => {
+    run = aiRun({ reviewId: r.id, enabled: false, status: "notStarted" });
+    const { container } = render(<AiStatus review={r} />);
+    await waitFor(() =>
+      expect(useAiStore.getState().runs[r.id]?.enabled).toBe(false),
+    );
+    expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("AiRunIndicator", () => {
+  it("shows only while a run is queued or running", () => {
+    const { rerender, container } = render(<AiRunIndicator reviewId={r.id} />);
+    expect(container).toBeEmptyDOMElement();
+    useAiStore.setState({
+      runs: { [r.id]: aiRun({ reviewId: r.id, status: "running" }) },
+    });
+    rerender(<AiRunIndicator reviewId={r.id} />);
+    expect(screen.getByRole("img", { name: "AI pass running" })).toBeVisible();
+    useAiStore.setState({
+      runs: { [r.id]: aiRun({ reviewId: r.id, queued: true }) },
+    });
+    rerender(<AiRunIndicator reviewId={r.id} />);
+    expect(screen.getByRole("img", { name: "AI pass queued" })).toBeVisible();
+    useAiStore.setState({ runs: { [r.id]: aiRun({ reviewId: r.id }) } });
+    rerender(<AiRunIndicator reviewId={r.id} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+});

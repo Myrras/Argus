@@ -24,6 +24,7 @@ import {
 import { ago, fullTime } from "../lib/time";
 import { useCommentStore, useDrafts } from "../state/commentStore";
 import { useReviewStore } from "../state/reviewStore";
+import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
 import { Modal } from "./Modal";
 import { ExternalLinkIcon } from "./icons";
@@ -110,6 +111,7 @@ function ReviewHeader({
           {STATUS_LABEL[r.status]}
         </Badge>
         <span>Round {r.round}</span>
+        <AiStatus review={r} />
         {r.state !== "open" && (
           <Badge tone={r.state === "merged" ? "accent" : "neutral"}>
             {r.state === "merged" ? "Merged" : "Closed"}
