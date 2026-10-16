@@ -33,7 +33,7 @@ request adds its entry under `## [Unreleased]
   refresh button or `r`, with the time of the last refresh in the title bar.
   A status bar says when `gh` is missing or logged out or GitLab is not set
   up, and a provider that fails to refresh is reported without blocking the
-  other.
+  other. GitHub also works when Argus is launched from Finder or the Dock.
 - Settings: GitHub host and account, GitLab URL and token (the token goes to
   the keychain only; Settings shows just whether one is set), the refresh
   interval, and AI analysis on or off (saved now, used in a later release).

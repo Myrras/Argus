@@ -56,10 +56,13 @@ impl GithubProvider {
     /// `host` is `github.com` or a GHE host; `account` picks a logged-in `gh`
     /// account, `None` uses the active one.
     pub fn new(host: impl Into<String>, account: Option<String>) -> Self {
-        Self::with_binary("gh", host, account)
+        // Not a bare "gh": an app started from Finder has no Homebrew on its
+        // PATH. When gh is not installed the bare name makes the spawn fail,
+        // which reports as "not installed" rather than panicking.
+        Self::with_binary(crate::platform::gh_binary().unwrap_or("gh"), host, account)
     }
 
-    /// Like [`new`](Self::new) with an explicit `gh` program.
+    /// Like [`new`](Self::new) with an explicit `gh` program (tests).
     pub fn with_binary(
         gh: impl Into<String>,
         host: impl Into<String>,
