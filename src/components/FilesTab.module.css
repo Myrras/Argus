@@ -1,0 +1,81 @@
+/* Files tab: the file tree (collapsible) beside the diff, inside the detail
+   island. */
+.files {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.tree {
+  width: var(--file-tree-w);
+  flex-shrink: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  transition: width var(--dur-3) var(--ease-out);
+}
+
+.tree[data-open="false"] {
+  width: 36px;
+}
+
+/* Section-header look from the sidebar (uppercase, faint). */
+.treeHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  height: var(--tabbar-h);
+  padding: 0 var(--sp-1) 0 var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.tree[data-open="false"] .treeHeader {
+  padding: 0;
+  justify-content: center;
+}
+
+.treeIcon {
+  flex-shrink: 0;
+}
+
+.treeTitle {
+  flex: 1;
+}
+
+.treeToggle {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.diff {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.placeholder {
+  margin: 0;
+  padding: var(--sp-3);
+  max-width: 360px;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.tree .placeholder {
+  text-align: left;
+}

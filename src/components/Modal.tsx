@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
+import { MOTION, usePresence } from "../lib/motion";
 import { CloseIcon } from "./icons";
 import styles from "./Modal.module.css";
 
@@ -14,7 +15,9 @@ interface ModalProps {
   children: ReactNode;
   /** Footer actions (buttons), rendered right-aligned. */
   footer?: ReactNode;
-  /** Card width in px or any CSS width. */
+  /** Tone of the header accent bar. */
+  tone?: "default" | "danger" | "warning";
+  /** Card width — a px number or any CSS width (e.g. `"min(960px, 94vw)"`). */
   width?: number | string;
 }
 
@@ -24,9 +27,12 @@ export function Modal({
   onClose,
   children,
   footer,
+  tone = "default",
   width = 460,
 }: ModalProps) {
   const cardRef = useRef<HTMLDivElement>(null);
+  // Keep the dialog mounted while it animates closed (see `usePresence`).
+  const { mounted, state } = usePresence(open, MOTION.base);
 
   useEffect(() => {
     if (!open) return;
@@ -37,17 +43,21 @@ export function Modal({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Focus the card when the dialog opens — keyed on `open` alone so a fresh
-  // `onClose` closure can't steal focus from an input mid-typing.
+  // Focus the card only when the dialog *opens* — keyed on `open` alone so an
+  // unstable `onClose` (a fresh closure each render of the parent) can't re-fire
+  // this and steal focus from an input mid-typing.
   useEffect(() => {
     if (open) cardRef.current?.focus({ preventScroll: true });
   }, [open]);
 
-  if (!open) return null;
+  if (!mounted) return null;
 
+  // Portal to <body>: a caller inside a transformed/overflow-clipped ancestor
+  // (a file pane) would otherwise clip or re-anchor `position: fixed`.
   return createPortal(
     <div
       className={styles.overlay}
+      data-state={state}
       role="presentation"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -56,13 +66,14 @@ export function Modal({
       <div
         ref={cardRef}
         className={styles.card}
+        data-state={state}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
         style={{ width }}
       >
-        <header className={styles.header}>
+        <header className={`${styles.header} ${styles[tone]}`}>
           <h2 className={styles.title}>{title}</h2>
           <button
             type="button"

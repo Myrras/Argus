@@ -4,7 +4,7 @@ import { create } from "zustand";
 
 import { prefersReducedMotion } from "../lib/motion";
 
-export type ThemeMode = "dark" | "light";
+export type ThemeMode = "dark" | "light" | "retro";
 
 /** `document` augmented with the (still newish) View Transitions API. */
 type ViewTransitionDocument = Document & {
@@ -14,7 +14,9 @@ type ViewTransitionDocument = Document & {
 const STORAGE_KEY = "argus.theme";
 
 function initialTheme(): ThemeMode {
-  return localStorage.getItem(STORAGE_KEY) === "light" ? "light" : "dark";
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored === "light" || stored === "retro") return stored;
+  return "dark";
 }
 
 function applyTheme(mode: ThemeMode): void {
@@ -23,21 +25,20 @@ function applyTheme(mode: ThemeMode): void {
 
 interface ThemeState {
   mode: ThemeMode;
-  toggle: () => void;
+  setTheme: (mode: ThemeMode) => void;
 }
 
-export const useThemeStore = create<ThemeState>((set, get) => {
+export const useThemeStore = create<ThemeState>((set) => {
   // Apply once at store creation so the UI never flashes the wrong theme.
   applyTheme(initialTheme());
   return {
     mode: initialTheme(),
-    toggle: () => {
-      const next: ThemeMode = get().mode === "dark" ? "light" : "dark";
+    setTheme: (next: ThemeMode) => {
       localStorage.setItem(STORAGE_KEY, next);
       // The palette swap is the synchronous `data-theme` flip; flipping it
-      // inside a view transition lets the WebView crossfade the whole UI.
-      // Falls back to an instant swap when the API is missing or the user
-      // prefers reduced motion.
+      // inside a view transition lets the WebView crossfade the whole UI
+      // between colour schemes. Falls back to an instant swap when the API is
+      // missing (older WebViews) or the user prefers reduced motion.
       const apply = () => {
         applyTheme(next);
         set({ mode: next });

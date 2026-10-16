@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window: core APIs, logging, window-state persistence, and opening review links in the browser.",
+  "description": "Capability for the main window: core APIs, logging, window-state persistence, opening review links in the browser, and the custom-title-bar window controls (Windows; dragging on macOS and Windows).",
   "windows": [
     "main"
   ],
@@ -9,6 +9,11 @@
     "core:default",
     "log:default",
     "window-state:default",
-    "opener:default"
+    "opener:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized"
   ]
 }

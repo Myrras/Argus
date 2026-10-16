@@ -9,11 +9,16 @@ vi.mock("@tauri-apps/api/event", () => ({
     events.listen(name, cb),
   ),
 }));
+vi.mock("@tauri-apps/plugin-log", () => ({
+  error: vi.fn(() => Promise.resolve()),
+  warn: vi.fn(() => Promise.resolve()),
+}));
 
 import { invoke } from "@tauri-apps/api/core";
 
 import type { RefreshReport } from "../ipc/types";
 import { subscribeReviewEvents, useReviewStore } from "./reviewStore";
+import { useToastStore } from "./toastStore";
 
 const mockInvoke = vi.mocked(invoke);
 const initial = useReviewStore.getState();
@@ -41,6 +46,7 @@ describe("reviewStore", () => {
       { ...initial, reviews: [a, b, c], loaded: true },
       true,
     );
+    useToastStore.setState({ toasts: [] });
   });
 
   it("loads the list and the last refresh", async () => {
@@ -97,9 +103,22 @@ describe("reviewStore", () => {
     expect(useReviewStore.getState()).toMatchObject({
       refreshing: false,
       lastRefresh: r,
-      lastError: null,
       reviews: [a],
     });
+    // Provider errors stay in the report (the Providers section), no toast.
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
+  it("toasts a failed refresh and keeps the list", async () => {
+    mockInvoke.mockRejectedValue({ kind: "io", message: "disk full" });
+    await useReviewStore.getState().refresh();
+    expect(useReviewStore.getState()).toMatchObject({
+      refreshing: false,
+      reviews: [a, b, c],
+    });
+    expect(useToastStore.getState().toasts).toMatchObject([
+      { kind: "error", message: "Could not refresh", detail: "disk full" },
+    ]);
   });
 
   it("marks a round reviewed, then re-reads the list", async () => {
@@ -113,6 +132,12 @@ describe("reviewStore", () => {
     });
     expect(useReviewStore.getState().reviews[0].status).toBe("waitingOnAuthor");
     expect(useReviewStore.getState().marking).toBeNull();
+    expect(useToastStore.getState().toasts).toMatchObject([
+      {
+        kind: "success",
+        message: `Marked acme-fixture/widgets#${a.number} reviewed`,
+      },
+    ]);
   });
 
   it("moves the cursor within the current tab and opens it", () => {

@@ -24,9 +24,21 @@ sibling app Iris (`../Iris`).
 - ✅ **Milestone 1 — Skeleton.** Renamed boilerplate, CI + release pipeline.
 - ✅ **Milestone 2 — Providers and the review list.** GitHub (`gh`) and GitLab
   (REST, keychain token) providers, SQLite store, settings, round detection,
-  background polling; IPC commands + events; the four-tab list, detail pane
-  with threads (mine first, outdated never hidden), settings dialog, provider
-  status bar. The boilerplate greet/notes sample is gone. Next: M3 (then/now
+  background polling; IPC commands + events; the four-tab list, detail view
+  with threads (mine first, outdated never hidden), settings, provider
+  status. The boilerplate greet/notes sample is gone.
+  - Island shell, ported from Iris (Podium is the UI reference): same tokens
+    (Argus violet is the only brand difference), title bar on the canvas
+    (`titleBarStyle: Overlay` on macOS, own `WindowControls` on Windows),
+    sidebar island (`Sidebar`: Reviews = `ReviewList`, Providers =
+    `ProvidersSection`), resizer, the work column (`DetailTabBar` chips
+    Threads / Files over the detail island; `WelcomeScreen` without a
+    selection), `Modal`, `Toasts` (`toastStore`), `ContextMenu`, lucide
+    `icons.tsx`. UI prefs are localStorage-only: `themeStore` → `argus.theme`
+    (dark/light/retro), `layoutStore` → `argus.layout`.
+  - Files tab (`FilesTab`): placeholder with a collapsible file-tree slot
+    (`data-slot="file-tree"`) and a diff slot (`data-slot="diff"`); the diff
+    view plugs in there. Next: M3 (then/now
   thread history; the thread card has a `data-slot="then-now"` placeholder).
 
 ## Architecture

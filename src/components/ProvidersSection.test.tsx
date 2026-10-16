@@ -3,14 +3,41 @@ import { describe, expect, it, vi } from "vitest";
 
 import { status } from "../test/fixtures";
 import { bannerItems } from "../lib/banner";
-import { ProviderBanner } from "./ProviderBanner";
+import { useLayoutStore } from "../state/layoutStore";
+import { ProvidersSection } from "./ProvidersSection";
 
-describe("ProviderBanner", () => {
-  it("is absent when every provider works", () => {
-    const { container } = render(
-      <ProviderBanner status={status()} errors={[]} onOpenSettings={vi.fn()} />,
+describe("ProvidersSection", () => {
+  it("lists each provider's state and no problems when all work", () => {
+    render(
+      <ProvidersSection
+        status={status()}
+        errors={[]}
+        onOpenSettings={vi.fn()}
+      />,
     );
-    expect(container).toBeEmptyDOMElement();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText("Token set")).toBeInTheDocument();
+    expect(screen.getByText("gitlab.example.test")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("collapses to its title, counting the problems", () => {
+    useLayoutStore.setState({ providersCollapsed: false });
+    render(
+      <ProvidersSection
+        status={status({
+          gitlab: { configured: false, baseUrl: "", tokenPresent: false },
+        })}
+        errors={[]}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const toggle = screen.getByRole("button", { name: /Providers/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(useLayoutStore.getState().providersCollapsed).toBe(true);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("Providers (1)");
   });
 
   it("explains gh missing and GitLab not set up, once each", () => {
@@ -37,7 +64,7 @@ describe("ProviderBanner", () => {
   it("shows refresh errors without blocking, grouped per provider", () => {
     const onOpenSettings = vi.fn();
     render(
-      <ProviderBanner
+      <ProvidersSection
         status={status({
           github: {
             enabled: true,
@@ -80,6 +107,7 @@ describe("ProviderBanner", () => {
     expect(
       screen.getByText("GitLab: 2 reviews could not be refreshed."),
     ).toBeInTheDocument();
+    expect(screen.getByText("Not logged in")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onOpenSettings).toHaveBeenCalled();
   });

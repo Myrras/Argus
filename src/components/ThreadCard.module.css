@@ -79,6 +79,7 @@
 .noteBody {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  -webkit-user-select: text;
   user-select: text;
   line-height: 1.5;
 }

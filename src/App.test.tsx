@@ -61,7 +61,11 @@ describe("App", () => {
       await screen.findByText("GitLab is not set up."),
     ).toBeInTheDocument();
     expect(screen.getByText("Refreshed never")).toBeInTheDocument();
-    expect(screen.getByLabelText("Toggle theme")).toBeInTheDocument();
+    // The island shell: sidebar and the welcome screen in the detail island.
+    expect(
+      screen.getByRole("complementary", { name: "Sidebar" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Welcome to Argus")).toBeInTheDocument();
   });
 
   it("drives the list from the keyboard", async () => {

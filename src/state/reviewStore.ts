@@ -4,8 +4,10 @@
  * wrapper, then re-reads; the refresh events (`subscribeReviewEvents`) keep
  * it current between user actions.
  *
- * Refresh errors are not `lastError`: they live in `lastRefresh.errors`, per
- * provider, and never block the list.
+ * A failed call (loading the list, a refresh, marking a round) is an error
+ * toast, the family's way. Refresh errors are not: they live in
+ * `lastRefresh.errors`, per provider, show in the sidebar's Providers
+ * section and never block the list.
  */
 
 import { create } from "zustand";
@@ -19,13 +21,9 @@ import {
   toIpcError,
 } from "../ipc/commands";
 import { onReviewChanged, onReviewsRefreshed } from "../ipc/events";
-import type {
-  IpcError,
-  RefreshReport,
-  ReviewId,
-  ReviewRecord,
-} from "../ipc/types";
-import { reviewsInTab, type ReviewTab } from "../lib/reviews";
+import type { RefreshReport, ReviewId, ReviewRecord } from "../ipc/types";
+import { reviewRef, reviewsInTab, type ReviewTab } from "../lib/reviews";
+import { toastError, toastSuccess } from "./toastStore";
 
 interface ReviewStoreState {
   reviews: ReviewRecord[];
@@ -40,8 +38,6 @@ interface ReviewStoreState {
   /** The review whose round is being marked reviewed. */
   marking: ReviewId | null;
   lastRefresh: RefreshReport | null;
-  /** The last failed IPC call (not a refresh error). */
-  lastError: IpcError | null;
   /** Initial load: the list plus the last refresh the backend saw. */
   load: () => Promise<void>;
   reloadList: () => Promise<void>;
@@ -70,7 +66,6 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   refreshing: false,
   marking: null,
   lastRefresh: null,
-  lastError: null,
 
   load: async () => {
     try {
@@ -81,20 +76,20 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
       set((s) => ({
         reviews,
         loaded: true,
-        lastError: null,
         // An event may have delivered a newer report while this was in flight.
         lastRefresh: newer(s.lastRefresh, report),
       }));
     } catch (e) {
-      set({ loaded: true, lastError: toIpcError(e) });
+      set({ loaded: true });
+      toastError("Could not load the reviews", toIpcError(e).message);
     }
   },
 
   reloadList: async () => {
     try {
-      set({ reviews: await listReviews(), loaded: true, lastError: null });
+      set({ reviews: await listReviews(), loaded: true });
     } catch (e) {
-      set({ lastError: toIpcError(e) });
+      toastError("Could not load the reviews", toIpcError(e).message);
     }
   },
 
@@ -106,7 +101,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
       set((s) => ({ lastRefresh: newer(s.lastRefresh, report) }));
       await get().reloadList();
     } catch (e) {
-      set({ lastError: toIpcError(e) });
+      toastError("Could not refresh", toIpcError(e).message);
     } finally {
       set({ refreshing: false });
     }
@@ -115,10 +110,11 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   markReviewed: async (id) => {
     set({ marking: id });
     try {
-      await markReviewed(id);
+      const record = await markReviewed(id);
+      toastSuccess(`Marked ${reviewRef(record)} reviewed`);
       await get().reloadList();
     } catch (e) {
-      set({ lastError: toIpcError(e) });
+      toastError("Could not mark the round reviewed", toIpcError(e).message);
     } finally {
       set({ marking: null });
     }

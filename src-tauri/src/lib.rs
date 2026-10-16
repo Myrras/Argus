@@ -25,8 +25,18 @@ use crate::state::AppState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        // Persist window size/position across runs.
-        .plugin(tauri_plugin_window_state::Builder::new().build())
+        // Persist window size/position across runs. Decorations excluded (as
+        // in Iris): its on_window_ready restore runs after the platform
+        // config is applied and, with default StateFlags, would reassert the
+        // native title bar (a persisted `"decorated": true`) on every launch.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::DECORATIONS,
+                )
+                .build(),
+        )
         // Opens review links in the OS default browser.
         .plugin(tauri_plugin_opener::init())
         // Logging sinks: stdout (dev), the per-OS log directory (support), and

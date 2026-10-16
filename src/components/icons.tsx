@@ -1,74 +1,90 @@
-/** Small stroke icons in `currentColor`, 14px by default. */
+/**
+ * Central icon set for Argus (same wrapper and defaults as Iris and Podium).
+ *
+ * The rest of the app imports semantic names from here and never references
+ * `lucide-react` directly, so re-theming a glyph is a one-line change in this
+ * file.
+ *
+ * Defaults: 14px at stroke-width 1.75 reads crisp and light at our small UI
+ * sizes (lucide's own defaults are 24 / 2, too heavy here). Icons are purely
+ * decorative — the buttons and rows that hold them already carry the
+ * `aria-label`/`title` — so they default to `aria-hidden`. Every prop stays
+ * overridable per use (size, strokeWidth, color, className…); colour follows
+ * `currentColor`, so icons inherit the active theme with no per-theme work.
+ */
 
-import type { SVGProps } from "react";
+import {
+  Check,
+  ChevronRight,
+  CircleAlert,
+  CircleCheck,
+  Copy,
+  ExternalLink,
+  FileDiff,
+  FolderTree,
+  GitPullRequest,
+  Info,
+  MessageSquare,
+  Minus,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plug,
+  Plus,
+  RotateCw,
+  Settings,
+  Square,
+  X,
+  type LucideIcon,
+  type LucideProps,
+} from "lucide-react";
 
-type IconProps = SVGProps<SVGSVGElement> & { size?: number };
-
-function Icon({ size = 14, children, ...props }: IconProps) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.5}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-      focusable="false"
-      {...props}
-    >
-      {children}
-    </svg>
-  );
+/** Wrap a lucide glyph with our shared defaults; `defaults` then `props` win. */
+function icon(Glyph: LucideIcon, defaults?: Partial<LucideProps>) {
+  function Icon(props: LucideProps) {
+    return (
+      <Glyph
+        size={14}
+        strokeWidth={1.75}
+        aria-hidden={true}
+        {...defaults}
+        {...props}
+      />
+    );
+  }
+  Icon.displayName = `Icon(${Glyph.displayName ?? "lucide"})`;
+  return Icon;
 }
 
-export const RefreshIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
-    <path d="M13.5 2.5v3h-3" />
-  </Icon>
-);
+// Entities: reviews, their threads and changed files, and the providers.
+export const ReviewsIcon = icon(GitPullRequest);
+export const ThreadsIcon = icon(MessageSquare);
+export const FilesIcon = icon(FileDiff);
+export const FileTreeIcon = icon(FolderTree);
+export const ProvidersIcon = icon(Plug);
 
-export const GearIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <circle cx="8" cy="8" r="2.2" />
-    <path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7 3.6 3.6" />
-  </Icon>
-);
+// Actions / affordances.
+export const AddIcon = icon(Plus, { size: 15 });
+export const MinusIcon = icon(Minus, { size: 15 });
+export const CloseIcon = icon(X);
+export const CheckIcon = icon(Check);
+export const RefreshIcon = icon(RotateCw);
+export const ExternalLinkIcon = icon(ExternalLink, { size: 13 });
+/** Collapse / expand the Files tab's file tree. */
+export const PanelCloseIcon = icon(PanelLeftClose);
+export const PanelOpenIcon = icon(PanelLeftOpen);
 
-export const ExternalIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="M9.5 2.5h4v4" />
-    <path d="M13.5 2.5 7.5 8.5" />
-    <path d="M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3" />
-  </Icon>
-);
+// The caret rotates 90° on expand (CSS).
+export const CaretIcon = icon(ChevronRight);
 
-export const ChevronIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="m6 4 4 4-4 4" />
-  </Icon>
-);
+// App chrome (Windows-only title bar). Window controls use a single line
+// (minimize), a square (maximize), two stacked squares (restore), and the
+// shared X (close) to match the platform convention.
+export const SettingsIcon = icon(Settings);
+export const WindowMinimizeIcon = icon(Minus, { size: 16 });
+export const WindowMaximizeIcon = icon(Square, { size: 12 });
+export const WindowRestoreIcon = icon(Copy, { size: 12 });
 
-export const CloseIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="m4 4 8 8M12 4l-8 8" />
-  </Icon>
-);
-
-export const CheckIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <path d="m3.5 8.5 3 3 6-7" />
-  </Icon>
-);
-
-export const ThemeIcon = (p: IconProps) => (
-  <Icon {...p}>
-    <circle cx="8" cy="8" r="5.5" />
-    <path d="M8 2.5v11" />
-    <path d="M8 2.5a5.5 5.5 0 0 1 0 11Z" fill="currentColor" stroke="none" />
-  </Icon>
-);
+// Toast severity.
+export const ErrorIcon = icon(CircleAlert, { size: 16 });
+export const SuccessIcon = icon(CircleCheck, { size: 16 });
+export const InfoIcon = icon(Info, { size: 16 });
