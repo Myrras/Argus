@@ -16,6 +16,7 @@ use super::store::{self as ai_store, RunRow};
 use super::*;
 use crate::error::{CoreError, CoreResult};
 use crate::ids::{ReviewId, ThreadId};
+use crate::post::{PostError, PostErrorKind};
 use crate::provider::{
     ChangedFile, DiffRange, FileDiff, FileStatus, ProviderId, ReviewDetail, ReviewProvider,
     ReviewRef, Side, Thread,
@@ -633,6 +634,248 @@ fn core_api_mutations_round_trip() {
     let json = serde_json::to_value(f).unwrap();
     assert_eq!(json["side"], "new");
     assert_eq!(json["severity"], "medium");
+}
+
+// ---------------------------------------------------------------- posting
+
+/// A provider that accepts line comments on `src/a.rs` (the `changed`
+/// patch) and records them; a body containing "reject" is refused.
+#[derive(Default)]
+struct Poster {
+    posted: Mutex<Vec<crate::post::PlacedComment>>,
+}
+
+impl ReviewProvider for Poster {
+    fn id(&self) -> ProviderId {
+        ProviderId::Github
+    }
+    fn host(&self) -> &str {
+        "github.com"
+    }
+    fn current_user(&self) -> CoreResult<String> {
+        Ok(ME.into())
+    }
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        Ok(Vec::new())
+    }
+    fn fetch_review(&self, _: &ReviewRef) -> CoreResult<ReviewDetail> {
+        let mut d = detail("h1");
+        d.review = review_ref(12);
+        Ok(d)
+    }
+    fn fetch_threads(&self, _: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        Ok(Vec::new())
+    }
+    fn file_at(&self, _: &ReviewRef, _: &str, _: &str) -> CoreResult<String> {
+        Err(CoreError::NotFound)
+    }
+    fn fetch_files(&self, _: &ReviewRef, _: &DiffRange) -> CoreResult<FileDiff> {
+        Ok(FileDiff {
+            base_sha: "base".into(),
+            head_sha: "h1".into(),
+            files: vec![changed("src/a.rs")],
+            truncated: false,
+        })
+    }
+    fn post_comment(
+        &self,
+        r: &ReviewRef,
+        c: &crate::post::PlacedComment,
+    ) -> Result<crate::post::PostedComment, PostError> {
+        if c.body.contains("reject") {
+            return Err(PostError::new(
+                PostErrorKind::PostRejected,
+                "Poster: refused",
+            ));
+        }
+        let mut posted = self.posted.lock().unwrap();
+        posted.push(c.clone());
+        Ok(crate::post::PostedComment {
+            url: format!("{}#c{}", r.url, posted.len()),
+            provider_thread_id: format!("{}", 700 + posted.len()),
+            provider_note_id: format!("{}", 700 + posted.len()),
+            path: c.path.clone(),
+            side: c.side,
+            line: c.line_number(),
+            start_line: c.start_number(),
+            head_sha: c.head_sha.clone(),
+        })
+    }
+}
+
+fn raw(path: &str, line: u32, side: Side, title: &str) -> RawFinding {
+    RawFinding {
+        side,
+        ..finding(path, line, Severity::High, title)
+    }
+}
+
+/// A core with a stored review, a `Poster` and these findings of round 1.
+fn core_with_findings(findings: Vec<RawFinding>) -> (Core, Arc<Poster>, ReviewId) {
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    ai_store::save_done(
+        &store,
+        r.id,
+        1,
+        &RunOutput {
+            findings,
+            ..RunOutput::default()
+        },
+        at(10, 12),
+    )
+    .unwrap();
+    let poster = Arc::new(Poster::default());
+    let core = Core::with_providers(store, vec![poster.clone()]);
+    core.ai.set_enabled(true);
+    (core, poster, r.id)
+}
+
+#[test]
+fn posting_findings_marks_the_posted_ones_and_reports_the_rest() {
+    let (core, poster, id) = core_with_findings(vec![
+        raw("src/a.rs", 1, Side::New, "Ttl of zero"),
+        raw("src/a.rs", 99, Side::New, "Gone line"),
+        raw("src/a.rs", 1, Side::Old, "Old side"),
+        raw("src/a.rs", 2, Side::New, "Refused one"),
+    ]);
+    let by_title = |t: &str| {
+        core.findings(id)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.title == t)
+            .unwrap()
+    };
+    let (a, gone, old, refused) = (
+        by_title("Ttl of zero"),
+        by_title("Gone line"),
+        by_title("Old side"),
+        by_title("Refused one"),
+    );
+    let results = core
+        .post_findings(
+            id,
+            vec![
+                FindingPost {
+                    finding_id: a.id,
+                    body: None,
+                },
+                FindingPost {
+                    finding_id: gone.id,
+                    body: None,
+                },
+                FindingPost {
+                    finding_id: old.id,
+                    body: Some("Edited text".into()),
+                },
+                FindingPost {
+                    finding_id: refused.id,
+                    body: Some("please reject".into()),
+                },
+                FindingPost {
+                    finding_id: FindingId::new(),
+                    body: None,
+                },
+            ],
+        )
+        .unwrap();
+    let kinds: Vec<Option<PostErrorKind>> = results
+        .iter()
+        .map(|r| match &r.outcome {
+            FindingPostOutcome::Posted { .. } => None,
+            FindingPostOutcome::Failed(e) => Some(e.kind),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            None,
+            Some(PostErrorKind::LineNotInDiff),
+            None,
+            Some(PostErrorKind::PostRejected),
+            Some(PostErrorKind::NotFound),
+        ]
+    );
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| r.finding_id)
+            .take(4)
+            .collect::<Vec<_>>(),
+        [a.id, gone.id, old.id, refused.id]
+    );
+
+    // What went out: the default text, then the edit; both on their side.
+    let posted = poster.posted.lock().unwrap();
+    assert_eq!(posted.len(), 2);
+    assert_eq!(posted[0].body, "**Ttl of zero**\n\nwhy");
+    assert_eq!(
+        (posted[1].body.as_str(), posted[1].side),
+        ("Edited text", Side::Old)
+    );
+    drop(posted);
+
+    // Posted ones carry their time and url; the others stay selectable.
+    let stored = core.findings(id).unwrap();
+    let state = |t: &str| stored.iter().find(|f| f.title == t).unwrap();
+    assert!(state("Ttl of zero").posted_at.is_some());
+    assert!(state("Ttl of zero")
+        .posted_url
+        .as_deref()
+        .unwrap()
+        .ends_with("#c1"));
+    assert!(state("Old side").posted_url.is_some());
+    for t in ["Gone line", "Refused one"] {
+        assert!(state(t).posted_at.is_none() && state(t).posted_url.is_none());
+    }
+
+    // A second go: the posted one is refused, the failed one can retry
+    // (still refused here), and nothing is posted twice.
+    let again = core
+        .post_findings(
+            id,
+            vec![
+                FindingPost {
+                    finding_id: a.id,
+                    body: None,
+                },
+                FindingPost {
+                    finding_id: a.id,
+                    body: None,
+                },
+            ],
+        )
+        .unwrap();
+    assert!(again.iter().all(|r| matches!(
+        &r.outcome,
+        FindingPostOutcome::Failed(e) if e.kind == PostErrorKind::InvalidInput
+    )));
+    assert_eq!(poster.posted.lock().unwrap().len(), 2);
+
+    // The wire shape.
+    let json = serde_json::to_value(&results[0]).unwrap();
+    assert_eq!(json["status"], "posted");
+    assert!(json["postedUrl"].is_string() && json["postedAt"].is_string());
+    assert_eq!(json["findingId"], a.id.to_string());
+    let json = serde_json::to_value(&results[1]).unwrap();
+    assert_eq!(
+        (json["status"].as_str(), json["kind"].as_str()),
+        (Some("failed"), Some("lineNotInDiff"))
+    );
+    let edit: FindingPost =
+        serde_json::from_str(&format!(r#"{{"findingId":"{}"}}"#, a.id)).unwrap();
+    assert_eq!(edit.body, None);
+}
+
+#[test]
+fn posting_findings_of_another_review_or_nothing_is_safe() {
+    let (core, poster, id) = core_with_findings(vec![raw("src/a.rs", 1, Side::New, "x")]);
+    assert!(core.post_findings(id, Vec::new()).unwrap().is_empty());
+    let err = core.post_findings(ReviewId::new(), Vec::new()).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::NotFound);
+    assert!(poster.posted.lock().unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------- fake CLIs

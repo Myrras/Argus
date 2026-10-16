@@ -332,6 +332,34 @@ pub(crate) fn set_dismissed(store: &Store, id: FindingId, dismissed: bool) -> Co
     )?)
 }
 
+pub(crate) fn finding(store: &Store, id: FindingId) -> CoreResult<Option<Finding>> {
+    let conn = store.conn();
+    Ok(conn
+        .query_row(
+            &format!("SELECT {FINDING_COLUMNS} FROM findings WHERE id = ?1"),
+            [id.to_string()],
+            finding_row,
+        )
+        .optional()?)
+}
+
+/// Record that the user posted the finding as a comment at `url`.
+pub(crate) fn mark_posted(
+    store: &Store,
+    id: FindingId,
+    url: &str,
+    now: DateTime<Utc>,
+) -> CoreResult<()> {
+    let n = store.conn().execute(
+        "UPDATE findings SET posted_at = ?2, posted_url = ?3 WHERE id = ?1",
+        params![id.to_string(), now, url],
+    )?;
+    if n == 0 {
+        return Err(CoreError::NotFound);
+    }
+    Ok(())
+}
+
 fn checklist_row(r: &Row<'_>) -> rusqlite::Result<ChecklistItem> {
     let id: String = r.get(0)?;
     let review: String = r.get(1)?;

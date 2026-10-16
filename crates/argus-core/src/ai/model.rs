@@ -16,6 +16,10 @@
 //!   dismissed: boolean; postedAt: string | null; postedUrl: string | null;
 //! }
 //! interface ChecklistItem { id: string; reviewId: string; round: number; text: string; checked: boolean }
+//! interface FindingPost { findingId: string; body?: string }  // body: the user's edit
+//! type FindingPostResult = { findingId: string } & (
+//!   | { status: "posted"; postedUrl: string; postedAt: string }
+//!   | { status: "failed"; kind: PostErrorKind; message: string });
 //! type VerdictLabel = "addressed" | "partly" | "untouched";
 //! interface Verdict {
 //!   threadId: string; reviewId: string; round: number;
@@ -32,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::ids::{ReviewId, ThreadId};
+use crate::post::PostError;
 use crate::provider::Side;
 
 /// A plain UUID-string id, like the ones in [`crate::ids`] (whose macro is
@@ -203,9 +208,42 @@ pub struct Finding {
     pub title: String,
     pub body: String,
     pub dismissed: bool,
-    /// Set by M4 once the user posted it as a comment.
+    /// Set once the user posted it as a comment (`Core::post_findings`).
     pub posted_at: Option<DateTime<Utc>>,
     pub posted_url: Option<String>,
+}
+
+/// One finding the user posts as a line comment, with their edit of its
+/// text (`None`: the finding's own title and body).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingPost {
+    pub finding_id: FindingId,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+/// The outcome of one finding of a batch, in the batch's order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingPostResult {
+    pub finding_id: FindingId,
+    #[serde(flatten)]
+    pub outcome: FindingPostOutcome,
+}
+
+/// `{ "status": "posted", postedUrl, postedAt }` or `{ "status": "failed",
+/// kind, message }` (a [`PostError`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum FindingPostOutcome {
+    Posted {
+        #[serde(rename = "postedUrl")]
+        posted_url: String,
+        #[serde(rename = "postedAt")]
+        posted_at: DateTime<Utc>,
+    },
+    Failed(PostError),
 }
 
 /// "Look here yourself": something the AI could not verify.

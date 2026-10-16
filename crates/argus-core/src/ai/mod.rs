@@ -11,8 +11,9 @@
 //! - `store`: SQLite (the v1 tables plus `ai_runs`, migration 5).
 //! - `api`: the [`Core`](crate::Core) methods.
 //!
-//! The AI pass only reads from the platforms (`fetch_files`); nothing it
-//! produces is ever posted by this module.
+//! A run only reads from the platforms (`fetch_files`) and posts nothing.
+//! A finding reaches a platform only when the user posts it
+//! (`Core::post_findings`, through the post API).
 
 pub(crate) mod adapter;
 mod api;
@@ -25,8 +26,8 @@ pub(crate) mod store;
 pub mod model;
 
 pub use model::{
-    AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, Severity, Verdict,
-    VerdictLabel,
+    AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost,
+    FindingPostOutcome, FindingPostResult, Severity, Verdict, VerdictLabel,
 };
 pub use prompt::ThreadSnapshot;
 pub use runtime::AiStateCallback;
