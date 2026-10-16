@@ -15,11 +15,18 @@ pub use model::{
     Reviewer, ReviewerState, Side, Thread,
 };
 
+use std::sync::Arc;
+
 use crate::error::CoreResult;
+use crate::settings::Settings;
 
 /// Read access to one platform, for the current user.
 pub trait ReviewProvider: Send + Sync {
     fn id(&self) -> ProviderId;
+
+    /// The host this provider talks to (`github.com`, a GHE or GitLab host);
+    /// matches [`ReviewRef::host`] of what it lists.
+    fn host(&self) -> &str;
 
     /// The current user's username on this platform.
     fn current_user(&self) -> CoreResult<String>;
@@ -38,6 +45,28 @@ pub trait ReviewProvider: Send + Sync {
 
     // M4: post_comment(&self, r, c: &NewComment) -> CoreResult<PostedComment>,
     // reply(&self, r, thread: &str, body) and approve(&self, r) go here.
+}
+
+/// The providers `settings` turns on: GitHub unless disabled, GitLab when a
+/// base URL is set (its token read from the keychain on each call).
+pub fn from_settings(settings: &Settings) -> Vec<Arc<dyn ReviewProvider>> {
+    let mut out: Vec<Arc<dyn ReviewProvider>> = Vec::new();
+    if settings.github.enabled {
+        out.push(Arc::new(GithubProvider::new(
+            settings.github.host.clone(),
+            settings.github.account.clone(),
+        )));
+    }
+    if settings.gitlab_enabled() {
+        let url = &settings.gitlab.base_url;
+        match GitlabProvider::new(url, KeychainToken::for_base_url(url)) {
+            Ok(p) => out.push(Arc::new(p)),
+            // `Settings::validated` rejects such a URL before it is saved;
+            // a hand-edited file lands here.
+            Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not http(s)"),
+        }
+    }
+    out
 }
 
 /// Percent-encode one URL path segment (RFC 3986 unreserved kept).

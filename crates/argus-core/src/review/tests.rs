@@ -1,0 +1,278 @@
+use super::*;
+use crate::testutil::{at, detail, note, thread, AUTHOR, ME};
+
+const OTHER: &str = "dana-fixture";
+
+/// Fetch → record, from `prev`.
+fn step(
+    prev: Option<&ReviewRecord>,
+    d: &ReviewDetail,
+    threads: &[Thread],
+    now: DateTime<Utc>,
+) -> ReviewRecord {
+    advance(prev, d, threads, ME, true, now)
+}
+
+/// A review the user marked reviewed at head `h1` on day 10, 12:00.
+fn reviewed() -> (ReviewRecord, ReviewDetail) {
+    let d = detail("h1");
+    let first = step(None, &d, &[], at(10, 10));
+    (mark_reviewed(&first, &[], at(10, 12)), d)
+}
+
+#[test]
+fn first_sight_needs_review() {
+    let r = step(None, &detail("h1"), &[], at(10, 10));
+    assert_eq!(r.status, ReviewStatus::NeedsReview);
+    assert!(r.round_reasons.is_empty());
+    assert_eq!(r.round, 1);
+    assert!(r.is_active());
+    assert_eq!(r.last_reviewed_sha, None);
+}
+
+#[test]
+fn mark_reviewed_moves_the_watermark_and_waits_on_the_author() {
+    let (r, d) = reviewed();
+    assert_eq!(r.last_reviewed_sha.as_deref(), Some("h1"));
+    assert_eq!(r.last_reviewed_at, Some(at(10, 12)));
+    assert_eq!(r.status, ReviewStatus::WaitingOnAuthor);
+    // Still waiting after a refresh that brings nothing new, even though
+    // the platform still lists the user as requested.
+    let again = step(Some(&r), &d, &[], at(10, 15));
+    assert_eq!(again.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(again.round, 1);
+}
+
+#[test]
+fn new_commits_start_a_new_round() {
+    let (r, _) = reviewed();
+    let next = step(Some(&r), &detail("h2"), &[], at(11, 9));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::NewCommits]);
+    assert_eq!(next.round, 2);
+
+    // Staying in re-review over later polls does not bump the round again.
+    let later = step(Some(&next), &detail("h3"), &[], at(11, 12));
+    assert_eq!(later.round, 2);
+
+    // Marked reviewed, then more commits: round 3.
+    let done = mark_reviewed(&later, &[], at(11, 13));
+    assert_eq!(done.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(done.last_reviewed_sha.as_deref(), Some("h3"));
+    let round3 = step(Some(&done), &detail("h4"), &[], at(12, 9));
+    assert_eq!(round3.round, 3);
+}
+
+#[test]
+fn a_reply_in_my_thread_starts_a_new_round() {
+    let (r, d) = reviewed();
+    let mine = thread(
+        "1",
+        ME,
+        "h1",
+        vec![note("1", ME, at(10, 11)), note("2", AUTHOR, at(11, 8))],
+    );
+    let next = step(Some(&r), &d, &[mine], at(11, 9));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::AuthorReplied]);
+}
+
+#[test]
+fn replies_that_do_not_count() {
+    let (r, d) = reviewed();
+    // Before the watermark.
+    let old = thread(
+        "1",
+        ME,
+        "h1",
+        vec![note("1", ME, at(10, 8)), note("2", AUTHOR, at(10, 9))],
+    );
+    // In someone else's thread.
+    let theirs = thread(
+        "2",
+        OTHER,
+        "h1",
+        vec![note("3", OTHER, at(11, 7)), note("4", AUTHOR, at(11, 8))],
+    );
+    // The user's own reply, and a system note.
+    let mut system = note("6", AUTHOR, at(11, 8));
+    system.system = true;
+    let own = thread("3", ME, "h1", vec![note("5", ME, at(11, 7)), system]);
+    let next = step(Some(&r), &d, &[old, theirs, own], at(11, 9));
+    assert_eq!(next.status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn a_re_request_is_a_transition() {
+    let (r, mut d) = reviewed();
+    // The user reviewed on the platform: no longer requested.
+    d.requested_from_me = false;
+    let dropped = step(Some(&r), &d, &[], at(11, 8));
+    assert_eq!(dropped.status, ReviewStatus::WaitingOnAuthor);
+    assert!(!dropped.requested);
+
+    d.requested_from_me = true;
+    let again = step(Some(&dropped), &d, &[], at(11, 9));
+    assert_eq!(again.status, ReviewStatus::NeedsReReview);
+    assert_eq!(again.round_reasons, [RoundReason::ReRequested]);
+    assert_eq!(again.rerequested_at, Some(at(11, 9)));
+
+    // The reason sticks until the user marks the round reviewed.
+    let later = step(Some(&again), &d, &[], at(11, 12));
+    assert_eq!(later.round_reasons, [RoundReason::ReRequested]);
+    let done = mark_reviewed(&later, &[], at(11, 13));
+    assert_eq!(done.status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn several_reasons_at_once() {
+    let (r, mut d) = reviewed();
+    d.requested_from_me = false;
+    let dropped = step(Some(&r), &d, &[], at(11, 8));
+    let mut d = detail("h2");
+    d.requested_from_me = true;
+    let mine = thread(
+        "1",
+        ME,
+        "h1",
+        vec![note("1", ME, at(10, 11)), note("2", AUTHOR, at(11, 8))],
+    );
+    let next = step(Some(&dropped), &d, &[mine], at(11, 9));
+    assert_eq!(
+        next.round_reasons,
+        [
+            RoundReason::NewCommits,
+            RoundReason::AuthorReplied,
+            RoundReason::ReRequested
+        ]
+    );
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round, 2);
+}
+
+#[test]
+fn approval_removes_the_item() {
+    let (r, mut d) = reviewed();
+    d.approved_by_me = true;
+    d.head_sha = "h2".into(); // even with new commits
+    let approved = step(Some(&r), &d, &[], at(11, 9));
+    assert_eq!(approved.status, ReviewStatus::Approved);
+    assert_eq!(approved.approved_at, Some(at(11, 9)));
+    assert!(approved.round_reasons.is_empty());
+    assert!(!approved.is_active());
+
+    // approved_at is set once, not moved by later polls.
+    let later = step(Some(&approved), &d, &[], at(12, 9));
+    assert_eq!(later.approved_at, Some(at(11, 9)));
+
+    // Merged after approval stays approved.
+    d.state = ReviewState::Merged;
+    assert_eq!(
+        step(Some(&later), &d, &[], at(12, 10)).status,
+        ReviewStatus::Approved
+    );
+
+    // The approval went away on the platform (dismissed / revoked).
+    let mut d = detail("h2");
+    d.approved_by_me = false;
+    let revoked = step(Some(&later), &d, &[], at(12, 11));
+    assert_eq!(revoked.approved_at, None);
+    assert_eq!(revoked.status, ReviewStatus::NeedsReReview);
+
+    // Approved on first sight.
+    let mut d = detail("h1");
+    d.approved_by_me = true;
+    assert_eq!(
+        step(None, &d, &[], at(10, 10)).status,
+        ReviewStatus::Approved
+    );
+}
+
+#[test]
+fn closed_or_merged_without_approval() {
+    for state in [ReviewState::Closed, ReviewState::Merged] {
+        let (r, mut d) = reviewed();
+        d.state = state;
+        d.head_sha = "h2".into();
+        let closed = step(Some(&r), &d, &[], at(11, 9));
+        assert_eq!(closed.status, ReviewStatus::ClosedWithoutApproval);
+        assert!(closed.round_reasons.is_empty());
+        assert!(closed.is_active());
+    }
+    // Also when never reviewed.
+    let mut d = detail("h1");
+    d.state = ReviewState::Closed;
+    assert_eq!(
+        step(None, &d, &[], at(10, 10)).status,
+        ReviewStatus::ClosedWithoutApproval
+    );
+}
+
+#[test]
+fn dropped_from_the_list_is_not_active() {
+    let r = advance(None, &detail("h1"), &[], ME, false, at(10, 10));
+    assert_eq!(r.status, ReviewStatus::NeedsReview);
+    assert!(!r.is_active());
+}
+
+#[test]
+fn untouched_threads() {
+    let (r, d) = reviewed();
+    let quiet = thread("1", ME, "h1", vec![note("1", ME, at(10, 11))]);
+    let answered = thread(
+        "2",
+        ME,
+        "h1",
+        vec![note("2", ME, at(10, 11)), note("3", AUTHOR, at(11, 8))],
+    );
+    // The author replied, then the user answered: back on the author.
+    let answered_back = thread(
+        "3",
+        ME,
+        "h1",
+        vec![
+            note("4", ME, at(10, 11)),
+            note("5", AUTHOR, at(11, 8)),
+            note("6", ME, at(11, 9)),
+        ],
+    );
+    let mut resolved = thread("4", ME, "h1", vec![note("7", ME, at(10, 11))]);
+    resolved.resolved = true;
+    let theirs = thread("5", OTHER, "h1", vec![note("8", OTHER, at(10, 11))]);
+    let all = [quiet, answered, answered_back, resolved, theirs];
+
+    let rec = step(Some(&r), &d, &all, at(11, 10));
+    assert_eq!(rec.untouched_threads, 2);
+
+    // Any new commit counts as touching every thread (M2 approximation).
+    let rec = step(Some(&r), &detail("h2"), &all, at(11, 10));
+    assert_eq!(rec.untouched_threads, 0);
+
+    // Before any watermark: unchanged since the commit the thread was left on.
+    let fresh = step(None, &detail("h1"), &all[..1], at(10, 12));
+    assert_eq!(fresh.untouched_threads, 1);
+    let moved = step(None, &detail("h2"), &all[..1], at(10, 12));
+    assert_eq!(moved.untouched_threads, 0);
+}
+
+#[test]
+fn reasons_and_statuses_round_trip_their_keys() {
+    for r in [
+        RoundReason::NewCommits,
+        RoundReason::AuthorReplied,
+        RoundReason::ReRequested,
+    ] {
+        assert_eq!(RoundReason::parse(r.as_str()), Some(r));
+        assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
+    }
+    for s in [
+        ReviewStatus::NeedsReview,
+        ReviewStatus::NeedsReReview,
+        ReviewStatus::WaitingOnAuthor,
+        ReviewStatus::ClosedWithoutApproval,
+        ReviewStatus::Approved,
+    ] {
+        assert_eq!(ReviewStatus::parse(s.as_str()), Some(s));
+        assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
+    }
+}

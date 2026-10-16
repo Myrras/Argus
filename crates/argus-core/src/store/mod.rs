@@ -1,0 +1,581 @@
+//! Local review state in SQLite (`rusqlite`, bundled).
+//!
+//! The database path is passed in (the shell picks the app data dir). The
+//! schema is versioned with `PRAGMA user_version`: [`MIGRATIONS`] holds one
+//! step per version, applied in order inside a transaction, so a database
+//! from any earlier release is brought up to date on open.
+//!
+//! Nothing secret is ever stored here.
+
+use std::path::Path;
+use std::sync::Mutex;
+
+use chrono::{DateTime, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
+
+use crate::error::{CoreError, CoreResult};
+use crate::ids::{ReviewId, ThreadId};
+use crate::provider::{Anchor, Note, ProviderId, ReviewRef, ReviewState, Thread};
+use crate::review::{ReviewStatus, RoundReason};
+
+/// Schema steps; index `i` takes the database from version `i` to `i + 1`.
+/// Append only — never edit a released step.
+const MIGRATIONS: &[&str] = &[
+    // 1: the full schema from the technical plan (§6). `reviews` carries a
+    // few columns on top of the plan's for round tracking: the reasons, the
+    // classified status, the untouched-thread count, whether the user's
+    // review is requested (to see a re-request as a transition), whether
+    // the last list still had it, the viewer's username on that platform,
+    // and a fingerprint of the last fetch.
+    r#"
+    CREATE TABLE reviews (
+        id                TEXT PRIMARY KEY,
+        provider          TEXT NOT NULL,
+        host              TEXT NOT NULL,
+        repo              TEXT NOT NULL,
+        number            INTEGER NOT NULL,
+        title             TEXT NOT NULL,
+        author            TEXT NOT NULL,
+        url               TEXT NOT NULL,
+        state             TEXT NOT NULL,
+        draft             INTEGER NOT NULL DEFAULT 0,
+        head_sha          TEXT NOT NULL,
+        base_sha          TEXT NOT NULL,
+        last_reviewed_sha TEXT,
+        last_reviewed_at  TEXT,
+        approved_at       TEXT,
+        round             INTEGER NOT NULL DEFAULT 1,
+        round_reasons     TEXT NOT NULL DEFAULT '[]',
+        status            TEXT NOT NULL,
+        untouched_threads INTEGER NOT NULL DEFAULT 0,
+        requested         INTEGER NOT NULL DEFAULT 0,
+        rerequested_at    TEXT,
+        listed            INTEGER NOT NULL DEFAULT 1,
+        viewer            TEXT NOT NULL DEFAULT '',
+        fingerprint       TEXT NOT NULL DEFAULT '',
+        updated_at        TEXT,
+        fetched_at        TEXT NOT NULL,
+        UNIQUE (provider, host, repo, number)
+    );
+    CREATE TABLE threads (
+        id                 TEXT PRIMARY KEY,
+        review_id          TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+        provider_thread_id TEXT NOT NULL,
+        author             TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        resolved           INTEGER NOT NULL,
+        outdated           INTEGER NOT NULL,
+        anchor_json        TEXT,
+        mine               INTEGER NOT NULL,
+        UNIQUE (review_id, provider_thread_id)
+    );
+    CREATE INDEX threads_by_review ON threads(review_id);
+    CREATE TABLE notes (
+        id         TEXT NOT NULL,
+        thread_id  TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        author     TEXT NOT NULL,
+        body       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        system     INTEGER NOT NULL,
+        PRIMARY KEY (thread_id, id)
+    );
+    CREATE TABLE snapshots (
+        thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        head_sha  TEXT NOT NULL,
+        then_code TEXT,
+        then_path TEXT,
+        then_line INTEGER,
+        now_code  TEXT,
+        now_path  TEXT,
+        now_line  INTEGER,
+        status    TEXT NOT NULL,
+        PRIMARY KEY (thread_id, head_sha)
+    );
+    CREATE TABLE timeline (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id    TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        head_sha     TEXT NOT NULL,
+        kind         TEXT NOT NULL,
+        at           TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+    );
+    CREATE INDEX timeline_by_thread ON timeline(thread_id, head_sha);
+    CREATE TABLE findings (
+        id         TEXT PRIMARY KEY,
+        review_id  TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+        round      INTEGER NOT NULL,
+        path       TEXT,
+        line       INTEGER,
+        severity   TEXT NOT NULL,
+        title      TEXT NOT NULL,
+        body       TEXT NOT NULL,
+        posted_at  TEXT,
+        posted_url TEXT,
+        dismissed  INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE verdicts (
+        thread_id     TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        round         INTEGER NOT NULL,
+        ai_label      TEXT,
+        ai_reason     TEXT,
+        user_override TEXT,
+        PRIMARY KEY (thread_id, round)
+    );
+    CREATE TABLE checklist (
+        id        TEXT PRIMARY KEY,
+        review_id TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+        round     INTEGER NOT NULL,
+        text      TEXT NOT NULL,
+        checked   INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
+];
+
+/// One review as Argus tracks it: the platform data of the last fetch plus
+/// the round bookkeeping. This is what the review list shows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewRecord {
+    pub id: ReviewId,
+    #[serde(flatten)]
+    pub review: ReviewRef,
+    pub state: ReviewState,
+    pub draft: bool,
+    pub head_sha: String,
+    pub base_sha: String,
+    /// The watermark: the head the user last marked reviewed, and when.
+    pub last_reviewed_sha: Option<String>,
+    pub last_reviewed_at: Option<DateTime<Utc>>,
+    pub approved_at: Option<DateTime<Utc>>,
+    /// 1 for the first round, +1 each time it needs re-review.
+    pub round: u32,
+    pub round_reasons: Vec<RoundReason>,
+    pub status: ReviewStatus,
+    pub untouched_threads: u32,
+    /// The user's review is requested right now.
+    pub requested: bool,
+    pub rerequested_at: Option<DateTime<Utc>>,
+    /// The last list call still returned it. An open review that dropped
+    /// off (no longer requested, nothing commented) is kept but not active.
+    pub listed: bool,
+    /// The user's username on this review's platform.
+    pub viewer: String,
+    /// Hash of the last fetch, to tell whether anything changed.
+    #[serde(skip)]
+    pub fingerprint: String,
+    pub fetched_at: DateTime<Utc>,
+}
+
+impl ReviewRecord {
+    /// Shown in one of the active tabs (not approved, still listed or
+    /// closed without approval).
+    pub fn is_active(&self) -> bool {
+        match self.status {
+            ReviewStatus::Approved => false,
+            ReviewStatus::ClosedWithoutApproval => true,
+            _ => self.listed,
+        }
+    }
+}
+
+/// A thread as stored: the platform thread plus Argus' own keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredThread {
+    /// Argus' id (stable; derived from the review and the platform id).
+    pub thread_id: ThreadId,
+    pub review_id: ReviewId,
+    /// Started by the current user.
+    pub mine: bool,
+    #[serde(flatten)]
+    pub thread: Thread,
+}
+
+/// The database. Cheap to share behind an `Arc`; calls serialise on one
+/// connection, which is plenty for one user's reviews.
+pub struct Store {
+    conn: Mutex<Connection>,
+}
+
+fn invalid(what: &str) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        format!("bad stored {what}").into(),
+    )
+}
+
+impl Store {
+    /// Open (creating if needed) the database at `path` and migrate it.
+    pub fn open(path: &Path) -> CoreResult<Self> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        Self::init(Connection::open(path)?)
+    }
+
+    /// A private in-memory database (tests, or before a data dir exists).
+    pub fn in_memory() -> CoreResult<Self> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(mut conn: Connection) -> CoreResult<Self> {
+        conn.pragma_update(None, "foreign_keys", true)?;
+        // WAL keeps the UI's reads from waiting on a poll's writes; an
+        // in-memory database answers "memory" and that is fine.
+        let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
+        migrate(&mut conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().expect("store lock poisoned")
+    }
+
+    /// The schema version the database is at.
+    pub fn schema_version(&self) -> CoreResult<u32> {
+        Ok(self
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))?)
+    }
+
+    /// Insert or update a review (keyed by its id). Threads and notes hang
+    /// off it and are kept.
+    pub fn upsert_review(&self, r: &ReviewRecord) -> CoreResult<()> {
+        let reasons =
+            serde_json::to_string(&r.round_reasons).map_err(|e| CoreError::Store(e.to_string()))?;
+        self.conn().execute(
+            "INSERT INTO reviews (id, provider, host, repo, number, title, author, url, state,
+                draft, head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at,
+                round, round_reasons, status, untouched_threads, requested, rerequested_at,
+                listed, viewer, fingerprint, updated_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+             ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title, author = excluded.author, url = excluded.url,
+                state = excluded.state, draft = excluded.draft, head_sha = excluded.head_sha,
+                base_sha = excluded.base_sha, last_reviewed_sha = excluded.last_reviewed_sha,
+                last_reviewed_at = excluded.last_reviewed_at, approved_at = excluded.approved_at,
+                round = excluded.round, round_reasons = excluded.round_reasons,
+                status = excluded.status, untouched_threads = excluded.untouched_threads,
+                requested = excluded.requested, rerequested_at = excluded.rerequested_at,
+                listed = excluded.listed, viewer = excluded.viewer,
+                fingerprint = excluded.fingerprint, updated_at = excluded.updated_at,
+                fetched_at = excluded.fetched_at",
+            params![
+                r.id.to_string(),
+                r.review.provider.as_str(),
+                r.review.host,
+                r.review.repo,
+                r.review.number,
+                r.review.title,
+                r.review.author,
+                r.review.url,
+                r.state.as_str(),
+                r.draft,
+                r.head_sha,
+                r.base_sha,
+                r.last_reviewed_sha,
+                r.last_reviewed_at,
+                r.approved_at,
+                r.round,
+                reasons,
+                r.status.as_str(),
+                r.untouched_threads,
+                r.requested,
+                r.rerequested_at,
+                r.listed,
+                r.viewer,
+                r.fingerprint,
+                r.review.updated_at,
+                r.fetched_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn review(&self, id: ReviewId) -> CoreResult<Option<ReviewRecord>> {
+        Ok(self
+            .conn()
+            .query_row(
+                &format!("SELECT {REVIEW_COLUMNS} FROM reviews WHERE id = ?1"),
+                [id.to_string()],
+                review_row,
+            )
+            .optional()?)
+    }
+
+    /// Every stored review, most recently updated on the platform first.
+    pub fn reviews(&self) -> CoreResult<Vec<ReviewRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {REVIEW_COLUMNS} FROM reviews
+             ORDER BY updated_at IS NULL, updated_at DESC, number DESC"
+        ))?;
+        let rows = stmt.query_map([], review_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Move the watermark.
+    pub fn set_watermark(&self, id: ReviewId, sha: &str, at: DateTime<Utc>) -> CoreResult<()> {
+        self.update(
+            "UPDATE reviews SET last_reviewed_sha = ?2, last_reviewed_at = ?3 WHERE id = ?1",
+            params![id.to_string(), sha, at],
+        )
+    }
+
+    pub fn set_approved_at(&self, id: ReviewId, at: Option<DateTime<Utc>>) -> CoreResult<()> {
+        self.update(
+            "UPDATE reviews SET approved_at = ?2 WHERE id = ?1",
+            params![id.to_string(), at],
+        )
+    }
+
+    /// Store a classification: round number, reasons, status, untouched count.
+    pub fn set_round(
+        &self,
+        id: ReviewId,
+        round: u32,
+        reasons: &[RoundReason],
+        status: ReviewStatus,
+        untouched_threads: u32,
+    ) -> CoreResult<()> {
+        let reasons =
+            serde_json::to_string(reasons).map_err(|e| CoreError::Store(e.to_string()))?;
+        self.update(
+            "UPDATE reviews SET round = ?2, round_reasons = ?3, status = ?4,
+                untouched_threads = ?5 WHERE id = ?1",
+            params![
+                id.to_string(),
+                round,
+                reasons,
+                status.as_str(),
+                untouched_threads
+            ],
+        )
+    }
+
+    /// Run an UPDATE on one review; no such review is [`CoreError::NotFound`].
+    fn update(&self, sql: &str, p: impl rusqlite::Params) -> CoreResult<()> {
+        match self.conn().execute(sql, p)? {
+            0 => Err(CoreError::NotFound),
+            _ => Ok(()),
+        }
+    }
+
+    /// Make the stored threads of `review` exactly `threads`: upsert each
+    /// thread and its notes, drop the ones the platform no longer has. An
+    /// upsert (never a delete + insert) keeps what hangs off a thread —
+    /// snapshots, timeline, verdicts — across refreshes.
+    pub fn upsert_threads(&self, review: ReviewId, threads: &[Thread], me: &str) -> CoreResult<()> {
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let mut keep: Vec<String> = Vec::with_capacity(threads.len());
+        for t in threads {
+            let thread_id = ThreadId::from_key(review, &t.id).to_string();
+            let anchor = t
+                .anchor
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|e| CoreError::Store(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO threads (id, review_id, provider_thread_id, author, created_at,
+                    resolved, outdated, anchor_json, mine)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(id) DO UPDATE SET
+                    author = excluded.author, created_at = excluded.created_at,
+                    resolved = excluded.resolved, outdated = excluded.outdated,
+                    anchor_json = excluded.anchor_json, mine = excluded.mine",
+                params![
+                    thread_id,
+                    review.to_string(),
+                    t.id,
+                    t.author,
+                    t.created_at,
+                    t.resolved,
+                    t.outdated,
+                    anchor,
+                    t.author.eq_ignore_ascii_case(me),
+                ],
+            )?;
+            let mut note_ids: Vec<&str> = Vec::with_capacity(t.notes.len());
+            for n in &t.notes {
+                tx.execute(
+                    "INSERT INTO notes (id, thread_id, author, body, created_at, system)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT(thread_id, id) DO UPDATE SET
+                        author = excluded.author, body = excluded.body,
+                        created_at = excluded.created_at, system = excluded.system",
+                    params![n.id, thread_id, n.author, n.body, n.created_at, n.system],
+                )?;
+                note_ids.push(&n.id);
+            }
+            delete_missing(
+                &tx,
+                "notes",
+                "id",
+                "thread_id",
+                &thread_id,
+                &note_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )?;
+            keep.push(thread_id);
+        }
+        delete_missing(
+            &tx,
+            "threads",
+            "id",
+            "review_id",
+            &review.to_string(),
+            &keep,
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The stored threads of `review`, oldest first, notes oldest first.
+    pub fn threads(&self, review: ReviewId) -> CoreResult<Vec<StoredThread>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT id, provider_thread_id, author, created_at, resolved, outdated,
+                anchor_json, mine
+             FROM threads WHERE review_id = ?1 ORDER BY created_at, provider_thread_id",
+        )?;
+        let mut notes_stmt = conn.prepare(
+            "SELECT id, author, body, created_at, system FROM notes
+             WHERE thread_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([review.to_string()], |r| {
+            let id: String = r.get(0)?;
+            let anchor: Option<String> = r.get(6)?;
+            let anchor: Option<Anchor> = anchor
+                .map(|a| serde_json::from_str(&a))
+                .transpose()
+                .map_err(|_| invalid("anchor"))?;
+            Ok((
+                id,
+                Thread {
+                    id: r.get(1)?,
+                    author: r.get(2)?,
+                    created_at: r.get(3)?,
+                    resolved: r.get(4)?,
+                    outdated: r.get(5)?,
+                    anchor,
+                    notes: Vec::new(),
+                },
+                r.get::<_, bool>(7)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, mut thread, mine) = row?;
+            thread.notes = notes_stmt
+                .query_map([&id], |r| {
+                    Ok(Note {
+                        id: r.get(0)?,
+                        author: r.get(1)?,
+                        body: r.get(2)?,
+                        created_at: r.get(3)?,
+                        system: r.get(4)?,
+                    })
+                })?
+                .collect::<Result<_, _>>()?;
+            out.push(StoredThread {
+                thread_id: id.parse().map_err(|_| invalid("thread id"))?,
+                review_id: review,
+                mine,
+                thread,
+            });
+        }
+        Ok(out)
+    }
+}
+
+/// Delete rows of `table` under `parent` whose `key` is not in `keep`.
+fn delete_missing(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    key: &str,
+    parent_col: &str,
+    parent: &str,
+    keep: &[String],
+) -> rusqlite::Result<()> {
+    let mut stmt = tx.prepare(&format!(
+        "SELECT {key} FROM {table} WHERE {parent_col} = ?1"
+    ))?;
+    let existing: Vec<String> = stmt
+        .query_map([parent], |r| r.get(0))?
+        .collect::<Result<_, _>>()?;
+    for k in existing.iter().filter(|k| !keep.contains(k)) {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE {parent_col} = ?1 AND {key} = ?2"),
+            params![parent, k],
+        )?;
+    }
+    Ok(())
+}
+
+fn migrate(conn: &mut Connection) -> CoreResult<()> {
+    let version: usize = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > MIGRATIONS.len() {
+        return Err(CoreError::Store(
+            "the database is from a newer Argus; update Argus".into(),
+        ));
+    }
+    for (i, step) in MIGRATIONS.iter().enumerate().skip(version) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(step)?;
+        tx.pragma_update(None, "user_version", i + 1)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+const REVIEW_COLUMNS: &str = "id, provider, host, repo, number, title, author, url, state, draft,
+    head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at, round, round_reasons,
+    status, untouched_threads, requested, rerequested_at, listed, viewer, fingerprint,
+    updated_at, fetched_at";
+
+fn review_row(r: &Row<'_>) -> rusqlite::Result<ReviewRecord> {
+    let id: String = r.get(0)?;
+    let provider: String = r.get(1)?;
+    let state: String = r.get(8)?;
+    let reasons: String = r.get(16)?;
+    let status: String = r.get(17)?;
+    Ok(ReviewRecord {
+        id: id.parse().map_err(|_| invalid("review id"))?,
+        review: ReviewRef {
+            provider: ProviderId::parse(&provider).ok_or_else(|| invalid("provider"))?,
+            host: r.get(2)?,
+            repo: r.get(3)?,
+            number: r.get(4)?,
+            title: r.get(5)?,
+            author: r.get(6)?,
+            url: r.get(7)?,
+            updated_at: r.get(24)?,
+        },
+        state: ReviewState::parse(&state).ok_or_else(|| invalid("state"))?,
+        draft: r.get(9)?,
+        head_sha: r.get(10)?,
+        base_sha: r.get(11)?,
+        last_reviewed_sha: r.get(12)?,
+        last_reviewed_at: r.get(13)?,
+        approved_at: r.get(14)?,
+        round: r.get(15)?,
+        round_reasons: serde_json::from_str(&reasons).map_err(|_| invalid("round reasons"))?,
+        status: ReviewStatus::parse(&status).ok_or_else(|| invalid("status"))?,
+        untouched_threads: r.get(18)?,
+        requested: r.get(19)?,
+        rerequested_at: r.get(20)?,
+        listed: r.get(21)?,
+        viewer: r.get(22)?,
+        fingerprint: r.get(23)?,
+        fetched_at: r.get(25)?,
+    })
+}
+
+#[cfg(test)]
+mod tests;

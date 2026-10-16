@@ -268,6 +268,10 @@ impl ReviewProvider for GitlabProvider {
         ProviderId::Gitlab
     }
 
+    fn host(&self) -> &str {
+        &self.host
+    }
+
     fn current_user(&self) -> CoreResult<String> {
         Ok(self.me()?.username)
     }

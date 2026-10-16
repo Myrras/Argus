@@ -71,10 +71,6 @@ impl GithubProvider {
         }
     }
 
-    pub fn host(&self) -> &str {
-        &self.host
-    }
-
     fn command(&self) -> std::process::Command {
         let mut cmd = std::process::Command::new(&self.gh);
         cmd.stdin(Stdio::null())
@@ -220,6 +216,10 @@ fn same_user(a: &str, b: &str) -> bool {
 impl ReviewProvider for GithubProvider {
     fn id(&self) -> ProviderId {
         ProviderId::Github
+    }
+
+    fn host(&self) -> &str {
+        &self.host
     }
 
     fn current_user(&self) -> CoreResult<String> {

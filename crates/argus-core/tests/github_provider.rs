@@ -4,6 +4,9 @@
 //! The script is a POSIX shell script, so these tests only run on Unix; they
 //! still compile on Windows.
 
+// On Windows the fake is never built, so its helpers go unused.
+#![cfg_attr(windows, allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 
 use argus_core::provider::{

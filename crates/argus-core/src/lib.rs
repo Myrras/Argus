@@ -19,6 +19,12 @@
 pub mod error;
 pub mod ids;
 pub mod provider;
+pub mod review;
+pub mod settings;
+pub mod store;
+
+#[cfg(test)]
+mod testutil;
 
 use std::sync::Mutex;
 
