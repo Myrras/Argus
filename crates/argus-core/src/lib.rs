@@ -18,9 +18,6 @@
 //! - [`settings`] — `settings.json`.
 //! - [`review`] — round detection, pure.
 //! - [`poll`] — refresh and the background loop.
-//!
-//! The greet + notes sample (inherited from the boilerplate) keeps the
-//! core → IPC → frontend wiring tested until the IPC rewrite replaces it.
 
 #![forbid(unsafe_code)]
 
@@ -39,10 +36,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 
 pub use error::{CoreError, CoreResult};
-pub use ids::{NoteId, ReviewId, ThreadId};
+pub use ids::{ReviewId, ThreadId};
 pub use poll::{RefreshError, RefreshReport};
 pub use provider::{GithubStatus, GitlabStatus, ProviderStatus};
 pub use review::{ReviewStatus, RoundReason};
@@ -55,13 +51,6 @@ use store::Store;
 /// What [`Core::start_polling`] calls after every refresh.
 pub type RefreshCallback = Arc<dyn Fn(&RefreshReport) + Send + Sync>;
 
-/// One note. Serializable so it can cross the IPC boundary unchanged.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Note {
-    pub id: NoteId,
-    pub text: String,
-}
-
 /// The application's single entry point.
 ///
 /// Cheap to share: hold it behind an `Arc` in the shell and clone the handle
@@ -71,7 +60,6 @@ pub struct Note {
 /// Provider calls block (network, `gh`): call [`refresh`](Self::refresh)
 /// and [`file_at`](Self::file_at) from `spawn_blocking`, never the UI thread.
 pub struct Core {
-    notes: Mutex<Vec<Note>>,
     store: Arc<Store>,
     /// `None` for an in-memory core (tests): settings are not persisted.
     settings_path: Option<PathBuf>,
@@ -120,7 +108,6 @@ impl Core {
     ) -> Self {
         let providers = providers.unwrap_or_else(|| provider::from_settings(&settings));
         Self {
-            notes: Mutex::new(Vec::new()),
             store: Arc::new(store),
             settings_path,
             settings: Mutex::new(settings),
@@ -266,78 +253,5 @@ impl Core {
         if let Some((p, _)) = self.poller.lock().expect("poller lock poisoned").as_ref() {
             p.refresh_now();
         }
-    }
-
-    /// A pure, fallible sample command: greet `name`, rejecting blank input.
-    ///
-    /// Demonstrates input validation returning [`CoreError::InvalidInput`],
-    /// which the shell maps to a stable IPC error `kind`.
-    pub fn greet(&self, name: &str) -> CoreResult<String> {
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(CoreError::InvalidInput("name must not be empty".into()));
-        }
-        Ok(format!("Hello, {name}! Welcome to Argus."))
-    }
-
-    /// Add a note and return it.
-    pub fn add_note(&self, text: &str) -> CoreResult<Note> {
-        let text = text.trim();
-        if text.is_empty() {
-            return Err(CoreError::InvalidInput(
-                "note text must not be empty".into(),
-            ));
-        }
-        let note = Note {
-            id: NoteId::new(),
-            text: text.to_owned(),
-        };
-        self.notes
-            .lock()
-            .expect("notes lock poisoned")
-            .push(note.clone());
-        Ok(note)
-    }
-
-    /// All notes, in insertion order.
-    pub fn list_notes(&self) -> Vec<Note> {
-        self.notes.lock().expect("notes lock poisoned").clone()
-    }
-
-    /// Remove a note by id, erroring if it does not exist.
-    pub fn remove_note(&self, id: NoteId) -> CoreResult<()> {
-        let mut notes = self.notes.lock().expect("notes lock poisoned");
-        let before = notes.len();
-        notes.retain(|n| n.id != id);
-        if notes.len() == before {
-            return Err(CoreError::NotFound);
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greet_rejects_blank_names() {
-        let core = Core::new();
-        assert!(core.greet("   ").is_err());
-        assert_eq!(core.greet("Ada").unwrap(), "Hello, Ada! Welcome to Argus.");
-    }
-
-    #[test]
-    fn add_then_remove_note() {
-        let core = Core::new();
-        let note = core.add_note("first").unwrap();
-        assert_eq!(core.list_notes().len(), 1);
-        core.remove_note(note.id).unwrap();
-        assert!(core.list_notes().is_empty());
-        // Removing a missing id is an error, not a silent no-op.
-        assert!(matches!(
-            core.remove_note(note.id),
-            Err(CoreError::NotFound)
-        ));
     }
 }

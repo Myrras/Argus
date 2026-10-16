@@ -1,5 +1,55 @@
 //! IPC command modules. Each command is a thin (de)serialization shim over
 //! [`argus_core::Core`]; no domain logic lives here.
 
-pub mod greet;
-pub mod notes;
+pub mod provider;
+pub mod review;
+pub mod settings;
+pub mod thread;
+
+use std::sync::Arc;
+
+use tauri::State;
+
+use argus_core::{Core, CoreResult, ReviewId};
+
+use crate::error::IpcError;
+use crate::state::AppState;
+
+/// Run a core call on a blocking thread: provider calls (network, `gh`), the
+/// keychain, SQLite (which may wait on a poll's write) and stopping the poll
+/// loop (which waits for an in-flight refresh) must never hold up the
+/// webview's IPC thread.
+pub(crate) async fn blocking<T: Send + 'static>(
+    state: State<'_, AppState>,
+    f: impl FnOnce(&Core) -> CoreResult<T> + Send + 'static,
+) -> Result<T, IpcError> {
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || f(&core))
+        .await
+        .map_err(|e| IpcError::new("io", format!("background task failed: {e}")))?
+        .map_err(IpcError::from)
+}
+
+/// Ids arrive as plain UUID strings; a malformed one is an IPC-layer input
+/// error with no `CoreError` counterpart.
+pub(crate) fn parse_review_id(raw: &str) -> Result<ReviewId, IpcError> {
+    raw.trim()
+        .parse()
+        .map_err(|_| IpcError::invalid_input("reviewId is not a valid id"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_review_ids() {
+        let id = ReviewId::from_key("github|github.com|acme-fixture/widgets|12");
+        assert_eq!(parse_review_id(&id.to_string()).unwrap(), id);
+        assert_eq!(parse_review_id(&format!(" {id} ")).unwrap(), id);
+        let err = parse_review_id("not-a-uuid").unwrap_err();
+        assert_eq!(err.kind, "invalidInput");
+        // The raw input is never echoed back.
+        assert!(!err.message.contains("not-a-uuid"));
+    }
+}

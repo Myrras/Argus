@@ -1,7 +1,8 @@
 //! The desktop shell: a thin Tauri 2 IPC adapter over `argus-core`.
 //!
 //! This crate owns no domain logic — it (de)serializes command arguments, holds
-//! the live application state, and forwards work to `argus-core`.
+//! the live application state, and forwards work to `argus-core`. Refresh
+//! results reach the webview as events (see [`events`]).
 //!
 //! ## Logging & secrets
 //! Logging is configured via `tauri-plugin-log` (a global `log` logger at
@@ -12,8 +13,10 @@
 
 mod commands;
 mod error;
+mod events;
 mod state;
 
+use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 
 use crate::state::AppState;
@@ -24,6 +27,8 @@ pub fn run() {
     tauri::Builder::default()
         // Persist window size/position across runs.
         .plugin(tauri_plugin_window_state::Builder::new().build())
+        // Opens review links in the OS default browser.
+        .plugin(tauri_plugin_opener::init())
         // Logging sinks: stdout (dev), the per-OS log directory (support), and
         // the webview console (in-app diagnostics).
         .plugin(
@@ -36,13 +41,39 @@ pub fn run() {
                 ])
                 .build(),
         )
-        .manage(AppState::new())
+        .setup(|app| {
+            // The database and settings.json live in the app data dir, which
+            // only exists once the app does — hence managing state here
+            // rather than on the builder.
+            let state = AppState::open(&app.path().app_data_dir()?)?;
+            start_polling(app.handle().clone(), &state);
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
-            commands::greet::greet,
-            commands::notes::note_add,
-            commands::notes::note_list,
-            commands::notes::note_remove,
+            commands::review::list_reviews,
+            commands::review::get_review,
+            commands::review::refresh_reviews,
+            commands::review::last_refresh,
+            commands::review::mark_reviewed,
+            commands::thread::list_threads,
+            commands::settings::get_settings,
+            commands::settings::update_settings,
+            commands::settings::set_gitlab_token,
+            commands::settings::gitlab_token_present,
+            commands::provider::provider_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Start the core's background refresh loop. It refreshes at once, then at
+/// the settings' interval (a settings change restarts it with the same
+/// callback); every report is remembered for `last_refresh` and emitted.
+fn start_polling(app: tauri::AppHandle, state: &AppState) {
+    let last = state.last_refresh.clone();
+    state.core.start_polling(move |report| {
+        AppState::record(&last, report);
+        events::emit_report(&app, report);
+    });
 }

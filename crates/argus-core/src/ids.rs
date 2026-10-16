@@ -1,7 +1,7 @@
 //! Strongly-typed UUID newtypes.
 //!
 //! A `uuid_newtype!` macro keeps ids distinct at the type level (you cannot pass
-//! a `NoteId` where some other id is expected) while serializing transparently
+//! a `ThreadId` where a `ReviewId` is expected) while serializing transparently
 //! as a plain UUID string across the IPC boundary.
 
 use std::fmt;
@@ -47,11 +47,6 @@ macro_rules! uuid_newtype {
 }
 
 uuid_newtype!(
-    /// Identifies a note owned by the [`Core`](crate::Core).
-    NoteId
-);
-
-uuid_newtype!(
     /// Identifies a review (one MR or PR). Derived from its natural key, so
     /// the same MR/PR always gets the same id across refreshes and restarts.
     ReviewId
@@ -88,7 +83,7 @@ mod tests {
 
     #[test]
     fn serializes_as_plain_uuid_string() {
-        let id = NoteId::new();
+        let id = ReviewId::new();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(json, format!("\"{id}\""));
     }
@@ -104,8 +99,8 @@ mod tests {
 
     #[test]
     fn round_trips_through_from_str() {
-        let id = NoteId::new();
-        let parsed: NoteId = id.to_string().parse().unwrap();
+        let id = ReviewId::new();
+        let parsed: ReviewId = id.to_string().parse().unwrap();
         assert_eq!(parsed, id);
     }
 }
