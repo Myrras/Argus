@@ -175,30 +175,42 @@ fn every_error(p: &dyn ReviewProvider, r: &ReviewRef) -> Vec<(&'static str, Stri
     out
 }
 
-#[test]
-#[cfg_attr(windows, ignore)]
-fn github_errors_never_carry_the_token() {
+/// Every body through every call, `gh` failing with `stderr` (one test per
+/// stderr shape so they run in parallel).
+fn github_errors_with(stderr: &str) {
     let (dir, gh) = fake_gh();
-    let stderrs = [
-        "gh: Validation Failed (HTTP 422)",
-        "gh: Not Found (HTTP 404)",
-        "gh: Bad credentials (HTTP 401) {T}",
-    ];
     let mut checked = 0;
     for body in bodies() {
-        for stderr in stderrs {
-            std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
-            std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
-            let errors = every_error(&gh, &github_pr());
-            // All but `thread_resolutions` (no such call on GitHub) fail.
-            assert_eq!(errors.len(), 10, "{body} / {stderr}: {errors:?}");
-            for (what, text) in errors {
-                assert_clean(GH_TOKEN, what, &text);
-                checked += 1;
-            }
+        std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
+        std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
+        let errors = every_error(&gh, &github_pr());
+        // All but `thread_resolutions` (no such call on GitHub) fail.
+        assert_eq!(errors.len(), 10, "{body} / {stderr}: {errors:?}");
+        for (what, text) in errors {
+            assert_clean(GH_TOKEN, what, &text);
+            checked += 1;
         }
     }
-    assert!(checked > 400);
+    assert!(checked >= 140);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn github_rejections_never_carry_the_token() {
+    github_errors_with("gh: Validation Failed (HTTP 422)");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn github_not_found_never_carries_the_token() {
+    github_errors_with("gh: Not Found (HTTP 404)");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn github_auth_failures_never_carry_the_token() {
+    // gh itself echoing the token on stderr.
+    github_errors_with("gh: Bad credentials (HTTP 401) {T}");
 }
 
 #[test]
