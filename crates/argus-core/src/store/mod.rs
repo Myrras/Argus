@@ -144,6 +144,12 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (review_id, path)
     );
     "#,
+    // 3 and 4: reserved for M3 (thread history) and M4 (posting), built in
+    // parallel; their steps replace these placeholders on merge.
+    "-- 3: reserved (M3)",
+    "-- 4: reserved (M4)",
+    // 5: AI run state and the side of a finding (see `ai::store`).
+    crate::ai::store::MIGRATION,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus
@@ -245,7 +251,7 @@ impl Store {
         })
     }
 
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("store lock poisoned")
     }
 

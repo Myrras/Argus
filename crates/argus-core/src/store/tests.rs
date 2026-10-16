@@ -182,7 +182,7 @@ fn migrates_a_version_1_database_to_viewed_files() {
     }
     {
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert_eq!(store.schema_version().unwrap() as usize, MIGRATIONS.len());
         assert!(table_names(&store).iter().any(|t| t == "viewed_files"));
         store.upsert_review(&r).unwrap();
         store

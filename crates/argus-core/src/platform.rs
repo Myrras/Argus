@@ -1,5 +1,6 @@
-//! Finding the `gh` binary. Ported from Podium's `platform.rs` (`gh_binary`,
-//! `login_shell`, `command_exists_query`), minus its WSL backend.
+//! Finding CLI binaries (`gh`, the AI agents). Ported from Podium's
+//! `platform.rs` (`gh_binary`, `login_shell`, `command_exists_query`), minus
+//! its WSL backend.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -129,6 +130,72 @@ fn first_existing<'a>(candidates: impl IntoIterator<Item = &'a Path>) -> Option<
         .into_iter()
         .find(|p| p.is_file())
         .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Where agent CLIs usually live when the login shell cannot tell us.
+/// `~` is the user's home.
+#[cfg(unix)]
+pub(crate) const WELL_KNOWN_CLAUDE: &[&str] = &[
+    "~/.local/bin/claude",
+    "~/.claude/local/claude",
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+];
+#[cfg(unix)]
+pub(crate) const WELL_KNOWN_AUGGIE: &[&str] =
+    &["/opt/homebrew/bin/auggie", "/usr/local/bin/auggie"];
+
+/// Resolve `binary` like [`gh_binary`] does (login shell `command -v`, then
+/// `well_known`), for the AI agents. Not cached: the user may install the
+/// CLI while Argus runs, and a run spawns rarely.
+#[cfg(unix)]
+pub(crate) fn resolve_binary(binary: &str, well_known: &[&str]) -> Option<String> {
+    shell_stdout(&command_exists_query(binary))
+        .and_then(|out| parse_binary_path(&out))
+        .or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let expanded: Vec<std::path::PathBuf> = well_known
+                .iter()
+                .map(|p| match p.strip_prefix("~/") {
+                    Some(rest) if !home.is_empty() => Path::new(&home).join(rest),
+                    _ => Path::new(p).to_path_buf(),
+                })
+                .collect();
+            first_existing(expanded.iter().map(|p| p.as_path()))
+        })
+}
+
+/// Windows: the first path `where` prints.
+#[cfg(windows)]
+pub(crate) fn resolve_binary(binary: &str, _well_known: &[&str]) -> Option<String> {
+    shell_stdout(&command_exists_query(binary)).and_then(|out| {
+        out.lines()
+            .map(str::trim)
+            .find(|l| Path::new(l).is_absolute())
+            .map(str::to_string)
+    })
+}
+
+/// The login shell's `PATH`, so an agent CLI started from a Finder-launched
+/// Argus still finds what its shebang needs (`node` under nvm/Homebrew).
+/// `None` on Windows (its PATH is process-wide) or when the shell fails.
+/// Read once, like [`gh_binary`].
+pub(crate) fn login_path() -> Option<&'static str> {
+    static LOGIN_PATH: OnceLock<Option<String>> = OnceLock::new();
+    LOGIN_PATH
+        .get_or_init(|| {
+            #[cfg(unix)]
+            {
+                shell_stdout("printf '%s\\n' \"$PATH\"")
+                    .and_then(|out| out.lines().last().map(|l| l.trim().to_string()))
+                    .filter(|p| !p.is_empty())
+            }
+            #[cfg(windows)]
+            {
+                None
+            }
+        })
+        .as_deref()
 }
 
 #[cfg(test)]
