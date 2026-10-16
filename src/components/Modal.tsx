@@ -1,9 +1,18 @@
-/** A small, accessible modal dialog (overlay + centered card). */
+/**
+ * A small, accessible modal dialog (overlay + centered card): the focus
+ * moves in on open, Tab and Shift+Tab stay inside, and the focus goes back
+ * to what had it when the dialog closes.
+ */
 
 import { useEffect, useRef } from "react";
-import type { ReactNode, RefObject } from "react";
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  ReactNode,
+  RefObject,
+} from "react";
 import { createPortal } from "react-dom";
 
+import { activeElement, focusables } from "../lib/focusables";
 import { MOTION, usePresence } from "../lib/motion";
 import { CloseIcon } from "./icons";
 import styles from "./Modal.module.css";
@@ -46,6 +55,16 @@ export function Modal({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  // Give the focus back to what had it before the dialog opened (if it is
+  // still there; the dialog may have removed it).
+  useEffect(() => {
+    if (!open) return;
+    const back = activeElement();
+    return () => {
+      if (back?.isConnected) back.focus({ preventScroll: true });
+    };
+  }, [open]);
+
   // Focus the card only when the dialog *opens* — keyed on `open` (and its
   // mount), not `onClose`, so an unstable `onClose` (a fresh closure each
   // render of the parent) can't re-fire this and steal focus mid-typing.
@@ -62,6 +81,28 @@ export function Modal({
   }, [open, mounted]);
 
   if (!mounted) return null;
+
+  // Tab and Shift+Tab wrap inside the card: nothing behind a modal dialog
+  // takes the focus.
+  const trapTab = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== "Tab") return;
+    const card = cardRef.current;
+    const stops = focusables(card);
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    const at = document.activeElement;
+    if (!first || !last) {
+      e.preventDefault();
+      return;
+    }
+    if (e.shiftKey && (at === first || at === card)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && at === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  };
 
   // Portal to <body>: a caller inside a transformed/overflow-clipped ancestor
   // (a file pane) would otherwise clip or re-anchor `position: fixed`.
@@ -83,6 +124,7 @@ export function Modal({
         aria-label={title}
         tabIndex={-1}
         style={{ width }}
+        onKeyDown={trapTab}
       >
         <header className={`${styles.header} ${styles[tone]}`}>
           <h2 className={styles.title}>{title}</h2>

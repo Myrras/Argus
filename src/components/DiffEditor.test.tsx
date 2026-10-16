@@ -12,7 +12,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import type { StoredThread } from "../ipc/types";
@@ -108,7 +108,7 @@ describe("DiffEditor", () => {
       ),
     );
     // The gutter is aria-hidden (CodeMirror's); the keyboard path is the
-    // Comment-on-line key.
+    // code's own ↑/↓ + Enter and the Comment-on-line key.
     const at = (n: number) =>
       container.querySelector<HTMLElement>(`[data-comment-line="${n}"]`)!;
     expect(at(1)).toBeNull();
@@ -269,5 +269,53 @@ describe("DiffEditor", () => {
         ),
       );
     });
+  });
+  it("picks a line and comments on it from the keyboard", async () => {
+    const onComment = vi.fn();
+    function Keyed() {
+      const [focus, setFocus] = useState<{
+        side: "a" | "b";
+        line: number;
+      } | null>(null);
+      return (
+        <DiffEditor
+          path="src/lib.rs"
+          original={original}
+          modified={modified}
+          layout="unified"
+          placements={[]}
+          renderThread={() => null}
+          comment={{
+            lines: { a: new Set<number>(), b: new Set([2, 3]) },
+            selection: null,
+            focus,
+            onComment,
+            onFocusLine: (side, line) => setFocus({ side, line }),
+          }}
+        />
+      );
+    }
+    const { container } = render(<Keyed />);
+    const content = container.querySelector<HTMLElement>(".cm-content")!;
+    // A Tab stop with a name that says what the keys do.
+    expect(content).toHaveAttribute("tabindex", "0");
+    expect(content.getAttribute("aria-label")).toContain("src/lib.rs");
+    content.focus();
+    fireEvent.keyDown(content, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(container.querySelector(".cm-argusFocusedLine")).not.toBeNull(),
+    );
+    // Line 1 is not commentable: Enter does nothing there.
+    fireEvent.keyDown(content, { key: "Enter" });
+    expect(onComment).not.toHaveBeenCalled();
+    fireEvent.keyDown(content, { key: "ArrowDown" });
+    await waitFor(() =>
+      expect(container.querySelector(".cm-argusFocusedLine")?.textContent).toBe(
+        "fn b2() {}",
+      ),
+    );
+    const enter = fireEvent.keyDown(content, { key: "Enter" });
+    expect(enter).toBe(false);
+    expect(onComment).toHaveBeenCalledWith("b", 2, 2, false);
   });
 });

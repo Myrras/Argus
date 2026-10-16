@@ -18,7 +18,9 @@
  * only (hover to see it). A click opens a comment on that line, shift-click
  * extends the open one, a drag over the gutter selects a range; the caller
  * clamps a range to one hunk. A click in the code marks the "focused" line
- * the Comment-on-line key (c) comments on. The unified view shows the head,
+ * the Comment-on-line key (c) comments on. From the keyboard: the code is a
+ * Tab stop, ↑/↓ move the focused line, Enter comments on it (Shift+Enter
+ * extends the open comment). The unified view shows the head,
  * so its "+" is on new-side lines; old-side lines are commented on in the
  * side-by-side view.
  */
@@ -345,6 +347,14 @@ const commentGutter: Extension = [
     ".cm-argusFocusedLine": {
       boxShadow: "inset 2px 0 0 var(--border-strong)",
     },
+    // Keyboard line picking: the code has the focus, its line is marked.
+    "&.cm-focused .cm-argusFocusedLine": {
+      boxShadow: "inset var(--focus-ring-width) 0 0 var(--focus-ring)",
+    },
+    "&.cm-focused .cm-content": {
+      outline: "var(--focus-ring-width) solid var(--focus-ring)",
+      outlineOffset: "calc(-1 * var(--focus-ring-width))",
+    },
     ".cm-argusThreads": {
       padding: "2px 0",
       position: "sticky",
@@ -443,9 +453,42 @@ function listenForComments(
     if (pos === null) return;
     get()?.onFocusLine(side, view.state.doc.lineAt(pos).number);
   };
+  // The keyboard path to the "+": ↑/↓ pick a line, Enter comments on it.
+  const onKey = (e: KeyboardEvent) => {
+    // Keys in a block's field or button are theirs.
+    if (e.target !== view.contentDOM || e.altKey || e.metaKey || e.ctrlKey) {
+      return;
+    }
+    const c = get();
+    if (!c) return;
+    const doc = view.state.doc;
+    const cur = c.focus?.side === side ? c.focus.line : null;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      const start = doc.lineAt(view.viewport.from).number;
+      const next = Math.min(
+        doc.lines,
+        Math.max(1, cur === null ? start : cur + step),
+      );
+      e.preventDefault();
+      c.onFocusLine(side, next);
+      view.dispatch({
+        effects: EditorView.scrollIntoView(doc.line(next).from, {
+          y: "nearest",
+        }),
+      });
+      return;
+    }
+    if (e.key === "Enter" && cur !== null && c.lines[side].has(cur)) {
+      e.preventDefault();
+      c.onComment(side, cur, cur, e.shiftKey);
+    }
+  };
   view.dom.addEventListener("mousedown", onDown);
+  view.contentDOM.addEventListener("keydown", onKey);
   return () => {
     view.dom.removeEventListener("mousedown", onDown);
+    view.contentDOM.removeEventListener("keydown", onKey);
     window.removeEventListener("mouseup", onUp);
   };
 }
@@ -539,6 +582,11 @@ export function DiffEditor({
       language.current.of([]),
       blockField,
       commentGutter,
+      // A Tab stop for the keyboard line picking.
+      EditorView.contentAttributes.of({
+        tabindex: "0",
+        "aria-label": `${path}: arrow keys pick a line, Enter comments on it`,
+      }),
     ];
     let merge: MergeView | null = null;
     let unified: EditorView | null = null;
@@ -635,6 +683,7 @@ export function DiffEditor({
       const info = infoFor(comment, sides[i]);
       v.dispatch({ effects: setComment.of(info) });
       if (info.selection) uncollapseAt(v, sides[i], [info.selection.from]);
+      if (info.focus !== null) uncollapseAt(v, sides[i], [info.focus]);
     });
   }, [comment, original, modified, layout]);
 

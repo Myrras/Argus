@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { Modal } from "./Modal";
@@ -50,5 +50,41 @@ describe("Modal", () => {
       </Modal>,
     );
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+  it("keeps Tab inside and gives the focus back on close", async () => {
+    const opener = document.createElement("button");
+    opener.textContent = "open it";
+    document.body.appendChild(opener);
+    opener.focus();
+    const view = (open: boolean) => (
+      <Modal
+        open={open}
+        title="Hello"
+        onClose={() => {}}
+        footer={<button type="button">Last</button>}
+      >
+        <input aria-label="Field" />
+      </Modal>
+    );
+    const { rerender } = render(view(true));
+    const close = screen.getByRole("button", { name: "Close dialog" });
+    const last = screen.getByRole("button", { name: "Last" });
+    // From the last control Tab wraps to the first, Shift+Tab back.
+    last.focus();
+    fireEvent.keyDown(last, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(last).toHaveFocus();
+    // The card itself (focused on open) wraps to the last on Shift+Tab.
+    screen.getByRole("dialog").focus();
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Tab",
+      shiftKey: true,
+    });
+    expect(last).toHaveFocus();
+    rerender(view(false));
+    await act(async () => {});
+    expect(opener).toHaveFocus();
+    opener.remove();
   });
 });

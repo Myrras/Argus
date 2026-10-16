@@ -19,7 +19,7 @@ when it merges.
   counts: Needs review, Needs re-review, Waiting on author, and Closed without
   my approval. Each item shows its platform, repository and number, title,
   author and age; right-click one to open it, copy its link or mark its round
-  reviewed. The window has the same floating-panel look as Podium and Iris,
+  reviewed (the menu also works with the arrow keys). The window has the same floating-panel look as Podium and Iris,
   with a resizable sidebar and dark, light and retro themes.
 - Review rounds: Argus remembers where you last reviewed each item. Items that
   need another look say why (new commits, the author replied, or your review
@@ -49,7 +49,8 @@ when it merges.
   Conversation and the files, `v` marks the selected file viewed.
 - Commenting from the diff: hover a line to see its `+` (only on lines the
   platform accepts a comment on), click it to write a comment under the
-  line, or shift-click or drag to comment on a range. The comment box takes
+  line, or shift-click or drag to comment on a range. From the keyboard,
+  `Tab` into a diff, pick a line with `↑`/`↓` and press `Enter`. The comment box takes
   markdown and has a Preview. "Add to review" keeps it as a pending comment
   (shown under its line, editable and deletable, and kept when Argus
   restarts); "Comment now" posts just that one. The review header counts
@@ -143,7 +144,8 @@ when it merges.
 - `?` shows all keyboard shortcuts and where they work.
 - Refresh is now ⇧R (or ⌘R / Ctrl+R): plain `r` replies to the focused
   thread. If you set your own Refresh key, it still works.
-- Dialogs now focus their contents when they open.
+- Dialogs now focus their contents when they open, keep `Tab` inside, and
+  give the focus back when they close.
 
 ## [0.1.0] - 2026-10-16
 
