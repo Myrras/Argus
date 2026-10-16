@@ -1,0 +1,278 @@
+/* A thread's then/now code and its timeline (M3), inside a thread card. */
+
+/* --- Then / now ---------------------------------------------------------- */
+
+.thenNow {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.status {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.status[data-tone="accent"] {
+  color: var(--accent);
+}
+
+.status[data-tone="warning"] {
+  color: var(--warning);
+}
+
+.notice {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+
+.notice[role="alert"] {
+  color: var(--danger);
+}
+
+.notice button {
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+/* Side by side; stacked once the card is narrow. */
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-2);
+}
+
+@container (max-width: 520px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.columnHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  height: 24px;
+  padding: 0 var(--sp-2);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.side {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sha {
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.code {
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.footnote {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* The rows until CodeMirror is in: the same metrics as its column. */
+.plain {
+  padding: 6px 0;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.plainLine {
+  display: flex;
+  white-space: pre;
+}
+
+.plainLine[data-kind="del"] {
+  background: var(--diff-del-bg);
+}
+
+.plainLine[data-kind="add"] {
+  background: var(--diff-add-bg);
+}
+
+.plainLine[data-kind="pad"] {
+  background: var(--surface-2);
+}
+
+.plainLine[data-anchored="true"] {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.num {
+  flex-shrink: 0;
+  min-width: 28px;
+  padding: 0 6px 0 8px;
+  text-align: right;
+  color: var(--text-faint);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.text {
+  padding: 0 10px;
+}
+
+/* --- Timeline ------------------------------------------------------------ */
+
+.timeline {
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-2);
+}
+
+/* The line of time behind the dots. */
+.timeline::before {
+  content: "";
+  position: absolute;
+  top: var(--sp-3);
+  bottom: var(--sp-3);
+  left: calc(var(--sp-2) + 10px);
+  width: 1px;
+  background: var(--border-strong);
+}
+
+.entry {
+  position: relative;
+  display: flex;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+}
+
+.dot {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.entry[data-kind="commit"] .dot {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+}
+
+.entry[data-kind="resolved"] .dot {
+  color: var(--success);
+}
+
+.entry[data-kind="unresolved"] .dot {
+  color: var(--warning);
+}
+
+.event {
+  flex: 1;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-sm);
+}
+
+.author {
+  font-weight: 600;
+}
+
+.age {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.noteBody {
+  min-width: 0;
+}
+
+.entry[data-system="true"] .noteBody {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: var(--fs-sm);
+}
+
+.body[data-folded="true"] {
+  max-height: 14em;
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, var(--text) 70%, transparent);
+}
+
+.more {
+  height: 22px;
+  margin-top: 2px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--accent);
+}
+
+.commitSha {
+  color: var(--accent);
+  font-size: var(--fs-xs);
+}
+
+.commitTitle {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.commitInfo,
+.stateText {
+  color: var(--text-muted);
+}

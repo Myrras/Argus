@@ -5,7 +5,8 @@
  * refresh, switch lists) and, while a review is open, the review view's keys
  * (next/previous stop — Conversation, then the files — toggle viewed, and
  * comment on the focused line, which only opens a composer: nothing posts
- * from a shortcut outside a composer).
+ * from a shortcut outside a composer; and the then/now of the thread last
+ * clicked).
  * Those are ignored while typing in a field or inside a dialog.
  *
  * It also swallows the browser's own shortcuts (reload, print, find, save):
@@ -17,6 +18,7 @@ import { useEffect } from "react";
 import { TABS } from "./reviews";
 import { useCodeViewStore } from "../state/codeViewStore";
 import { useCommentStore } from "../state/commentStore";
+import { useHistoryStore } from "../state/historyStore";
 import { useReviewStore } from "../state/reviewStore";
 import {
   findAction,
@@ -83,6 +85,9 @@ function runFilesAction(action: ActionId): boolean {
     case "commentLine":
       // The line last clicked in a diff; nothing to do without one.
       return useCommentStore.getState().commentOnFocus(review);
+    case "toggleThenNow":
+      // The thread last clicked; nothing to do without one.
+      return useHistoryStore.getState().toggleFocused(review);
     default:
       return false;
   }
