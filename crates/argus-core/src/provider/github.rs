@@ -379,6 +379,39 @@ impl ReviewProvider for GithubProvider {
             }
         }
     }
+    // --- M3: thread history ---
+
+    /// `commits/{sha}` pages its `files` (`--paginate` prints one object per
+    /// page); the first parent comes with the first page.
+    fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
+        check_sha(sha)?;
+        let out = self.run(&[
+            "api",
+            "--paginate",
+            &format!("repos/{}/commits/{sha}?per_page=100", r.repo),
+        ])?;
+        let mut parent: Option<String> = None;
+        let mut files = Vec::new();
+        for page in serde_json::Deserializer::from_str(&out).into_iter::<GhCommitDiff>() {
+            let page = page.map_err(|_| unexpected())?;
+            if parent.is_none() {
+                parent = Some(
+                    page.parents
+                        .into_iter()
+                        .next()
+                        .map(|p| p.sha)
+                        .unwrap_or_default(),
+                );
+            }
+            files.extend(page.files);
+        }
+        Ok(FileDiff {
+            base_sha: parent.unwrap_or_default(),
+            head_sha: sha.to_string(),
+            truncated: files.len() >= PULL_FILES_LIMIT,
+            files: files.into_iter().map(changed_file).collect(),
+        })
+    }
 }
 
 /// One entry of `pulls/{n}/files` or a compare's `files`. GitHub leaves the
@@ -765,6 +798,15 @@ struct GhCompare {
 struct GhContent {
     content: Option<String>,
     encoding: Option<String>,
+}
+
+/// One page of `commits/{sha}` (M3).
+#[derive(Deserialize)]
+struct GhCommitDiff {
+    #[serde(default)]
+    parents: Vec<GhRef>,
+    #[serde(default)]
+    files: Vec<GhFile>,
 }
 
 #[cfg(test)]

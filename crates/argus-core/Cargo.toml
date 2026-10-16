@@ -24,6 +24,9 @@ base64 = "0.22"
 # Local review state. `bundled` compiles SQLite in, so no system library is
 # needed on macOS or Windows.
 rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+# The then/now line diff of thread history. 2.x: 3.x needs Rust 1.85, the
+# workspace targets 1.82.
+similar = "2.7"
 
 # Linux: the GitLab token goes in the Secret Service over D-Bus, as in Podium.
 [target.'cfg(target_os = "linux")'.dependencies]

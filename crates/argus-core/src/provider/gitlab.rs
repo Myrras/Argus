@@ -22,6 +22,7 @@ use super::model::{
 };
 use super::{count_patch, digest, encode_segment, first_line, looks_binary, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
+use crate::history::ThreadResolution;
 
 const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
 
@@ -419,6 +420,54 @@ impl ReviewProvider for GitlabProvider {
                 })
             }
         }
+    }
+    // --- M3: thread history ---
+
+    fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
+        check_sha(sha)?;
+        let diffs: Vec<GlDiff> = self.get_all(&format!(
+            "/projects/{}/repository/commits/{sha}/diff",
+            encode_segment(&r.repo)
+        ))?;
+        Ok(FileDiff {
+            // The diff endpoint names no parent.
+            base_sha: String::new(),
+            head_sha: sha.to_string(),
+            truncated: diffs.len() >= (PER_PAGE * MAX_PAGES) as usize,
+            files: diffs.into_iter().map(|d| changed_file(d, sha)).collect(),
+        })
+    }
+
+    /// GitLab keeps only the current resolution: a resolved discussion's
+    /// latest `resolved_at` and who did it. A discussion resolved on an
+    /// instance that does not send `resolved_at` has no time and is left
+    /// out.
+    fn thread_resolutions(&self, r: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
+        let discussions: Vec<GlResolveDiscussion> =
+            self.get_all(&format!("{}/discussions", Self::mr_path(r)))?;
+        Ok(discussions
+            .into_iter()
+            .filter_map(|d| {
+                let notes: Vec<&GlResolveNote> = d.notes.iter().filter(|n| n.resolvable).collect();
+                if notes.is_empty() || !notes.iter().all(|n| n.resolved) {
+                    return None;
+                }
+                let last = notes
+                    .iter()
+                    .filter(|n| n.resolved_at.is_some())
+                    .max_by_key(|n| n.resolved_at)?;
+                Some(ThreadResolution {
+                    thread_id: d.id.clone(),
+                    resolved: true,
+                    by: last
+                        .resolved_by
+                        .as_ref()
+                        .map(|u| u.username.clone())
+                        .unwrap_or_default(),
+                    at: last.resolved_at?,
+                })
+            })
+            .collect())
     }
 }
 
@@ -852,6 +901,25 @@ struct GlCompare {
 struct GlDiscussion {
     id: String,
     notes: Vec<GlNote>,
+}
+
+/// A discussion as read for its resolve events (M3).
+#[derive(Deserialize)]
+struct GlResolveDiscussion {
+    id: String,
+    notes: Vec<GlResolveNote>,
+}
+
+#[derive(Deserialize)]
+struct GlResolveNote {
+    #[serde(default)]
+    resolvable: bool,
+    #[serde(default)]
+    resolved: bool,
+    #[serde(default)]
+    resolved_by: Option<GlUser>,
+    #[serde(default)]
+    resolved_at: Option<DateTime<Utc>>,
 }
 
 #[cfg(test)]

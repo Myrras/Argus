@@ -61,6 +61,31 @@ pub trait ReviewProvider: Send + Sync {
 
     // M4: post_comment(&self, r, c: &NewComment) -> CoreResult<PostedComment>,
     // reply(&self, r, thread: &str, body) and approve(&self, r) go here.
+
+    // --- M3: thread history ---
+
+    /// What commit `sha` changed, against its first parent (the thread
+    /// history's line walk). GitHub `repos/{o}/{r}/commits/{sha}` (`files`,
+    /// up to 3000; `base_sha` is the first parent); GitLab
+    /// `repository/commits/:sha/diff` (`base_sha` empty: it sends no
+    /// parent). `head_sha` is `sha`. The default is for providers without
+    /// commit diffs (test doubles).
+    fn commit_diff(&self, _r: &ReviewRef, _sha: &str) -> CoreResult<FileDiff> {
+        Err(crate::error::CoreError::Provider(
+            "commit diffs are not available for this provider".into(),
+        ))
+    }
+
+    /// The resolve events of the review's threads, as far as the platform
+    /// reports them: GitLab the current resolution of each resolved
+    /// discussion (`resolved_by`, `resolved_at`); GitHub's REST API has
+    /// none, so the default (nothing) stands there.
+    fn thread_resolutions(
+        &self,
+        _r: &ReviewRef,
+    ) -> CoreResult<Vec<crate::history::ThreadResolution>> {
+        Ok(Vec::new())
+    }
 }
 
 /// The providers `settings` turns on: GitHub unless disabled, GitLab when a
