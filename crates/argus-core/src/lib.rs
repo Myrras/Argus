@@ -20,11 +20,13 @@
 //! - [`poll`] — refresh and the background loop.
 //! - [`files`] — the code view's file list and viewed marks.
 //! - [`post`] — posting comments, replies and approvals (explicit only).
+//! - [`history`] — then/now thread history: line walk, snapshots, timeline.
 
 #![forbid(unsafe_code)]
 
 pub mod error;
 pub mod files;
+pub mod history;
 pub mod ids;
 mod platform;
 pub mod poll;
@@ -45,6 +47,7 @@ use chrono::Utc;
 
 pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
+pub use history::{LineStatus, ThreadHistory};
 pub use ids::{ReviewId, ThreadId};
 pub use poll::{RefreshError, RefreshReport};
 pub use post::{

@@ -48,6 +48,8 @@ case "$*" in
   "api --paginate repos/acme-fixture/gadgets/pulls/7/reviews?per_page=100") cat "$F/pull_7_reviews.json" ;;
   "api repos/acme-fixture/widgets/contents/src/cache.rs?ref=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3") cat "$F/contents_cache.json" ;;
   "api repos/acme-fixture/widgets/contents/big.bin?ref=c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3") cat "$F/contents_big.json" ;;
+  "api --paginate repos/acme-fixture/widgets/commits/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2?per_page=100")
+    cat "$F/commit_c2_page1.json" "$F/commit_c2_page2.json" ;;
   *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
 esac
 "#;
@@ -442,4 +444,45 @@ fn auth_status_checks_gh_locally() {
             logged_in: false
         }
     );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn commit_diff_reads_every_page_and_the_first_parent() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let sha = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2";
+    let diff = gh.commit_diff(&widgets_12(), sha).unwrap();
+    assert_eq!(diff.base_sha, "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1");
+    assert_eq!(diff.head_sha, sha);
+    assert!(!diff.truncated);
+    let files: Vec<(&str, FileStatus)> = diff
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.status))
+        .collect();
+    // The second page's file is there too.
+    assert_eq!(
+        files,
+        [
+            ("src/cache.rs", FileStatus::Modified),
+            ("src/new_name.rs", FileStatus::Renamed),
+            ("src/legacy.rs", FileStatus::Removed),
+        ]
+    );
+    assert!(diff.files[0]
+        .patch
+        .as_deref()
+        .unwrap()
+        .starts_with("@@ -0,0"));
+    // A pure rename: no patch, and neither binary nor too large.
+    let rename = &diff.files[1];
+    assert_eq!(rename.old_path.as_deref(), Some("src/old_name.rs"));
+    assert!(rename.patch.is_none() && !rename.binary && !rename.too_large);
+    // GitHub's REST API has no resolve events.
+    assert!(gh.thread_resolutions(&widgets_12()).unwrap().is_empty());
+    assert!(matches!(
+        gh.commit_diff(&widgets_12(), "--x"),
+        Err(CoreError::InvalidInput(_))
+    ));
 }

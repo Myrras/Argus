@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::error::{CoreError, CoreResult};
 use crate::ids::ReviewId;
 use crate::provider::{ProviderId, ReviewDetail, ReviewProvider, ReviewRef, ReviewState, Thread};
-use crate::review::advance;
+use crate::review::advance_with;
 use crate::store::{ReviewRecord, Store};
 
 /// How many reviews of one provider are fetched at the same time.
@@ -191,7 +191,12 @@ pub(crate) fn persist(
     listed: bool,
     now: DateTime<Utc>,
 ) -> CoreResult<bool> {
-    let mut next = advance(prev, detail, threads, me, listed, now);
+    // The cached line walks at this head sharpen the untouched count; none
+    // (or a failed read) falls back to the approximation.
+    let touches = store
+        .line_touches(detail.review.id(), &detail.head_sha)
+        .ok();
+    let mut next = advance_with(prev, detail, threads, me, listed, now, touches.as_ref());
     next.fingerprint = fingerprint(detail, threads);
     let changed = match prev {
         Some(p) => {
