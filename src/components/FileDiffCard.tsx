@@ -13,6 +13,10 @@
  * (`commentable_lines`, cached) and get the gutter's "+"; a click opens the
  * composer under the line (`commentStore`). Pending comments show under
  * their lines (or at the top, when their line is not in this view).
+ *
+ * AI findings (`aiStore`) sit under their line like threads
+ * (`FindingBlock`), or under "AI findings on this file" when their line is
+ * not in the diff shown; dismissed ones only with "Show dismissed".
  */
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -43,7 +47,10 @@ import {
   useDrafts,
   type CommentTarget,
 } from "../state/commentStore";
+import { findingPlacement } from "../lib/findings";
+import { useAiStore, useFindings } from "../state/aiStore";
 import { DraftBlock, InlineComposer } from "./CommentBlocks";
+import { FindingBlock } from "./FindingBlock";
 import type { CommentGutter, LineItem } from "./DiffEditor";
 import type { DiffLayout } from "../state/layoutStore";
 import { Badge } from "./Badge";
@@ -109,6 +116,18 @@ export function FileDiffCard({
     if (viewedRef.current !== f.viewed) setCollapsed(f.viewed);
     viewedRef.current = f.viewed;
   }, [f.viewed]);
+
+  // Revealing one of its AI findings opens a folded card.
+  const revealSeq = useAiStore((s) =>
+    s.reveal?.path === f.path ? s.reveal.seq : null,
+  );
+  const seenReveal = useRef(revealSeq);
+  useEffect(() => {
+    if (revealSeq !== null && revealSeq !== seenReveal.current) {
+      setCollapsed(false);
+    }
+    seenReveal.current = revealSeq;
+  }, [revealSeq]);
 
   // Near the viewport? Without IntersectionObserver (tests), always.
   useEffect(() => {
@@ -357,6 +376,55 @@ export function FileDiffCard({
     hasComposer,
   ]);
 
+  // -- AI findings ------------------------------------------------------------
+  const allFindings = useFindings(reviewId);
+  const showDismissed = useAiStore((s) => s.showDismissed);
+  const shownDiff =
+    !f.binary && (!large || forced) && contents.state !== "error";
+  const { findingItems, unplacedFindings } = useMemo(() => {
+    const out: LineItem[] = [];
+    const rest: string[] = [];
+    for (const x of allFindings) {
+      if (x.path !== f.path || (x.dismissed && !showDismissed)) continue;
+      const at = findingPlacement(x, docLines, review.sinceLastReview);
+      // While the diff loads, a finding waits for it rather than flashing
+      // in the list at the top.
+      if (!at) {
+        if (ready || !shownDiff) rest.push(x.id);
+        continue;
+      }
+      out.push({
+        key: `finding:${x.id}`,
+        side: at.side,
+        line: at.line,
+        render: (onResize) => (
+          <FindingBlock
+            reviewId={reviewId}
+            findingId={x.id}
+            onResize={onResize}
+          />
+        ),
+      });
+    }
+    return { findingItems: out, unplacedFindings: rest };
+    // `docLines` is rebuilt each render; its numbers are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    allFindings,
+    showDismissed,
+    f.path,
+    reviewId,
+    review.sinceLastReview,
+    docLines.a,
+    docLines.b,
+    ready,
+    shownDiff,
+  ]);
+  const lineItems = useMemo(
+    () => (findingItems.length ? [...items, ...findingItems] : items),
+    [items, findingItems],
+  );
+
   const renderThread = (t: StoredThread, onResize: () => void) => (
     <ThreadBlock thread={t} provider={provider} now={now} onResize={onResize} />
   );
@@ -447,6 +515,24 @@ export function FileDiffCard({
               ))}
             </div>
           )}
+          {unplacedFindings.length > 0 && (
+            <div className={styles.listed}>
+              <h3 className={styles.listedTitle}>
+                AI findings on this file{" "}
+                <span className={styles.listedCount}>
+                  {unplacedFindings.length}
+                </span>
+              </h3>
+              {unplacedFindings.map((id) => (
+                <FindingBlock
+                  key={id}
+                  reviewId={reviewId}
+                  findingId={id}
+                  listed
+                />
+              ))}
+            </div>
+          )}
           {listed.length > 0 && (
             <div className={styles.listed}>
               <h3 className={styles.listedTitle}>
@@ -491,7 +577,7 @@ export function FileDiffCard({
                 layout={layout}
                 placements={fitted.fit}
                 renderThread={renderThread}
-                items={items}
+                items={lineItems}
                 comment={comment}
               />
             </Suspense>
