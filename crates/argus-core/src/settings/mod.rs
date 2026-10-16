@@ -78,6 +78,9 @@ pub struct AiSettings {
     pub adapter: String,
     /// Extra CLI arguments for the agent.
     pub args: Vec<String>,
+    /// The agent binary's path; `None` (or blank) finds the adapter's CLI
+    /// through the login shell, like `gh`.
+    pub binary: Option<String>,
 }
 
 impl Default for AiSettings {
@@ -86,6 +89,7 @@ impl Default for AiSettings {
             enabled: true,
             adapter: "claude".into(),
             args: Vec::new(),
+            binary: None,
         }
     }
 }

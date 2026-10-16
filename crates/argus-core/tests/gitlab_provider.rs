@@ -79,6 +79,11 @@ fn fixture_routes(path: &str) -> Reply {
                 }
             }
         }
+        "/api/v4/projects/grp%2Fapp/repository/commits/a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2/diff"
+            if query.contains("page=1") =>
+        {
+            ok("commit_a2_diff.json")
+        }
         "/api/v4/projects/grp%2Fapp/repository/compare"
             if query
                 == "from=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
@@ -503,4 +508,43 @@ fn refresh_end_to_end_through_the_core() {
         core.list_files(r21.id, true),
         Err(CoreError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn commit_diff_and_resolve_events() {
+    let (base, seen) = serve(fixture_routes);
+    let gl = provider(&base);
+    let r = mr_ref(&base, 21);
+    let diff = gl.commit_diff(&r, HEAD_SHA).unwrap();
+    // The diff endpoint names no parent.
+    assert_eq!(
+        (diff.base_sha.as_str(), diff.head_sha.as_str()),
+        ("", HEAD_SHA)
+    );
+    let files: Vec<(&str, FileStatus)> = diff
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.status))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("src/importer.rs", FileStatus::Modified),
+            ("src/new_name.rs", FileStatus::Renamed),
+            ("src/old_import.rs", FileStatus::Removed),
+        ]
+    );
+    assert_eq!(diff.files[1].old_path.as_deref(), Some("src/old_name.rs"));
+    assert!(diff.files[1].patch.is_none());
+    assert!(seen.lock().unwrap().iter().any(|l| l.contains(
+        "/repository/commits/a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2/diff?per_page=100&page=1 "
+    )));
+
+    // d2 is the one resolved discussion; only it has an event.
+    let events = gl.thread_resolutions(&r).unwrap();
+    assert_eq!(events.len(), 1);
+    let e = &events[0];
+    assert!(e.thread_id.starts_with("d2") && e.resolved);
+    assert_eq!(e.by, "alice-fixture");
+    assert_eq!(e.at.to_rfc3339(), "2026-10-09T15:00:00+00:00");
 }

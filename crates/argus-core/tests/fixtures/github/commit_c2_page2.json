@@ -1,0 +1,22 @@
+{
+  "sha": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+  "commit": {
+    "message": "Make the TTL configurable",
+    "author": { "name": "Alice Fixture", "date": "2026-10-09T09:00:00Z" }
+  },
+  "author": { "login": "alice-fixture" },
+  "parents": [
+    { "sha": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" }
+  ],
+  "files": [
+    {
+      "sha": "f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3f3",
+      "filename": "src/legacy.rs",
+      "status": "removed",
+      "additions": 0,
+      "deletions": 2,
+      "changes": 2,
+      "patch": "@@ -1,2 +0,0 @@\n-// legacy\n-pub fn old() {}"
+    }
+  ]
+}

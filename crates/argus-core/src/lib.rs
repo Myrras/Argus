@@ -20,11 +20,15 @@
 //! - [`poll`] — refresh and the background loop.
 //! - [`files`] — the code view's file list and viewed marks.
 //! - [`post`] — posting comments, replies and approvals (explicit only).
+//! - [`history`] — then/now thread history: line walk, snapshots, timeline.
+//! - [`ai`] — the AI pass: headless agent runs, findings, checklist, verdicts.
 
 #![forbid(unsafe_code)]
 
+pub mod ai;
 pub mod error;
 pub mod files;
+pub mod history;
 pub mod ids;
 mod platform;
 pub mod poll;
@@ -43,8 +47,13 @@ use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
+pub use ai::{
+    AiRunState, AiRunStatus, AiStateCallback, ChecklistId, ChecklistItem, Finding, FindingId,
+    FindingPost, FindingPostOutcome, FindingPostResult, Severity, Verdict, VerdictLabel,
+};
 pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
+pub use history::{LineStatus, ThreadHistory};
 pub use ids::{ReviewId, ThreadId};
 pub use poll::{RefreshError, RefreshReport};
 pub use post::{
@@ -86,6 +95,8 @@ pub struct Core {
     /// stored head: the code view asks once per file, and every file would
     /// otherwise refetch the whole diff. Memory only.
     commentable: Mutex<Option<post::CommentableCache>>,
+    /// The AI pass' scheduler (see [`ai`]).
+    ai: ai::runtime::AiRuntime,
 }
 
 impl Default for Core {
@@ -127,14 +138,22 @@ impl Core {
         providers: Option<Vec<Arc<dyn ReviewProvider>>>,
     ) -> Self {
         let providers = providers.unwrap_or_else(|| provider::from_settings(&settings));
+        let store = Arc::new(store);
+        let ai = ai::runtime::AiRuntime::new(
+            store.clone(),
+            settings.ai.enabled,
+            Arc::new(ai::job::execute),
+            ai::MAX_CONCURRENT,
+        );
         Self {
-            store: Arc::new(store),
+            store,
             settings_path,
             settings: Mutex::new(settings),
             providers: Mutex::new(providers),
             poller: Mutex::new(None),
             content_keys: Mutex::new(HashMap::new()),
             commentable: Mutex::new(None),
+            ai,
         }
     }
 
@@ -160,6 +179,7 @@ impl Core {
             settings.save(path)?;
         }
         *self.settings.lock().expect("settings lock poisoned") = settings.clone();
+        self.ai.set_enabled(settings.ai.enabled);
         *self.providers.lock().expect("providers lock poisoned") =
             provider::from_settings(&settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();

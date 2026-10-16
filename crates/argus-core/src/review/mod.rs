@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::history::LineTouches;
 use crate::provider::{ReviewDetail, ReviewState, Thread};
 use crate::store::ReviewRecord;
 
@@ -119,7 +120,13 @@ fn is_mine(t: &Thread, me: &str) -> bool {
 /// Classify one review. Order matters: an approval hides the item whatever
 /// else happened, a closed item is closed, and only then do rounds apply.
 pub fn classify(input: &RoundInput<'_>) -> Round {
-    let untouched_threads = untouched(input);
+    classify_with(input, None)
+}
+
+/// [`classify`] with the cached line walks of the review's threads at its
+/// head, for the untouched count (see [`untouched_with`]).
+pub fn classify_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> Round {
+    let untouched_threads = untouched_with(input, touches);
     let round = |status, reasons| Round {
         status,
         reasons,
@@ -157,26 +164,40 @@ pub fn classify(input: &RoundInput<'_>) -> Round {
     }
 }
 
+/// The user's unresolved threads that look untouched, without line walks:
+/// [`untouched_with`] with none, so any new commit counts as touching every
+/// thread.
+pub fn untouched(input: &RoundInput<'_>) -> u32 {
+    untouched_with(input, None)
+}
+
 /// The user's unresolved threads that look untouched: no note from someone
 /// else since the later of the watermark and the user's own last note in
-/// the thread, and the head unchanged since the watermark (or, before any
-/// watermark, since the commit the thread was left on).
+/// the thread, and no commit since the watermark (or, before any
+/// watermark, since the commit the thread was left on) touched its lines.
 ///
-/// An M2 approximation: any new commit counts as touching every thread,
-/// because telling whether it touched the commented lines needs the line
-/// mapping that lands in M3.
-pub fn untouched(input: &RoundInput<'_>) -> u32 {
+/// Whether a commit touched the lines comes from the thread's cached line
+/// walk at the current head (`touches`, by platform thread id). Without one
+/// that can answer (none cached for this head, unlocated, rebased) the M2
+/// approximation stands: any new commit counts as touching the thread.
+pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> u32 {
     let me = input.me;
     let count = input
         .threads
         .iter()
         .filter(|t| is_mine(t, me) && !t.resolved)
         .filter(|t| {
-            let baseline = input
-                .last_reviewed_sha
-                .or(t.anchor.as_ref().map(|a| a.head_sha.as_str()))
-                .unwrap_or(input.head_sha);
-            if baseline != input.head_sha {
+            let walked = touches
+                .and_then(|m| m.get(&t.id))
+                .and_then(|lt| lt.touched_since(input.last_reviewed_sha));
+            let code_touched = walked.unwrap_or_else(|| {
+                let baseline = input
+                    .last_reviewed_sha
+                    .or(t.anchor.as_ref().map(|a| a.head_sha.as_str()))
+                    .unwrap_or(input.head_sha);
+                baseline != input.head_sha
+            });
+            if code_touched {
                 return false;
             }
             let my_last = t
@@ -216,6 +237,20 @@ pub fn advance(
     listed: bool,
     now: DateTime<Utc>,
 ) -> ReviewRecord {
+    advance_with(prev, detail, threads, me, listed, now, None)
+}
+
+/// [`advance`] with the cached line walks at the fetched head (see
+/// [`untouched_with`]).
+pub fn advance_with(
+    prev: Option<&ReviewRecord>,
+    detail: &ReviewDetail,
+    threads: &[Thread],
+    me: &str,
+    listed: bool,
+    now: DateTime<Utc>,
+    touches: Option<&LineTouches>,
+) -> ReviewRecord {
     let approved_at = if detail.approved_by_me {
         prev.and_then(|p| p.approved_at).or(Some(now))
     } else {
@@ -228,16 +263,19 @@ pub fn advance(
     };
     let last_reviewed_sha = prev.and_then(|p| p.last_reviewed_sha.clone());
     let last_reviewed_at = prev.and_then(|p| p.last_reviewed_at);
-    let round = classify(&RoundInput {
-        state: detail.state,
-        head_sha: &detail.head_sha,
-        last_reviewed_sha: last_reviewed_sha.as_deref(),
-        last_reviewed_at,
-        approved_at,
-        rerequested_at,
-        threads,
-        me,
-    });
+    let round = classify_with(
+        &RoundInput {
+            state: detail.state,
+            head_sha: &detail.head_sha,
+            last_reviewed_sha: last_reviewed_sha.as_deref(),
+            last_reviewed_at,
+            approved_at,
+            rerequested_at,
+            threads,
+            me,
+        },
+        touches,
+    );
     let prev_round = prev.map_or(1, |p| p.round);
     let entered = round.status == ReviewStatus::NeedsReReview
         && prev.is_none_or(|p| p.status != ReviewStatus::NeedsReReview);

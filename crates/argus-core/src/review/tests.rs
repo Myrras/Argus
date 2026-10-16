@@ -276,3 +276,55 @@ fn reasons_and_statuses_round_trip_their_keys() {
         assert_eq!(serde_json::to_value(s).unwrap(), s.as_str());
     }
 }
+
+#[test]
+fn untouched_threads_with_line_walks() {
+    use crate::history::{LineTouch, LineTouches};
+
+    let (r, _) = reviewed();
+    let quiet = thread("1", ME, "h1", vec![note("1", ME, at(10, 11))]);
+    let rewritten = thread("2", ME, "h1", vec![note("2", ME, at(10, 11))]);
+    let unwalked = thread("3", ME, "h1", vec![note("3", ME, at(10, 11))]);
+    let all = [quiet, rewritten, unwalked];
+    let touch = |touched_by: &[&str], usable| LineTouch {
+        then_sha: "h1".into(),
+        commits: ["h1", "h2", "h3"].map(String::from).to_vec(),
+        touched_by: touched_by.iter().map(|s| s.to_string()).collect(),
+        usable,
+    };
+    let touches: LineTouches = [
+        ("1".to_string(), touch(&[], true)),
+        ("2".to_string(), touch(&["h3"], true)),
+    ]
+    .into();
+    let input = |head: &'static str, last: Option<&'static str>| RoundInput {
+        state: ReviewState::Open,
+        head_sha: head,
+        last_reviewed_sha: last,
+        last_reviewed_at: r.last_reviewed_at,
+        approved_at: None,
+        rerequested_at: None,
+        threads: &all,
+        me: ME,
+    };
+
+    // Watermark h1, head h3: the walk says thread 1's lines were left
+    // alone; thread 2's were rewritten in h3; thread 3 has no walk and
+    // falls back to "any new commit touches it".
+    assert_eq!(untouched_with(&input("h3", Some("h1")), Some(&touches)), 1);
+    // Without walks: the M2 approximation, nothing is untouched.
+    assert_eq!(untouched(&input("h3", Some("h1"))), 0);
+    // Watermark at h3: h3's rewrite is no longer "since".
+    assert_eq!(untouched_with(&input("h3", Some("h3")), Some(&touches)), 3);
+    // A walk that cannot answer falls back as well.
+    let unusable: LineTouches = [("1".to_string(), touch(&[], false))].into();
+    assert_eq!(untouched_with(&input("h3", Some("h1")), Some(&unusable)), 0);
+    // A note from someone else still counts, walk or not.
+    let mut answered = all.clone();
+    answered[0].notes.push(note("9", AUTHOR, at(11, 9)));
+    let input = RoundInput {
+        threads: &answered,
+        ..input("h3", Some("h1"))
+    };
+    assert_eq!(untouched_with(&input, Some(&touches)), 0);
+}
