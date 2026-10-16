@@ -1,0 +1,110 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.section {
+  margin: 0;
+  padding: 0;
+  border: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.section + .section {
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--border);
+}
+
+.legend {
+  padding: 0;
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-2);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+.check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.check input:focus {
+  box-shadow: none;
+}
+
+.labelRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.tokenState {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.tokenState[data-set="true"] {
+  color: var(--success);
+}
+
+.tokenRow {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.inline label {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--fs-md);
+}
+
+.number {
+  width: 72px;
+  padding: var(--sp-1) var(--sp-2);
+}
+
+.unit {
+  color: var(--text-muted);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.error {
+  margin-right: auto;
+  font-size: var(--fs-sm);
+  color: var(--danger);
+}

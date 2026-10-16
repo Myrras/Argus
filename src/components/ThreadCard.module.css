@@ -1,0 +1,90 @@
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+/* The user's own threads carry the accent edge: they are what a round is
+   about. */
+.card[data-mine="true"] {
+  border-left: 3px solid var(--accent);
+}
+
+.card[data-resolved="true"] {
+  opacity: 0.85;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.location {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.thenNow {
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.notes {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+}
+
+.note {
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.note + .note {
+  border-top: 1px solid var(--border);
+}
+
+.noteMeta {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin-bottom: 2px;
+}
+
+.noteAuthor {
+  font-weight: 600;
+  font-size: var(--fs-sm);
+}
+
+.noteAge {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.noteBody {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  line-height: 1.5;
+}
+
+.note[data-system="true"] .noteBody {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: var(--fs-sm);
+}

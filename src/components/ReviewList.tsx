@@ -1,0 +1,151 @@
+/**
+ * The list pane: the four tabs with counts and the reviews of the current
+ * tab. Keyboard handling (↑/↓, Enter, 1–4) lives in `App`; this renders the
+ * store's cursor and selection.
+ */
+
+import { useEffect, useRef } from "react";
+
+import type { ReviewRecord } from "../ipc/types";
+import {
+  EMPTY_TAB,
+  REASON_LABEL,
+  TABS,
+  reviewRef,
+  reviewsInTab,
+  tabCounts,
+  untouchedLabel,
+} from "../lib/reviews";
+import { age, fullTime } from "../lib/time";
+import { useReviewStore } from "../state/reviewStore";
+import { Badge, PlatformBadge } from "./Badge";
+import styles from "./ReviewList.module.css";
+
+export function ReviewList({ now }: { now: number }) {
+  const reviews = useReviewStore((s) => s.reviews);
+  const loaded = useReviewStore((s) => s.loaded);
+  const tab = useReviewStore((s) => s.tab);
+  const selectedId = useReviewStore((s) => s.selectedId);
+  const cursorId = useReviewStore((s) => s.cursorId);
+  const setTab = useReviewStore((s) => s.setTab);
+  const select = useReviewStore((s) => s.select);
+
+  const counts = tabCounts(reviews);
+  const visible = reviewsInTab(reviews, tab);
+
+  return (
+    <aside className={styles.pane} aria-label="Reviews">
+      <div className={styles.tabs} role="tablist" aria-label="Review lists">
+        {TABS.map((t, i) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            id={`tab-${t.id}`}
+            aria-selected={tab === t.id}
+            aria-controls="review-list"
+            className={styles.tab}
+            title={`${t.label} (${i + 1})`}
+            onClick={() => setTab(t.id)}
+          >
+            <span className={styles.tabLabel}>{t.label}</span>
+            <span className={styles.count} data-zero={counts[t.id] === 0}>
+              {counts[t.id]}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      <div
+        id="review-list"
+        role="tabpanel"
+        aria-labelledby={`tab-${tab}`}
+        className={styles.scroll}
+      >
+        {!loaded ? (
+          <p className={styles.empty}>Loading reviews…</p>
+        ) : visible.length === 0 ? (
+          <p className={styles.empty}>{EMPTY_TAB[tab]}</p>
+        ) : (
+          <ul className={styles.list}>
+            {visible.map((r) => (
+              <ReviewItem
+                key={r.id}
+                review={r}
+                now={now}
+                selected={r.id === selectedId}
+                cursor={r.id === cursorId}
+                onSelect={() => select(r.id)}
+              />
+            ))}
+          </ul>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function ReviewItem({
+  review: r,
+  now,
+  selected,
+  cursor,
+  onSelect,
+}: {
+  review: ReviewRecord;
+  now: number;
+  selected: boolean;
+  cursor: boolean;
+  onSelect: () => void;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (cursor) ref.current?.scrollIntoView?.({ block: "nearest" });
+  }, [cursor]);
+  const untouched = untouchedLabel(r.untouchedThreads);
+  const showRound = r.status === "needsReReview";
+  return (
+    <li>
+      <button
+        ref={ref}
+        type="button"
+        className={styles.item}
+        data-selected={selected}
+        data-cursor={cursor}
+        aria-current={selected ? "true" : undefined}
+        onClick={onSelect}
+      >
+        <span className={styles.row}>
+          <PlatformBadge provider={r.provider} />
+          <span className={`${styles.ref} mono`}>{reviewRef(r)}</span>
+          {r.draft && <Badge>Draft</Badge>}
+          <span
+            className={styles.age}
+            title={fullTime(r.updatedAt ?? r.fetchedAt)}
+          >
+            {age(r.updatedAt ?? r.fetchedAt, now)}
+          </span>
+        </span>
+        <span className={styles.title}>{r.title}</span>
+        <span className={styles.row}>
+          <span className={styles.author}>{r.author}</span>
+          {r.state !== "open" && (
+            <Badge tone={r.state === "merged" ? "accent" : "neutral"}>
+              {r.state === "merged" ? "Merged" : "Closed"}
+            </Badge>
+          )}
+        </span>
+        {showRound && (
+          <span className={styles.round}>
+            {r.roundReasons.map((reason) => (
+              <Badge key={reason} tone="accent">
+                {REASON_LABEL[reason]}
+              </Badge>
+            ))}
+            {untouched && <span className={styles.untouched}>{untouched}</span>}
+          </span>
+        )}
+      </button>
+    </li>
+  );
+}

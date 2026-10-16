@@ -9,10 +9,11 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 44px;
+  height: 40px;
   flex-shrink: 0;
-  padding: 0 var(--sp-4);
+  padding: 0 var(--sp-2) 0 var(--sp-4);
   background: var(--canvas);
+  border-bottom: 1px solid var(--border);
 }
 
 .brand {
@@ -38,48 +39,48 @@
   letter-spacing: 0.01em;
 }
 
-.body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
+.controls {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: var(--sp-4);
-  background: var(--canvas);
+  gap: 2px;
 }
 
-.card {
-  max-width: 520px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-md);
-  padding: var(--sp-5);
-  text-align: center;
-  animation: cardIn var(--dur-3) var(--ease-out);
+.controls button {
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--text-muted);
 }
 
-@keyframes cardIn {
-  from {
-    opacity: 0;
-    transform: translateY(6px) scale(0.99);
+.controls button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.refreshed {
+  margin-right: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.spin[data-spinning="true"] {
+  animation: spin var(--dur-4) linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
   }
 }
 
-.cardLogo {
-  display: block;
-  margin: 0 auto var(--sp-3);
-  color: var(--accent);
+.listError {
+  padding: var(--sp-1) var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
 }
 
-.title {
-  margin: 0 0 var(--sp-2);
-  font-size: var(--fs-xl);
-  font-weight: 700;
-}
-
-.description {
-  margin: 0;
-  color: var(--text-muted);
+.body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--bg);
 }
