@@ -38,6 +38,9 @@ pub struct RefreshError {
     /// The provider cannot be used right now (`gh` missing or logged out,
     /// no GitLab token, token rejected).
     pub unavailable: bool,
+    /// Set when the platform rate-limited the provider: when Argus tries it
+    /// again. The message says so too; this is the machine-readable form.
+    pub rate_limited_until: Option<DateTime<Utc>>,
 }
 
 impl RefreshError {
@@ -47,7 +50,18 @@ impl RefreshError {
             review,
             message: e.to_string(),
             unavailable: e.is_unavailable(),
+            rate_limited_until: None,
         }
+    }
+
+    /// `e` as a provider-level error; a rate limit also carries the time
+    /// the provider names as its reset.
+    fn for_provider(provider: &dyn ReviewProvider, e: &CoreError) -> Self {
+        let mut err = Self::new(provider.id(), None, e);
+        if is_rate_limited(e) {
+            err.rate_limited_until = provider.rate_limited_until();
+        }
+        err
     }
 }
 
@@ -111,7 +125,7 @@ pub fn refresh_provider(
     now: DateTime<Utc>,
 ) -> (Vec<ReviewId>, Vec<RefreshError>) {
     let pid = provider.id();
-    let fail = |e: CoreError| (Vec::new(), vec![RefreshError::new(pid, None, &e)]);
+    let fail = |e: CoreError| (Vec::new(), vec![RefreshError::for_provider(provider, &e)]);
     if let Some(until) = provider.rate_limited_until().filter(|u| *u > now) {
         return fail(rate_limited(pid, until));
     }
@@ -198,7 +212,7 @@ pub fn refresh_provider(
         let e = provider
             .rate_limited_until()
             .map_or(e, |until| rate_limited(pid, until));
-        errors.push(RefreshError::new(pid, None, &e));
+        errors.push(RefreshError::for_provider(provider, &e));
     }
     (changed, errors)
 }

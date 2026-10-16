@@ -32,3 +32,12 @@ export function fullTime(iso: string | null): string {
   const t = new Date(iso);
   return Number.isNaN(t.getTime()) ? "" : t.toLocaleString();
 }
+
+/** Local 24-hour "HH:MM" (matches the core's rate-limit message); "" if unparseable. */
+export function clockTime(iso: string | null): string {
+  if (!iso) return "";
+  const t = new Date(iso);
+  if (Number.isNaN(t.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(t.getHours())}:${pad(t.getMinutes())}`;
+}

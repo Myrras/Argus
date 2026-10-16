@@ -146,6 +146,7 @@ mod tests {
                 review: None,
                 message: "GitLab is not set up: add its URL and a token in Settings.".into(),
                 unavailable: true,
+                rate_limited_until: None,
             }],
             refreshed_at: chrono::Utc::now(),
         };
@@ -154,5 +155,9 @@ mod tests {
         assert_eq!(json["errors"][0]["provider"], "gitlab");
         assert_eq!(json["errors"][0]["review"], serde_json::Value::Null);
         assert_eq!(json["errors"][0]["unavailable"], true);
+        assert_eq!(
+            json["errors"][0]["rateLimitedUntil"],
+            serde_json::Value::Null
+        );
     }
 }

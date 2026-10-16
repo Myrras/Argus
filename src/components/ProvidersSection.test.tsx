@@ -56,6 +56,7 @@ describe("ProvidersSection", () => {
         review: null,
         message: "The GitHub CLI (gh) is missing or not logged in.",
         unavailable: true,
+        rateLimitedUntil: null,
       },
     ]);
     expect(items.map((i) => i.key)).toEqual(["gh-missing", "gl-setup"]);
@@ -79,18 +80,21 @@ describe("ProvidersSection", () => {
             review: null,
             message: "Could not fetch reviews: timed out",
             unavailable: false,
+            rateLimitedUntil: null,
           },
           {
             provider: "gitlab",
             review: "00000000-0000-4000-8000-000000000001",
             message: "Could not fetch reviews: timed out",
             unavailable: false,
+            rateLimitedUntil: null,
           },
           {
             provider: "gitlab",
             review: "00000000-0000-4000-8000-000000000002",
             message: "not found",
             unavailable: false,
+            rateLimitedUntil: null,
           },
         ]}
         onOpenSettings={onOpenSettings}
@@ -110,5 +114,33 @@ describe("ProvidersSection", () => {
     expect(screen.getByText("Not logged in")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onOpenSettings).toHaveBeenCalled();
+  });
+
+  it("shows a rate limit as 'rate limited until HH:MM', once", () => {
+    const until = "2026-10-10T13:05:00Z";
+    const d = new Date(until);
+    const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const message =
+      "GitLab is rate limited until 99:99; Argus tries again then";
+    render(
+      <ProvidersSection
+        status={status()}
+        errors={[
+          {
+            provider: "gitlab",
+            review: null,
+            message,
+            unavailable: false,
+            rateLimitedUntil: until,
+          },
+        ]}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const item = screen.getByText(`GitLab: rate limited until ${hhmm}`);
+    expect(item).toBeInTheDocument();
+    // The core's own message stays available.
+    expect(item.closest("li")).toHaveAttribute("title", message);
+    expect(screen.queryByText(/Argus tries again/)).not.toBeInTheDocument();
   });
 });

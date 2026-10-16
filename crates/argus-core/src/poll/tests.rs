@@ -83,7 +83,13 @@ impl ReviewProvider for Fake {
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
         match self.details.lock().unwrap().get(&r.number) {
             Some(Ok(d)) => Ok(d.clone()),
-            Some(Err(e)) => Err(clone_err(e)),
+            Some(Err(e)) => {
+                // Like a real provider: a rate-limit reply starts its pause.
+                if crate::provider::is_rate_limited(e) {
+                    *self.limited.lock().unwrap() = Some(at(10, 13));
+                }
+                Err(clone_err(e))
+            }
             None => Err(CoreError::NotFound),
         }
     }
@@ -355,6 +361,10 @@ fn a_rate_limited_provider_is_skipped_until_the_reset() {
         "{}",
         e.message
     );
+    assert_eq!(e.rate_limited_until, Some(until));
+    // Only a rate limit sets it.
+    let json = serde_json::to_value(e).unwrap();
+    assert_eq!(json["rateLimitedUntil"], "2026-10-10T13:00:00Z");
 
     // Past the reset it is refreshed again.
     let report = refresh_all(&providers, &store, at(10, 14));
@@ -382,4 +392,5 @@ fn a_limit_hit_halfway_is_one_provider_error() {
     assert_eq!(report.errors.len(), 1);
     assert_eq!(report.errors[0].review, None);
     assert!(report.errors[0].message.contains("rate limited until"));
+    assert_eq!(report.errors[0].rate_limited_until, Some(until));
 }

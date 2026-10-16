@@ -298,6 +298,8 @@ export interface RefreshError {
   message: string;
   /** The provider cannot be used right now. */
   unavailable: boolean;
+  /** RFC 3339; set when the platform rate-limited the provider. */
+  rateLimitedUntil: Timestamp | null;
 }
 
 /** `poll::RefreshReport`: what one refresh did. */

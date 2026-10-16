@@ -35,6 +35,7 @@ const report = (at: string): RefreshReport => ({
       review: null,
       message: "timed out",
       unavailable: false,
+      rateLimitedUntil: null,
     },
   ],
   refreshedAt: at,
