@@ -21,6 +21,7 @@ import {
   Copy,
   ExternalLink,
   FolderTree,
+  Image,
   GitPullRequest,
   Info,
   MessageSquare,
@@ -67,6 +68,9 @@ export const CloseIcon = icon(X);
 export const CheckIcon = icon(Check);
 export const RefreshIcon = icon(RotateCw);
 export const ExternalLinkIcon = icon(ExternalLink, { size: 13 });
+export const CopyIcon = icon(Copy, { size: 12 });
+/** An image in a comment, shown as a link (remote images are not loaded). */
+export const ImageIcon = icon(Image, { size: 12 });
 /** Collapse / expand the review view's file tree. */
 export const PanelCloseIcon = icon(PanelLeftClose);
 export const PanelOpenIcon = icon(PanelLeftOpen);

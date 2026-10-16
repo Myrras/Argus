@@ -145,10 +145,7 @@
 }
 
 .noteBody {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  -webkit-user-select: text;
-  user-select: text;
+  min-width: 0;
 }
 
 .note[data-system="true"] .noteBody {

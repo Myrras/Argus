@@ -3,8 +3,9 @@
  * "Outdated threads" / "Threads on this file" section, or in the
  * Conversation: the user's own threads open and accent-edged, everyone
  * else's folded to one line (author, count, first words) until clicked.
- * Notes in order. A thread with a code reference has a "Then/now history"
- * toggle that expands its then/now slot (M3) in place.
+ * Notes in order, rendered as markdown (`Markdown`). A thread with a code
+ * reference has a "Then/now history" toggle that expands its then/now slot
+ * (M3) in place.
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
@@ -13,17 +14,18 @@
 import { useState } from "react";
 
 import type { ProviderId, StoredThread } from "../ipc/types";
+import { previewText } from "../lib/commentText";
 import { isConversationThread } from "../lib/diffThreads";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
 import { Badge } from "./Badge";
 import { CaretIcon } from "./icons";
+import { Markdown } from "./Markdown";
 import styles from "./ThreadBlock.module.css";
 
 function preview(t: StoredThread): string {
   const first = t.notes.find((n) => !n.system) ?? t.notes[0];
-  const text = (first?.body ?? "").replace(/\s+/g, " ").trim();
-  return text.length > 90 ? `${text.slice(0, 89)}…` : text;
+  return previewText(first?.body ?? "");
 }
 
 export function ThreadBlock({
@@ -108,7 +110,9 @@ export function ThreadBlock({
                   {age(n.createdAt, now)}
                 </span>
               </div>
-              <div className={styles.noteBody}>{n.body}</div>
+              <div className={styles.noteBody}>
+                <Markdown>{n.body}</Markdown>
+              </div>
             </li>
           ))}
         </ol>
