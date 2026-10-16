@@ -186,7 +186,10 @@ describe("defaults", () => {
         for (const b of a.defaults) {
           const parsed = parseBinding(b);
           expect(parsed, `${a.id} ${b}`).not.toBeNull();
-          expect(bindingProblem(parsed!, mac), `${a.id} ${b}`).toBeNull();
+          // A fixed action (Escape) is listed, never recorded.
+          if (!a.fixed) {
+            expect(bindingProblem(parsed!, mac), `${a.id} ${b}`).toBeNull();
+          }
           expect(seen.get(b), `${b} used by ${a.id} and ${seen.get(b)}`).toBe(
             undefined,
           );
@@ -206,6 +209,42 @@ describe("defaults", () => {
   it("leave Settings to the native menu on macOS", () => {
     expect(activeActions(true).map((a) => a.id)).not.toContain("openSettings");
     expect(activeActions(false).map((a) => a.id)).toContain("openSettings");
+  });
+});
+
+describe("comment keys", () => {
+  it("are c, Mod+Enter and a fixed Escape", () => {
+    expect(DEFAULT_KEYMAP.commentLine).toEqual(["KeyC"]);
+    expect(DEFAULT_KEYMAP.submitComment).toEqual(["Mod+Enter"]);
+    expect(DEFAULT_KEYMAP.cancelComment).toEqual(["Escape"]);
+    // A stored override cannot move the fixed one.
+    expect(resolveKeymap({ cancelComment: ["KeyQ"] }).cancelComment).toEqual([
+      "Escape",
+    ]);
+  });
+
+  it("keep the composer keys out of the window-wide scopes", () => {
+    const enter = {
+      key: "Enter",
+      code: "Enter",
+      metaKey: true,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+    };
+    expect(findAction(enter, DEFAULT_KEYMAP, "files", true)).toBeNull();
+    expect(findAction(enter, DEFAULT_KEYMAP, "composer", true)).toBe(
+      "submitComment",
+    );
+    const c = {
+      key: "c",
+      code: "KeyC",
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+    };
+    expect(findAction(c, DEFAULT_KEYMAP, "files", true)).toBe("commentLine");
   });
 });
 

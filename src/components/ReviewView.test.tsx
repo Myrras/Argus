@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -15,14 +21,34 @@ vi.mock("./DiffEditor", () => ({
     original: string;
     modified: string;
     placements: { line: number; side: string }[];
+    items?: { key: string; side: string; line: number }[];
+    comment?: {
+      lines: Record<"a" | "b", Set<number>>;
+      onComment: (s: string, a: number, l: number, e: boolean) => void;
+    } | null;
   }) => (
-    <div
-      data-testid={`editor-${p.path}`}
-      data-layout={p.layout}
-      data-placements={p.placements.map((x) => `${x.side}${x.line}`).join(",")}
-    >
-      {p.original}|{p.modified}
-    </div>
+    <>
+      <div
+        data-testid={`editor-${p.path}`}
+        data-layout={p.layout}
+        data-placements={p.placements
+          .map((x) => `${x.side}${x.line}`)
+          .join(",")}
+        data-comment-a={[...(p.comment?.lines.a ?? [])].join(",")}
+        data-comment-b={[...(p.comment?.lines.b ?? [])].join(",")}
+        data-items={(p.items ?? [])
+          .map((i) => `${i.key}@${i.side}${i.line}`)
+          .join(",")}
+      >
+        {p.original}|{p.modified}
+      </div>
+      <button
+        type="button"
+        onClick={() => p.comment?.onComment("b", 2, 2, false)}
+      >
+        stub + on b2 of {p.path}
+      </button>
+    </>
   ),
 }));
 
@@ -37,6 +63,7 @@ import {
 } from "../state/codeViewStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
+import { clearCommentableCache, useCommentStore } from "../state/commentStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { ReviewView } from "./ReviewView";
@@ -181,6 +208,14 @@ function backend(cmd: string, args?: unknown) {
       );
     case "set_file_viewed":
       return Promise.resolve(a.viewed ? [a.path] : []);
+    case "commentable_lines":
+      return Promise.resolve({
+        reviewId: r.id,
+        path: a.path,
+        baseSha: listed.baseSha,
+        headSha: listed.headSha,
+        hunks: [{ old: [1, 2], new: [1, 2, 3] }],
+      });
     default:
       return Promise.resolve(null);
   }
@@ -189,6 +224,14 @@ function backend(cmd: string, args?: unknown) {
 beforeEach(() => {
   localStorage.clear();
   clearContentsCache();
+  clearCommentableCache();
+  useCommentStore.setState({
+    drafts: {},
+    composer: null,
+    replies: {},
+    posting: {},
+    focus: null,
+  });
   listed = reviewFiles({ reviewId: r.id, files });
   mockInvoke.mockImplementation(backend as typeof invoke);
   useCodeViewStore.setState({ ...initialCode, byReview: {} }, true);
@@ -508,5 +551,59 @@ describe("ReviewView", () => {
     useReviewStore.setState({ selectedId: null });
     fireEvent.keyDown(window, { key: "j", code: "KeyJ" });
     expect(selected()).toContain("Conversation");
+  });
+
+  it("gives the gutter the commentable lines and opens a composer, posting nothing", async () => {
+    render(<ReviewView review={r} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    expect(editor).toHaveAttribute("data-comment-a", "1,2");
+    expect(mockInvoke).toHaveBeenCalledWith("commentable_lines", {
+      reviewId: r.id,
+      path: "src/cache.rs",
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "stub + on b2 of src/cache.rs" }),
+    );
+    expect(useCommentStore.getState().composer).toMatchObject({
+      path: "src/cache.rs",
+      side: "new",
+      line: 2,
+      startLine: null,
+      headSha: listed.headSha,
+    });
+    await waitFor(() =>
+      expect(editor.getAttribute("data-items")).toBe("composer:new@b2"),
+    );
+    const writes = mockInvoke.mock.calls.filter(([cmd]) =>
+      ["post_comments", "reply_to_thread", "approve_review"].includes(
+        cmd as string,
+      ),
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("shows no old-side + in since-my-last-review mode", async () => {
+    const later = { ...r, lastReviewedSha: "c".repeat(40), round: 2 };
+    useCodeViewStore.setState({
+      byReview: {
+        [r.id]: {
+          since: true,
+          files: null,
+          loading: false,
+          error: null,
+          selected: null,
+          order: [],
+        },
+      },
+    });
+    render(<ReviewView review={later} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    expect(editor).toHaveAttribute("data-comment-a", "");
   });
 });

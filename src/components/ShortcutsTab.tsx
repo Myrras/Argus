@@ -4,7 +4,8 @@
  * combination and rebinds the action to it; a fixed combination is refused,
  * one another action already uses is refused too with an offer to swap the
  * two. "Reset" puts a row's default back, "Reset all" every row.
- * Only changed rows are stored (`settingsStore.shortcuts`).
+ * Only changed rows are stored (`settingsStore.shortcuts`). A fixed action
+ * (Escape cancels a comment) is listed without Record/Reset.
  */
 
 import { useEffect, useState } from "react";
@@ -163,30 +164,34 @@ export function ShortcutsTab() {
                         ))
                       )}
                     </span>
-                    <div className={styles.cardActions}>
-                      <button
-                        type="button"
-                        aria-label={`${isRecording ? "Cancel recording" : "Record shortcut"} for ${a.label}`}
-                        onClick={() => {
-                          setRefusal(null);
-                          setRecording(isRecording ? null : a.id);
-                        }}
-                      >
-                        {isRecording ? "Cancel" : "Record"}
-                      </button>
-                      <button
-                        type="button"
-                        aria-label={`Reset ${a.label}`}
-                        disabled={isDefault}
-                        onClick={() => {
-                          setShortcut(a.id, null);
-                          if (isRecording) setRecording(null);
-                          setRefusal(null);
-                        }}
-                      >
-                        Reset
-                      </button>
-                    </div>
+                    {a.fixed ? (
+                      <span className={styles.rowHelp}>Fixed</span>
+                    ) : (
+                      <div className={styles.cardActions}>
+                        <button
+                          type="button"
+                          aria-label={`${isRecording ? "Cancel recording" : "Record shortcut"} for ${a.label}`}
+                          onClick={() => {
+                            setRefusal(null);
+                            setRecording(isRecording ? null : a.id);
+                          }}
+                        >
+                          {isRecording ? "Cancel" : "Record"}
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Reset ${a.label}`}
+                          disabled={isDefault}
+                          onClick={() => {
+                            setShortcut(a.id, null);
+                            if (isRecording) setRecording(null);
+                            setRefusal(null);
+                          }}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    )}
                   </div>
                   {refused && (
                     <p className={styles.error} role="alert">

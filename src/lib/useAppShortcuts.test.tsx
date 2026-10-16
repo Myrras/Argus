@@ -7,6 +7,9 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(() => Promise.resolve([])),
 }));
 
+import { invoke } from "@tauri-apps/api/core";
+
+import { useCommentStore } from "../state/commentStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { review } from "../test/fixtures";
@@ -38,6 +41,39 @@ beforeEach(() => {
 });
 
 describe("useAppShortcuts", () => {
+  it("c comments on the focused line: it opens a composer, posts nothing", () => {
+    useReviewStore.setState({ selectedId: a.id });
+    useCommentStore.setState({ composer: null, focus: null });
+    renderHook(() => useAppShortcuts());
+    // No focused line: the key is left alone.
+    expect(press({ key: "c", code: "KeyC" }).defaultPrevented).toBe(false);
+    const target = {
+      reviewId: a.id,
+      path: "src/cache.rs",
+      side: "new" as const,
+      anchor: 4,
+      line: 4,
+      startLine: null,
+      headSha: a.headSha,
+      baseSha: a.baseSha,
+    };
+    useCommentStore.setState({
+      focus: {
+        reviewId: a.id,
+        path: "src/cache.rs",
+        side: "new",
+        line: 4,
+        target,
+      },
+    });
+    expect(press({ key: "c", code: "KeyC" }).defaultPrevented).toBe(true);
+    expect(useCommentStore.getState().composer).toMatchObject({
+      line: 4,
+      body: "",
+    });
+    expect(vi.mocked(invoke)).not.toHaveBeenCalled();
+  });
+
   it("moves through the list, opens and switches lists", () => {
     renderHook(() => useAppShortcuts());
     press({ key: "ArrowDown" });

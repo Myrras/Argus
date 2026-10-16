@@ -8,18 +8,43 @@
  *
  * Its threads: current ones under their lines in the editor; outdated ones
  * (and any without a usable line) listed at the top of the card.
+ *
+ * Commenting: once the diff shows, the file's commentable lines are fetched
+ * (`commentable_lines`, cached) and get the gutter's "+"; a click opens the
+ * composer under the line (`commentStore`). Pending comments show under
+ * their lines (or at the top, when their line is not in this view).
  */
 
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
+  CommentableLines,
   FileEntry,
   ProviderId,
   ReviewFiles,
   StoredThread,
 } from "../ipc/types";
-import { fitPlacements, placeThreads, threadCounts } from "../lib/diffThreads";
+import {
+  clampRange,
+  commentableSet,
+  diffSideOf,
+  sideOf,
+} from "../lib/commentRanges";
+import {
+  fitPlacements,
+  placeThreads,
+  threadCounts,
+  type DiffSide,
+} from "../lib/diffThreads";
 import { loadContents } from "../state/codeViewStore";
+import {
+  loadCommentable,
+  useCommentStore,
+  useDrafts,
+  type CommentTarget,
+} from "../state/commentStore";
+import { DraftBlock, InlineComposer } from "./CommentBlocks";
+import type { CommentGutter, LineItem } from "./DiffEditor";
 import type { DiffLayout } from "../state/layoutStore";
 import { Badge } from "./Badge";
 import { FileStatusMark, LineStats, ThreadCount } from "./FileStatusMark";
@@ -164,6 +189,174 @@ export function FileDiffCard({
   const listed = [...placed.unplaced, ...fitted.rest];
   const count = threadCounts(threads);
 
+  // -- Commenting ---------------------------------------------------------
+  const ready = contents.state === "ready";
+  const [commentable, setCommentable] = useState<CommentableLines | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    loadCommentable(review.reviewId, review.headSha, f.path).then(
+      (c) => {
+        if (!cancelled) setCommentable(c);
+      },
+      () => {
+        // No "+" then; the diff and its threads still show.
+        if (!cancelled) setCommentable(null);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, review.reviewId, review.headSha, f.path]);
+  // Lines read at another head than the one shown would point elsewhere.
+  const usable =
+    commentable && commentable.headSha === review.headSha ? commentable : null;
+
+  const reviewId = review.reviewId;
+  const composer = useCommentStore((s) =>
+    s.composer?.reviewId === reviewId && s.composer.path === f.path
+      ? s.composer
+      : null,
+  );
+  const focus = useCommentStore((s) =>
+    s.focus?.reviewId === reviewId && s.focus.path === f.path ? s.focus : null,
+  );
+  const allDrafts = useDrafts(reviewId);
+  const drafts = useMemo(
+    () => allDrafts.filter((d) => d.path === f.path),
+    [allDrafts, f.path],
+  );
+
+  const lines = useMemo(
+    () => ({
+      // In "since" mode the left side is the last-reviewed commit, not the
+      // base old-side lines refer to.
+      a: review.sinceLastReview
+        ? new Set<number>()
+        : commentableSet(usable, "old"),
+      b: commentableSet(usable, "new"),
+    }),
+    [usable, review.sinceLastReview],
+  );
+
+  const targetAt = (
+    side: DiffSide,
+    anchor: number,
+    to: number,
+  ): CommentTarget | null => {
+    if (!lines[side].has(anchor)) return null;
+    const s = sideOf(side);
+    const range = clampRange(usable, s, anchor, to);
+    if (!range) return null;
+    return {
+      reviewId,
+      path: f.path,
+      side: s,
+      anchor,
+      ...range,
+      headSha: review.headSha,
+      baseSha: review.sinceLastReview ? null : review.baseSha,
+    };
+  };
+
+  const selectionSide = composer ? diffSideOf(composer.side) : null;
+  const selFrom = composer ? (composer.startLine ?? composer.line) : 0;
+  const selTo = composer?.line ?? 0;
+  const focusSide = focus ? diffSideOf(focus.side) : null;
+  const focusLine = focus?.line ?? 0;
+  const comment: CommentGutter | null = useMemo(
+    () => ({
+      lines,
+      selection: selectionSide
+        ? { side: selectionSide, from: selFrom, to: selTo }
+        : null,
+      focus: focusSide ? { side: focusSide, line: focusLine } : null,
+      onComment: (side, anchor, to, extend) => {
+        const store = useCommentStore.getState();
+        const open = store.composer;
+        if (
+          extend &&
+          open &&
+          open.reviewId === reviewId &&
+          open.path === f.path &&
+          open.side === sideOf(side) &&
+          !open.draftId
+        ) {
+          store.extendComposer(usable, to);
+          return;
+        }
+        const target = targetAt(side, anchor, to);
+        // Not `onSelect`: selecting scrolls the card to the top.
+        if (target) store.openComposer(target);
+      },
+      onFocusLine: (side, line) => {
+        useCommentStore.getState().setFocus({
+          reviewId,
+          path: f.path,
+          side: sideOf(side),
+          line,
+          target: targetAt(side, line, line),
+        });
+      },
+    }),
+    // `targetAt` reads only what is listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      lines,
+      usable,
+      selectionSide,
+      selFrom,
+      selTo,
+      focusSide,
+      focusLine,
+      reviewId,
+      f.path,
+    ],
+  );
+
+  const docLines = ready
+    ? { a: lineCount(contents.original), b: lineCount(contents.modified) }
+    : { a: 0, b: 0 };
+  const hasComposer = !!composer;
+  const { items, unplacedDrafts } = useMemo(() => {
+    const out: LineItem[] = [];
+    const rest: string[] = [];
+    for (const d of drafts) {
+      const side = diffSideOf(d.side);
+      if ((side === "a" && review.sinceLastReview) || d.line > docLines[side]) {
+        rest.push(d.id);
+        continue;
+      }
+      out.push({
+        key: `draft:${d.id}`,
+        side,
+        line: d.line,
+        render: () => <DraftBlock reviewId={reviewId} id={d.id} />,
+      });
+    }
+    if (composer) {
+      out.push({
+        key: `composer:${composer.draftId ?? "new"}`,
+        side: diffSideOf(composer.side),
+        line: composer.line,
+        render: (onResize) => <InlineComposer onResize={onResize} />,
+      });
+    }
+    return { items: out, unplacedDrafts: rest };
+    // The composer's text is read inside; only where it sits matters here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    drafts,
+    reviewId,
+    review.sinceLastReview,
+    docLines.a,
+    docLines.b,
+    composer?.side,
+    composer?.line,
+    composer?.draftId,
+    hasComposer,
+  ]);
+
   const renderThread = (t: StoredThread, onResize: () => void) => (
     <ThreadBlock thread={t} provider={provider} now={now} onResize={onResize} />
   );
@@ -241,6 +434,19 @@ export function FileDiffCard({
               ))}
             </div>
           )}
+          {unplacedDrafts.length > 0 && (
+            <div className={styles.listed}>
+              <h3 className={styles.listedTitle}>
+                Pending comments not in this view{" "}
+                <span className={styles.listedCount}>
+                  {unplacedDrafts.length}
+                </span>
+              </h3>
+              {unplacedDrafts.map((id) => (
+                <DraftBlock key={id} reviewId={reviewId} id={id} />
+              ))}
+            </div>
+          )}
           {listed.length > 0 && (
             <div className={styles.listed}>
               <h3 className={styles.listedTitle}>
@@ -285,6 +491,8 @@ export function FileDiffCard({
                 layout={layout}
                 placements={fitted.fit}
                 renderThread={renderThread}
+                items={items}
+                comment={comment}
               />
             </Suspense>
           ) : contents.state === "error" ? (

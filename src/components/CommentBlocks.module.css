@@ -1,0 +1,70 @@
+/* Comment blocks under a line (inside CodeMirror) or in a thread. Sans text
+   in a mono editor, so the font is reset. */
+.block {
+  margin: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
+  max-width: 820px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  white-space: normal;
+  color: var(--text);
+}
+
+/* A pending comment: dashed accent edge, so it reads as not posted yet. */
+.draft {
+  background: var(--surface);
+  border: 1px dashed var(--accent);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.draft[data-failed="true"] {
+  border-color: var(--warning);
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+}
+
+.head button {
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+.where {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.body {
+  padding: var(--sp-2) var(--sp-3);
+  min-width: 0;
+}
+
+.error {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* A reply composer at the foot of a thread. */
+.reply {
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--border);
+}

@@ -16,7 +16,8 @@
  * Unlike Iris, a bare key may be bound: Argus has no type-to-select for it to
  * fight, and its list keys (`r`, `1`–`4`, the arrows) are bare by default.
  * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
- * `files` actions likewise, and only while a review is open.
+ * `files` actions likewise, and only while a review is open; `composer`
+ * actions only inside a comment composer (`CommentComposer`).
  *
  * Pure rules, no React: `useAppShortcuts.ts` dispatches with `findAction`.
  */
@@ -35,15 +36,19 @@ export type ActionId =
   | "nextFile"
   | "prevFile"
   | "toggleViewed"
+  | "commentLine"
+  | "submitComment"
+  | "cancelComment"
   | "openSettings";
 
 /**
- * `list`: the review list, outside fields and dialogs; `files`: the Files
- * tab, likewise; `app`: window-wide.
+ * `list`: the review list, outside fields and dialogs; `files`: the review
+ * view, likewise; `composer`: inside a comment composer's text field only
+ * (the composer matches them itself); `app`: window-wide.
  */
-export type ActionScope = "list" | "files" | "app";
+export type ActionScope = "list" | "files" | "composer" | "app";
 
-export type ActionGroup = "Navigate" | "Lists" | "Files" | "View";
+export type ActionGroup = "Navigate" | "Lists" | "Files" | "Comments" | "View";
 
 export interface ActionDef {
   id: ActionId;
@@ -55,6 +60,8 @@ export interface ActionDef {
   note?: string;
   /** macOS only: the native menu owns it, so it is neither bound nor listed. */
   windowsLinuxOnly?: boolean;
+  /** Listed but not rebindable (Escape: it cancels everywhere). */
+  fixed?: boolean;
 }
 
 export const ACTIONS: ActionDef[] = [
@@ -140,6 +147,31 @@ export const ACTIONS: ActionDef[] = [
     note: "Toggles the selected file's Viewed mark.",
   },
   {
+    id: "commentLine",
+    label: "Comment on line",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyC"],
+    note: "Opens a comment on the line you last clicked in a diff.",
+  },
+  {
+    id: "submitComment",
+    label: "Submit comment",
+    group: "Comments",
+    scope: "composer",
+    defaults: ["Mod+Enter"],
+    note: "In a comment: Add to review (a draft), Reply, or Save.",
+  },
+  {
+    id: "cancelComment",
+    label: "Cancel comment",
+    group: "Comments",
+    scope: "composer",
+    defaults: ["Escape"],
+    fixed: true,
+    note: "Closes the comment without saving it.",
+  },
+  {
     id: "openSettings",
     label: "Open Settings",
     group: "View",
@@ -149,7 +181,13 @@ export const ACTIONS: ActionDef[] = [
   },
 ];
 
-export const GROUPS: ActionGroup[] = ["Navigate", "Lists", "Files", "View"];
+export const GROUPS: ActionGroup[] = [
+  "Navigate",
+  "Lists",
+  "Files",
+  "Comments",
+  "View",
+];
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));
 
@@ -301,6 +339,7 @@ export function resolveKeymap(overrides?: unknown): Keymap {
   for (const a of ACTIONS) {
     const list = saved[a.id];
     if (
+      !a.fixed &&
       Array.isArray(list) &&
       list.length > 0 &&
       list.every((b) => typeof b === "string" && parseBinding(b) !== null)

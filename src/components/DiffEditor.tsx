@@ -5,9 +5,17 @@
  * by file name, unchanged stretches collapsed (click to expand).
  *
  * Threads sit in block widgets under their line, each its own React root
- * (`renderThread`). A collapsed stretch holding a thread is expanded up
- * front so no thread hides. The gutter's "+" is the hook for commenting
- * (milestone 4): shown on hover, disabled, with a tooltip.
+ * (`renderThread`); so do the caller's other line items (`items`: the open
+ * composer, pending comments). A collapsed stretch holding one is expanded
+ * up front so nothing hides.
+ *
+ * Commenting (`comment`): the gutter's "+" shows on the commentable lines
+ * only (hover to see it). A click opens a comment on that line, shift-click
+ * extends the open one, a drag over the gutter selects a range; the caller
+ * clamps a range to one hunk. A click in the code marks the "focused" line
+ * the Comment-on-line key (c) comments on. The unified view shows the head,
+ * so its "+" is on new-side lines; old-side lines are commented on in the
+ * side-by-side view.
  */
 
 import { useEffect, useRef, type ReactNode } from "react";
@@ -54,20 +62,32 @@ export type RenderThread = (
   onResize: () => void,
 ) => ReactNode;
 
-/** Threads under one line. */
-class ThreadsWidget extends WidgetType {
+/** Something the caller shows under a line (a composer, a pending comment). */
+export interface LineItem {
+  /** Stable while the item's DOM may be kept (its content reads a store). */
+  key: string;
+  side: DiffSide;
+  line: number;
+  render: (onResize: () => void) => ReactNode;
+}
+
+/** One block under a line: a thread or a caller's item. */
+interface Block {
+  key: string;
+  render: (onResize: () => void) => ReactNode;
+}
+
+/** The blocks under one line. */
+class BlocksWidget extends WidgetType {
   private root: Root | null = null;
 
-  constructor(
-    readonly threads: readonly StoredThread[],
-    readonly render: RenderThread,
-  ) {
+  constructor(readonly blocks: readonly Block[]) {
     super();
   }
 
-  /** Same threads in the same state: keep the DOM (and its open/closed). */
-  eq(other: ThreadsWidget): boolean {
-    return key(other.threads) === key(this.threads);
+  /** Same blocks in the same state: keep the DOM (and its open/closed). */
+  eq(other: BlocksWidget): boolean {
+    return key(other.blocks) === key(this.blocks);
   }
 
   toDOM(view: EditorView): HTMLElement {
@@ -83,8 +103,8 @@ class ThreadsWidget extends WidgetType {
     const resize = () => view.requestMeasure();
     this.root.render(
       <>
-        {this.threads.map((t) => (
-          <div key={t.threadId}>{this.render(t, resize)}</div>
+        {this.blocks.map((b) => (
+          <div key={b.key}>{b.render(resize)}</div>
         ))}
       </>,
     );
@@ -99,43 +119,39 @@ class ThreadsWidget extends WidgetType {
     if (root) queueMicrotask(() => root.unmount());
   }
 
-  /** Clicks and keys belong to the thread's buttons, not the editor. */
+  /** Clicks and keys belong to the blocks' buttons and fields, not the editor. */
   ignoreEvent(): boolean {
     return true;
   }
 }
 
-function key(threads: readonly StoredThread[]): string {
-  return threads
-    .map((t) => `${t.threadId}:${t.notes.length}:${t.resolved}`)
-    .join("|");
+function key(blocks: readonly Block[]): string {
+  return blocks.map((b) => b.key).join("|");
 }
 
-/** Lines (1-based) with their threads, for one editor. */
-type LineThreads = Map<number, StoredThread[]>;
+function threadKey(t: StoredThread): string {
+  return `t:${t.threadId}:${t.notes.length}:${t.resolved}`;
+}
 
-const setThreads = StateEffect.define<{
-  lines: LineThreads;
-  render: RenderThread;
-}>();
+/** Lines (1-based) with their blocks, for one editor. */
+type LineBlocks = Map<number, Block[]>;
 
-const threadField = StateField.define<DecorationSet>({
+const setBlocks = StateEffect.define<LineBlocks>();
+
+const blockField = StateField.define<DecorationSet>({
   create: () => Decoration.none,
   update(deco, tr) {
     for (const e of tr.effects) {
-      if (!e.is(setThreads)) continue;
+      if (!e.is(setBlocks)) continue;
       const builder = new RangeSetBuilder<Decoration>();
       const doc = tr.state.doc;
-      for (const line of [...e.value.lines.keys()].sort((x, y) => x - y)) {
+      for (const line of [...e.value.keys()].sort((x, y) => x - y)) {
         if (line > doc.lines) continue;
         builder.add(
           doc.line(line).to,
           doc.line(line).to,
           Decoration.widget({
-            widget: new ThreadsWidget(
-              e.value.lines.get(line) ?? [],
-              e.value.render,
-            ),
+            widget: new BlocksWidget(e.value.get(line) ?? []),
             block: true,
             side: 1,
           }),
@@ -148,46 +164,241 @@ const threadField = StateField.define<DecorationSet>({
   provide: (f) => EditorView.decorations.from(f),
 });
 
-/** The disabled "+" in the gutter: where commenting will start (M4). */
+/** What one editor knows about commenting. */
+interface CommentInfo {
+  /** The commentable lines of this editor's side. */
+  lines: ReadonlySet<number>;
+  /** The selected range (the open composer's lines), inclusive. */
+  selection: { from: number; to: number } | null;
+  /** The line the Comment-on-line key comments on. */
+  focus: number | null;
+}
+
+const NO_COMMENT: CommentInfo = {
+  lines: new Set(),
+  selection: null,
+  focus: null,
+};
+
+const setComment = StateEffect.define<CommentInfo>();
+
+const commentField = StateField.define<CommentInfo>({
+  create: () => NO_COMMENT,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setComment)) return e.value;
+    return value;
+  },
+});
+
+/** The selected range and the focused line, as line classes. */
+const commentLines = EditorView.decorations.compute([commentField], (state) => {
+  const info = state.field(commentField);
+  const doc = state.doc;
+  const builder = new RangeSetBuilder<Decoration>();
+  const marks = new Map<number, string>();
+  if (info.selection) {
+    for (let n = info.selection.from; n <= info.selection.to; n++) {
+      marks.set(n, "cm-argusSelectedLine");
+    }
+  }
+  if (info.focus !== null && !marks.has(info.focus)) {
+    marks.set(info.focus, "cm-argusFocusedLine");
+  }
+  for (const n of [...marks.keys()].sort((x, y) => x - y)) {
+    if (n < 1 || n > doc.lines) continue;
+    const at = doc.line(n).from;
+    builder.add(at, at, Decoration.line({ class: marks.get(n)! }));
+  }
+  return builder.finish();
+});
+
+/** The gutter's "+" on a commentable line. */
 class CommentMarker extends GutterMarker {
+  constructor(readonly line: number) {
+    super();
+  }
+
+  eq(other: CommentMarker): boolean {
+    return other.line === this.line;
+  }
+
   toDOM(): Node {
     const el = document.createElement("span");
     el.className = "cm-argusCommentPlus";
     el.textContent = "+";
-    el.title = "Commenting comes in a later release";
-    el.setAttribute("aria-disabled", "true");
+    el.title = "Comment on this line (shift-click or drag for a range)";
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", `Comment on line ${this.line}`);
+    el.dataset.commentLine = String(this.line);
     return el;
   }
 }
 
-const commentMarker = new CommentMarker();
+const spacer = new (class extends GutterMarker {
+  toDOM(): Node {
+    const el = document.createElement("span");
+    el.textContent = "+";
+    el.style.visibility = "hidden";
+    return el;
+  }
+})();
 
 const commentGutter: Extension = [
+  commentField,
+  commentLines,
   gutter({
     class: "cm-argusCommentGutter",
-    lineMarker: () => commentMarker,
-    initialSpacer: () => commentMarker,
+    lineMarker: (view, block) => {
+      const n = view.state.doc.lineAt(block.from).number;
+      return view.state.field(commentField).lines.has(n)
+        ? new CommentMarker(n)
+        : null;
+    },
+    lineMarkerChange: (u) =>
+      u.transactions.some((tr) => tr.effects.some((e) => e.is(setComment))),
+    initialSpacer: () => spacer,
   }),
   EditorView.theme({
     ".cm-argusCommentGutter .cm-gutterElement": {
       width: "16px",
       textAlign: "center",
-      color: "var(--text-faint)",
-      cursor: "not-allowed",
+      color: "var(--accent)",
     },
-    ".cm-argusCommentPlus": { opacity: "0" },
+    ".cm-argusCommentPlus": {
+      display: "block",
+      opacity: "0",
+      cursor: "pointer",
+      fontWeight: "600",
+      borderRadius: "var(--radius-sm)",
+      transition: "opacity var(--dur-1) var(--ease-out)",
+    },
     ".cm-argusCommentGutter .cm-gutterElement:hover .cm-argusCommentPlus": {
       opacity: "1",
+      background: "color-mix(in srgb, var(--accent) 18%, transparent)",
+    },
+    ".cm-argusSelectedLine": {
+      boxShadow: "inset 3px 0 0 var(--accent)",
+      backgroundColor: "color-mix(in srgb, var(--accent) 12%, transparent)",
+    },
+    ".cm-argusFocusedLine": {
+      boxShadow: "inset 2px 0 0 var(--border-strong)",
     },
     ".cm-argusThreads": { padding: "2px 0", position: "sticky" },
   }),
 ];
 
-function group(placements: readonly Placement[], side: DiffSide): LineThreads {
-  const out: LineThreads = new Map();
+/** Commenting from the gutter, for one diff (both sides). */
+export interface CommentGutter {
+  /** Commentable lines per side (`a` old, `b` new); empty for none. */
+  lines: Record<DiffSide, ReadonlySet<number>>;
+  /** The open composer's lines on this file. */
+  selection: { side: DiffSide; from: number; to: number } | null;
+  /** The focused line on this file. */
+  focus: { side: DiffSide; line: number } | null;
+  /**
+   * A gutter click (`anchor` = `line`), drag (`anchor` where it started) or
+   * shift-click (`extend`) on a commentable line.
+   */
+  onComment: (
+    side: DiffSide,
+    anchor: number,
+    line: number,
+    extend: boolean,
+  ) => void;
+  /** A click in the code. */
+  onFocusLine: (side: DiffSide, line: number) => void;
+}
+
+function infoFor(
+  c: CommentGutter | null | undefined,
+  side: DiffSide,
+): CommentInfo {
+  if (!c) return NO_COMMENT;
+  return {
+    lines: c.lines[side],
+    selection:
+      c.selection?.side === side
+        ? { from: c.selection.from, to: c.selection.to }
+        : null,
+    focus: c.focus?.side === side ? c.focus.line : null,
+  };
+}
+
+/**
+ * Gutter clicks, shift-clicks and drags, and code clicks, on one editor:
+ * native listeners on its DOM (the gutter is outside the content, and a
+ * read-only editor has no cursor to read the line from). Returns the
+ * cleanup.
+ */
+function listenForComments(
+  view: EditorView,
+  side: DiffSide,
+  get: () => CommentGutter | null | undefined,
+): () => void {
+  const lineOf = (target: EventTarget | null): number | null => {
+    const el =
+      target instanceof Element
+        ? target.closest<HTMLElement>("[data-comment-line]")
+        : null;
+    if (!el || !view.dom.contains(el)) return null;
+    const n = Number(el.dataset.commentLine);
+    return Number.isInteger(n) && n > 0 ? n : null;
+  };
+  let dragFrom: number | null = null;
+  const onUp = (e: MouseEvent) => {
+    window.removeEventListener("mouseup", onUp);
+    const from = dragFrom;
+    dragFrom = null;
+    if (from === null) return;
+    get()?.onComment(side, from, lineOf(e.target) ?? from, false);
+  };
+  const onDown = (e: MouseEvent) => {
+    if (e.button !== 0) return;
+    const line = lineOf(e.target);
+    if (line !== null) {
+      e.preventDefault();
+      if (e.shiftKey) {
+        get()?.onComment(side, line, line, true);
+        return;
+      }
+      dragFrom = line;
+      window.addEventListener("mouseup", onUp);
+      return;
+    }
+    if (!(e.target instanceof Node) || !view.contentDOM.contains(e.target)) {
+      return;
+    }
+    // Not in a block widget (a thread or a composer).
+    if (e.target instanceof Element && e.target.closest(".cm-argusThreads")) {
+      return;
+    }
+    const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+    if (pos === null) return;
+    get()?.onFocusLine(side, view.state.doc.lineAt(pos).number);
+  };
+  view.dom.addEventListener("mousedown", onDown);
+  return () => {
+    view.dom.removeEventListener("mousedown", onDown);
+    window.removeEventListener("mouseup", onUp);
+  };
+}
+
+function group(
+  placements: readonly Placement[],
+  items: readonly LineItem[],
+  side: DiffSide,
+  render: RenderThread,
+): LineBlocks {
+  const out: LineBlocks = new Map();
+  const add = (line: number, b: Block) =>
+    out.set(line, [...(out.get(line) ?? []), b]);
   for (const p of placements) {
     if (p.side !== side) continue;
-    out.set(p.line, [...(out.get(p.line) ?? []), p.thread]);
+    const t = p.thread;
+    add(p.line, { key: threadKey(t), render: (r) => render(t, r) });
+  }
+  for (const i of items) {
+    if (i.side === side) add(i.line, { key: i.key, render: i.render });
   }
   return out;
 }
@@ -225,6 +436,8 @@ export function DiffEditor({
   layout,
   placements,
   renderThread,
+  items = NO_ITEMS,
+  comment = null,
 }: {
   /** For the language. */
   path: string;
@@ -235,6 +448,10 @@ export function DiffEditor({
   layout: DiffLayout;
   placements: readonly Placement[];
   renderThread: RenderThread;
+  /** Other blocks under lines (the composer, pending comments). */
+  items?: readonly LineItem[];
+  /** Commenting from the gutter; null for none. */
+  comment?: CommentGutter | null;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const mode = useThemeStore((s) => s.mode);
@@ -242,8 +459,8 @@ export function DiffEditor({
   const theme = useRef(new Compartment());
   const language = useRef(new Compartment());
   // The latest props for the (re)build effect without rebuilding on each.
-  const latest = useRef({ placements, renderThread, mode });
-  latest.current = { placements, renderThread, mode };
+  const latest = useRef({ placements, renderThread, mode, comment });
+  latest.current = { placements, renderThread, mode, comment };
 
   // Build the editor(s) for this content and layout.
   useEffect(() => {
@@ -253,7 +470,7 @@ export function DiffEditor({
     const common = (): Extension[] => [
       theme.current.of(baseExtensions(m)),
       language.current.of([]),
-      threadField,
+      blockField,
       commentGutter,
     ];
     let merge: MergeView | null = null;
@@ -288,6 +505,10 @@ export function DiffEditor({
       });
       views.current = [unified];
     }
+    const sides: DiffSide[] = layout === "split" ? ["a", "b"] : ["b"];
+    const unlisten = views.current.map((v, i) =>
+      listenForComments(v, sides[i], () => latest.current.comment),
+    );
 
     let cancelled = false;
     void languageFor(path).then((lang) => {
@@ -299,42 +520,56 @@ export function DiffEditor({
 
     return () => {
       cancelled = true;
+      for (const off of unlisten) off();
       merge?.destroy();
       unified?.destroy();
       views.current = [];
     };
   }, [path, original, modified, layout]);
 
-  // Place the threads (again whenever they change).
+  // Place the threads and items (again whenever they change).
   useEffect(() => {
     const vs = views.current;
     if (vs.length === 0) return;
     const { renderThread: render } = latest.current;
     if (vs.length === 2) {
       const [a, b] = vs;
-      const onA = group(placements, "a");
-      const onB = group(placements, "b");
+      const onA = group(placements, items, "a", render);
+      const onB = group(placements, items, "b", render);
       uncollapseAt(a, "a", [...onA.keys()]);
       uncollapseAt(b, "b", [...onB.keys()]);
-      a.dispatch({ effects: setThreads.of({ lines: onA, render }) });
-      b.dispatch({ effects: setThreads.of({ lines: onB, render }) });
+      a.dispatch({ effects: setBlocks.of(onA) });
+      b.dispatch({ effects: setBlocks.of(onB) });
     } else {
-      // Unified: base-side threads go where those lines show on the head.
+      // Unified: base-side blocks go where those lines show on the head.
       const [view] = vs;
       const info = getChunks(view.state);
-      const lines: LineThreads = group(placements, "b");
-      if (info) {
+      const lines = group(placements, items, "b", render);
+      const onA = group(placements, items, "a", render);
+      if (info && onA.size) {
         const origDoc = EditorState.create({ doc: original }).doc;
-        for (const p of placements) {
-          if (p.side !== "a" || p.line > origDoc.lines) continue;
-          const at = mapOldLine(info.chunks, origDoc, view.state.doc, p.line);
-          lines.set(at, [...(lines.get(at) ?? []), p.thread]);
+        for (const [line, blocks] of onA) {
+          if (line > origDoc.lines) continue;
+          const at = mapOldLine(info.chunks, origDoc, view.state.doc, line);
+          lines.set(at, [...(lines.get(at) ?? []), ...blocks]);
         }
       }
       uncollapseAt(view, "b", [...lines.keys()]);
-      view.dispatch({ effects: setThreads.of({ lines, render }) });
+      view.dispatch({ effects: setBlocks.of(lines) });
     }
-  }, [placements, original, modified, layout]);
+  }, [placements, items, original, modified, layout]);
+
+  // The "+" lines, the selection and the focused line.
+  useEffect(() => {
+    const vs = views.current;
+    const sides: DiffSide[] = vs.length === 2 ? ["a", "b"] : ["b"];
+    vs.forEach((v, i) => {
+      // The unified view is the head: only new-side lines get a "+".
+      const info = infoFor(comment, sides[i]);
+      v.dispatch({ effects: setComment.of(info) });
+      if (info.selection) uncollapseAt(v, sides[i], [info.selection.from]);
+    });
+  }, [comment, original, modified, layout]);
 
   // Theme switches reconfigure in place.
   useEffect(() => {
@@ -345,3 +580,5 @@ export function DiffEditor({
 
   return <div ref={host} className="argus-diff-editor" data-layout={layout} />;
 }
+
+const NO_ITEMS: readonly LineItem[] = [];
