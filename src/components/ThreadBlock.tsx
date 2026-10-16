@@ -5,15 +5,19 @@
  * else's folded to one line (author, count, first words) until clicked.
  * Notes in order, rendered as markdown (`Markdown`), ` ```suggestion `
  * blocks as a diff (`SuggestedChange`). A thread with a code
- * reference has a "Then/now history" toggle that expands its then/now slot
- * (M3) in place. "Reply" opens a reply composer at the foot of the thread
+ * reference has a "Then/now history" toggle for its then/now slot (M3,
+ * `ThenNow`), open by default on the user's own threads; the state lives in
+ * `historyStore`, as does the thread last clicked (the `toggleThenNow` key).
+ * Once its history is in, the notes become the thread's `Timeline` (notes,
+ * commits and resolve events); until then, or when it fails, the plain
+ * notes. "Reply" opens a reply composer at the foot of the thread
  * (`ReplyComposer`; posted only on its Reply button or ⌘↩).
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ProviderId, StoredThread } from "../ipc/types";
 import { previewText } from "../lib/commentText";
@@ -22,11 +26,14 @@ import { parseSuggestionInfo } from "../lib/suggestions";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
 import { useCommentStore } from "../state/commentStore";
+import { thenNowOpen, useHistoryStore } from "../state/historyStore";
+import { useThreadHistory } from "../lib/useThreadHistory";
 import { Badge } from "./Badge";
 import { ReplyComposer } from "./CommentBlocks";
 import { CaretIcon } from "./icons";
 import { Markdown, type RenderFence } from "./Markdown";
 import { SuggestedChange } from "./SuggestedChange";
+import { ThenNow, Timeline } from "./ThreadHistory";
 import styles from "./ThreadBlock.module.css";
 
 function preview(t: StoredThread): string {
@@ -46,7 +53,12 @@ export function ThreadBlock({
   onResize?: () => void;
 }) {
   const [open, setOpen] = useState(t.mine);
-  const [history, setHistory] = useState(false);
+  const history = useHistoryStore(
+    (s) => !isConversationThread(t) && thenNowOpen(s.expanded, t),
+  );
+  const setHistory = useHistoryStore((s) => s.setExpanded);
+  const focus = useHistoryStore((s) => s.focus);
+  const past = useThreadHistory(t);
   const replying = useCommentStore((s) => !!s.replies[t.threadId]);
   const openReply = useCommentStore((s) => s.openReply);
   const comments = t.notes.filter((n) => !n.system).length;
@@ -75,10 +87,19 @@ export function ThreadBlock({
     resized();
   };
   const toggleHistory = () => {
-    setHistory((h) => !h);
+    setHistory(t.threadId, !history);
     setOpen(true);
     resized();
   };
+  // Opened from the key too; the height moves when the history lands.
+  const resizeRef = useRef(onResize);
+  resizeRef.current = onResize;
+  useEffect(() => {
+    if (history) setOpen(true);
+  }, [history]);
+  useEffect(() => {
+    requestAnimationFrame(() => resizeRef.current?.());
+  }, [history, past.history, past.loading, past.error]);
 
   return (
     <article
@@ -88,6 +109,9 @@ export function ThreadBlock({
       data-open={open}
       data-resolved={t.resolved}
       aria-label={`Thread by ${t.author}`}
+      onPointerDown={() =>
+        focus({ threadId: t.threadId, reviewId: t.reviewId, mine: t.mine })
+      }
     >
       <div className={styles.headRow}>
         <button
@@ -127,16 +151,23 @@ export function ThreadBlock({
       </div>
       {/* Then/now code view (M3): the code at the comment's commit and at the
           current head, expanded in place. */}
-      {anchored && history && (
+      {anchored && open && history && (
         <div
           id={`then-now-${t.threadId}`}
           className={styles.thenNow}
           data-slot="then-now"
         >
-          Code then and now: coming soon
+          <ThenNow thread={t} state={past} onResize={onResize} />
         </div>
       )}
-      {open && (
+      {open && past.history && (
+        <Timeline
+          entries={past.history.timeline}
+          now={now}
+          renderFence={renderFence}
+        />
+      )}
+      {open && !past.history && (
         <ol className={styles.notes}>
           {t.notes.map((n) => (
             <li key={n.id} className={styles.note} data-system={n.system}>
@@ -180,6 +211,13 @@ export function ListedThread({
 }) {
   const a = t.anchor;
   const sha = a?.headSha ? a.headSha.slice(0, 8) : null;
+  // The then/now shows the code the thread was made on; the platform's
+  // excerpt only until it does.
+  const thenShown = useHistoryStore(
+    (s) =>
+      thenNowOpen(s.expanded, t) &&
+      !!s.byThread[t.threadId]?.history?.thenSnapshot,
+  );
   return (
     <div className={styles.listed}>
       <div className={styles.listedHead}>
@@ -200,7 +238,7 @@ export function ListedThread({
           </span>
         )}
       </div>
-      {t.outdated && a?.diffHunk && (
+      {t.outdated && a?.diffHunk && !thenShown && (
         <pre className={`${styles.hunk} mono`}>
           {a.diffHunk.split("\n").map((line, i) => (
             <span

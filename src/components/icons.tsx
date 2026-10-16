@@ -20,16 +20,21 @@ import {
   CircleCheck,
   Copy,
   ExternalLink,
+  FileSymlink,
+  FileX,
   FolderTree,
+  GitCommitHorizontal,
   Image,
   GitPullRequest,
   Info,
+  ListX,
   MessageSquare,
   Minus,
   PanelLeftClose,
   PanelLeftOpen,
   Plug,
   Plus,
+  RotateCcw,
   RotateCw,
   Settings,
   Square,
@@ -90,3 +95,11 @@ export const WindowRestoreIcon = icon(Copy, { size: 12 });
 export const ErrorIcon = icon(CircleAlert, { size: 16 });
 export const SuccessIcon = icon(CircleCheck, { size: 16 });
 export const InfoIcon = icon(Info, { size: 16 });
+
+// Thread history (M3): the timeline's event kinds.
+export const CommitIcon = icon(GitCommitHorizontal);
+export const RenamedIcon = icon(FileSymlink);
+export const LinesRemovedIcon = icon(ListX);
+export const FileGoneIcon = icon(FileX);
+export const ResolvedIcon = icon(CircleCheck);
+export const UnresolvedIcon = icon(RotateCcw);

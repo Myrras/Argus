@@ -39,7 +39,8 @@ export type ActionId =
   | "commentLine"
   | "submitComment"
   | "cancelComment"
-  | "openSettings";
+  | "openSettings"
+  | "toggleThenNow";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
@@ -178,6 +179,14 @@ export const ACTIONS: ActionDef[] = [
     scope: "app",
     defaults: ["Mod+Comma"],
     windowsLinuxOnly: true,
+  },
+  {
+    id: "toggleThenNow",
+    label: "Toggle then/now",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyH"],
+    note: "Shows or hides the code then and now of the thread you last clicked.",
   },
 ];
 

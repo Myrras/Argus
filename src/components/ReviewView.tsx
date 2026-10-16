@@ -26,6 +26,7 @@ import { formatBinding } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
+import { useHistoryStore } from "../state/historyStore";
 import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
 import { useThreadStore } from "../state/threadStore";
 import { ConversationCard } from "./ConversationCard";
@@ -66,6 +67,11 @@ export function ReviewView({
   useEffect(() => {
     void loadThreads(r.id);
   }, [r.id, loadThreads]);
+  // The threads' then/now histories (M3), one call per review and head.
+  const loadHistories = useHistoryStore((s) => s.loadReview);
+  useEffect(() => {
+    void loadHistories(r.id, r.headSha);
+  }, [r.id, r.headSha, loadHistories]);
 
   // Load on open; a review whose watermark caught up drops "since" mode.
   const since = (entry?.since ?? false) && canSince;
