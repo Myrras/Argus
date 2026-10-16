@@ -800,3 +800,55 @@ fn a_failing_approvals_call_fails_the_fetch_or_falls_back_to_reviewer_state() {
         assert!(!d.requested_from_me);
     }
 }
+
+#[test]
+fn the_review_diff_names_the_version_it_was_taken_at() {
+    // Asked for an older head (a1): `/diffs` is the latest version's (a2),
+    // and the diff is labelled with that version's shas.
+    let (base, _) = serve(fixture_routes);
+    let stale = DiffRange::Review {
+        base: "a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9".into(),
+        head: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1".into(),
+    };
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &stale)
+        .unwrap();
+    assert_eq!(
+        (diff.base_sha.as_str(), diff.head_sha.as_str()),
+        (BASE_SHA, HEAD_SHA)
+    );
+    assert_eq!(diff.files.len(), 6);
+}
+
+#[test]
+fn a_version_pushed_while_the_diff_loads_is_read_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // The first versions read says a1 is the latest, the next ones a2: the
+    // diff read in between may be either, so it is read again.
+    let reads = Arc::new(AtomicUsize::new(0));
+    let count = reads.clone();
+    let (base, seen) = serve_raw(move |path, _| {
+        let versions = "/api/v4/projects/grp%2Fapp/merge_requests/21/versions";
+        if path.starts_with(versions) && count.fetch_add(1, Ordering::SeqCst) == 0 {
+            let all: Vec<serde_json::Value> =
+                serde_json::from_str(&fixture("mr_21_versions.json")).unwrap();
+            return Reply {
+                status: "200 OK",
+                headers: String::new(),
+                body: serde_json::to_string(&all[1..]).unwrap(),
+            };
+        }
+        fixture_routes(path)
+    });
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    assert_eq!(diff.head_sha, HEAD_SHA);
+    let diffs_reads = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("/diffs?per_page=100&page=1 "))
+        .count();
+    assert_eq!(diffs_reads, 2);
+}

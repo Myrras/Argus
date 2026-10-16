@@ -571,8 +571,16 @@ fn a_second_poll_sends_the_etags_and_replays_the_304s() {
     };
     let first = poll();
     let calls = fake.calls();
-    assert!(!calls.contains("If-None-Match"));
-    assert!(!calls.contains("304 "));
+    // Within the first poll only the PR itself is read again (detail, and
+    // around the files): already a 304.
+    let repeats: Vec<&str> = calls.lines().filter(|l| l.starts_with("304 ")).collect();
+    assert!(!repeats.is_empty());
+    assert!(
+        repeats
+            .iter()
+            .all(|l| *l == "304 repos/acme-fixture/widgets/pulls/12"),
+        "{repeats:?}"
+    );
 
     let second = poll();
     // Exactly what a full fetch gave.
@@ -772,4 +780,31 @@ fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
     let threads = gh.fetch_threads(&widgets_12()).unwrap();
     assert_eq!(threads.len(), 101);
     assert_eq!(threads[100].id, "101");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_review_diff_names_the_head_it_was_taken_at() {
+    // The stored head is behind: the PR moved to c3 since the last poll.
+    // `pulls/{n}/files` is always the PR as it is now, so the diff is c3's,
+    // and says so.
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let stale = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2";
+    let diff = gh
+        .fetch_files(
+            &widgets_12(),
+            &DiffRange::Review {
+                base: BASE.into(),
+                head: stale.into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(diff.head_sha, HEAD);
+    assert_eq!(diff.base_sha, "b".repeat(40));
+    assert_eq!(diff.files.len(), 6);
+    // The merge base is taken against the PR's own base and head.
+    assert!(fake.calls().contains(&format!(
+        "repos/acme-fixture/widgets/compare/{BASE}...{HEAD}"
+    )));
 }

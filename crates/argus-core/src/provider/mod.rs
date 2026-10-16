@@ -56,14 +56,18 @@ pub trait ReviewProvider: Send + Sync {
     /// The content of `path` at commit `sha`.
     fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String>;
 
-    /// The changed files of `range`, with the commit each side is read at.
+    /// The changed files of `range`, with the commit each side is read at:
+    /// the commits the diff was really computed at (see [`FileDiff`]'s
+    /// contract), which for [`DiffRange::Review`] may be newer than the
+    /// shas asked for.
     ///
     /// [`DiffRange::Review`]: GitHub `pulls/{n}/files` (up to 3000 files;
-    /// large patches are left out) with the merge base of base and head from
-    /// the compare API as the left side, as GitHub's own Files tab diffs
-    /// three-dot. GitLab `merge_requests/:iid/diffs` (`changes` on instances
-    /// before 15.7) with the latest version's `base_sha` (the merge base
-    /// GitLab diffs from) as the left side.
+    /// large patches are left out) at the PR's current head, with the merge
+    /// base of the PR's base and head from the compare API as the left side,
+    /// as GitHub's own Files tab diffs three-dot. GitLab
+    /// `merge_requests/:iid/diffs` (`changes` on instances before 15.7): the
+    /// latest version, with its `base_sha` (the merge base GitLab diffs
+    /// from) as the left side.
     ///
     /// [`DiffRange::Compare`]: GitHub `compare/{from}...{to}` (up to 300
     /// files; left side its merge base, which is `from` unless the branch was

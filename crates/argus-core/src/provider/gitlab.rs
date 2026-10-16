@@ -335,6 +335,71 @@ impl GitlabProvider {
     }
 }
 
+impl GitlabProvider {
+    /// The MR's own diff, labelled with the version it is of. `/diffs` (and
+    /// `/changes`) always diff the latest version, whatever head was asked
+    /// for, so the versions are read before and after it: when the latest
+    /// is the same both times, the diff is that version's. A push in
+    /// between reads it all once more.
+    fn review_diff(&self, r: &ReviewRef, base: &str, head: &str) -> CoreResult<FileDiff> {
+        let p = Self::mr_path(r);
+        let latest = || -> CoreResult<Option<GlVersion>> {
+            // Newest first, as GitLab lists them.
+            Ok(self
+                .get_all::<GlVersion>(&format!("{p}/versions"))?
+                .into_iter()
+                .next())
+        };
+        for _ in 0..2 {
+            let before = latest()?;
+            // `/diffs` (15.7+) pages; an older instance only has the
+            // single-shot `/changes`, whose `overflow` flags a cut list and
+            // whose `diff_refs` name the version it is of.
+            let (diffs, truncated, refs) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
+                Ok(d) => {
+                    let full = d.len() >= (PER_PAGE * MAX_PAGES) as usize;
+                    (d, full, None)
+                }
+                Err(CoreError::NotFound) => {
+                    let c: GlChanges = self.get_json(&format!("{p}/changes"))?;
+                    (c.changes, c.overflow, c.diff_refs)
+                }
+                Err(e) => return Err(e),
+            };
+            let after = latest()?;
+            if before != after {
+                continue;
+            }
+            // An MR without a version has no diff either; the shas asked
+            // for are as good as any then.
+            let (base_sha, head_sha) = match (refs, after) {
+                (
+                    Some(GlDiffRefs {
+                        base_sha: Some(b),
+                        head_sha: Some(h),
+                        ..
+                    }),
+                    _,
+                ) => (b, h),
+                (_, Some(v)) => (v.base_commit_sha, v.head_commit_sha),
+                _ => (base.to_string(), head.to_string()),
+            };
+            return Ok(FileDiff {
+                files: diffs
+                    .into_iter()
+                    .map(|d| changed_file(d, &head_sha))
+                    .collect(),
+                base_sha,
+                head_sha,
+                truncated,
+            });
+        }
+        Err(CoreError::Provider(
+            "the merge request got new commits while loading its diff; try again".into(),
+        ))
+    }
+}
+
 fn unexpected() -> CoreError {
     CoreError::Provider("unexpected response from GitLab".into())
 }
@@ -473,26 +538,7 @@ impl ReviewProvider for GitlabProvider {
             DiffRange::Review { base, head } => {
                 check_sha(base)?;
                 check_sha(head)?;
-                let p = Self::mr_path(r);
-                // `/diffs` (15.7+) pages; an older instance only has the
-                // single-shot `/changes`, whose `overflow` flags a cut list.
-                let (diffs, truncated) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
-                    Ok(d) => {
-                        let full = d.len() >= (PER_PAGE * MAX_PAGES) as usize;
-                        (d, full)
-                    }
-                    Err(CoreError::NotFound) => {
-                        let c: GlChanges = self.get_json(&format!("{p}/changes"))?;
-                        (c.changes, c.overflow)
-                    }
-                    Err(e) => return Err(e),
-                };
-                Ok(FileDiff {
-                    files: diffs.into_iter().map(|d| changed_file(d, head)).collect(),
-                    base_sha: base.clone(),
-                    head_sha: head.clone(),
-                    truncated,
-                })
+                self.review_diff(r, base, head)
             }
             DiffRange::Compare { from, to } => {
                 check_sha(from)?;
@@ -956,7 +1002,7 @@ struct GlCommit {
     authored_date: Option<DateTime<Utc>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq, Eq)]
 struct GlVersion {
     head_commit_sha: String,
     base_commit_sha: String,
@@ -1059,6 +1105,8 @@ struct GlChanges {
     changes: Vec<GlDiff>,
     #[serde(default)]
     overflow: bool,
+    #[serde(default)]
+    diff_refs: Option<GlDiffRefs>,
 }
 
 #[derive(Deserialize)]

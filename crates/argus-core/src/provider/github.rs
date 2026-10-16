@@ -492,6 +492,53 @@ impl GithubProvider {
     }
 }
 
+impl GithubProvider {
+    /// The PR's own diff, labelled with the head it is of. `pulls/{n}/files`
+    /// is always the PR as it is now, whatever head was asked for, so the
+    /// PR is read before and after the files (conditional: normally two
+    /// 304s); the same head both times is the files' head. A push in
+    /// between reads it all once more.
+    ///
+    /// The files are diffed from the merge base (three-dot), not from the
+    /// base branch tip the PR reports: the compare API of the PR's own base
+    /// and head names that commit.
+    fn review_diff(&self, r: &ReviewRef) -> CoreResult<FileDiff> {
+        let pull_path = format!("repos/{}/pulls/{}", r.repo, r.number);
+        for _ in 0..2 {
+            let pull: GhPull = self.api(&pull_path)?;
+            let (base, head) = (pull.base.sha, pull.head.sha);
+            check_sha(&base).map_err(|_| unexpected())?;
+            check_sha(&head).map_err(|_| unexpected())?;
+            let (files, merge_base) = std::thread::scope(|s| {
+                let a = s.spawn(|| self.api_list::<GhFile>(&format!("{pull_path}/files")));
+                let b = s.spawn(|| {
+                    self.get(
+                        &format!("repos/{}/compare/{base}...{head}", r.repo),
+                        Some(".merge_base_commit.sha"),
+                    )
+                });
+                (join(a), join(b))
+            });
+            let files = files?;
+            let merge_base = merge_base?.body.trim().to_string();
+            check_sha(&merge_base).map_err(|_| unexpected())?;
+            let after: GhPull = self.api(&pull_path)?;
+            if after.head.sha != head {
+                continue;
+            }
+            return Ok(FileDiff {
+                base_sha: merge_base,
+                head_sha: head,
+                truncated: files.len() >= PULL_FILES_LIMIT,
+                files: files.into_iter().map(changed_file).collect(),
+            });
+        }
+        Err(CoreError::Provider(
+            "the pull request got new commits while loading its diff; try again".into(),
+        ))
+    }
+}
+
 fn unexpected() -> CoreError {
     CoreError::Provider("unexpected response from gh".into())
 }
@@ -791,33 +838,7 @@ impl ReviewProvider for GithubProvider {
             DiffRange::Review { base, head } => {
                 check_sha(base)?;
                 check_sha(head)?;
-                // The PR's files are diffed from the merge base (three-dot),
-                // not from the base branch tip the PR reports: the compare
-                // API names that commit.
-                let (files, merge_base) = std::thread::scope(|s| {
-                    let a = s.spawn(|| {
-                        self.api_list::<GhFile>(&format!(
-                            "repos/{}/pulls/{}/files",
-                            r.repo, r.number
-                        ))
-                    });
-                    let b = s.spawn(|| {
-                        self.get(
-                            &format!("repos/{}/compare/{base}...{head}", r.repo),
-                            Some(".merge_base_commit.sha"),
-                        )
-                    });
-                    (join(a), join(b))
-                });
-                let files = files?;
-                let merge_base = merge_base?.body.trim().to_string();
-                check_sha(&merge_base).map_err(|_| unexpected())?;
-                Ok(FileDiff {
-                    base_sha: merge_base,
-                    head_sha: head.clone(),
-                    truncated: files.len() >= PULL_FILES_LIMIT,
-                    files: files.into_iter().map(changed_file).collect(),
-                })
+                self.review_diff(r)
             }
             DiffRange::Compare { from, to } => {
                 check_sha(from)?;
