@@ -43,6 +43,18 @@ test:
     cargo test --workspace
     -pnpm test
 
+# Rust needs cargo-llvm-cov (`rustup component add llvm-tools-preview &&
+# cargo install cargo-llvm-cov`); HTML lands in target/llvm-cov/html, the
+# frontend's (Vitest + v8) in coverage/.
+# Line coverage of both suites (not part of `just test` or CI).
+coverage:
+    @command -v cargo-llvm-cov >/dev/null 2>&1 \
+        || { echo "cargo-llvm-cov not installed: rustup component add llvm-tools-preview && cargo install cargo-llvm-cov"; exit 1; }
+    cargo llvm-cov --workspace --no-report
+    cargo llvm-cov report --summary-only --ignore-filename-regex '(testutil|guarantees)\.rs$'
+    cargo llvm-cov report --html --ignore-filename-regex '(testutil|guarantees)\.rs$'
+    pnpm test:coverage
+
 # Run only the core unit + integration tests.
 test-core:
     cargo test -p argus-core

@@ -2,6 +2,7 @@
 # Tauri shell, build outputs, generated artifacts, lockfiles, and repo docs) is
 # out of scope so `pnpm format` never churns files the frontend does not own.
 dist
+coverage
 node_modules
 target
 src-tauri

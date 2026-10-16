@@ -8,6 +8,7 @@ export default tseslint.config(
   {
     ignores: [
       "dist",
+      "coverage",
       "node_modules",
       "src-tauri",
       "crates",

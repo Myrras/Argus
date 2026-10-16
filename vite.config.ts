@@ -28,6 +28,14 @@ export default defineConfig(async () => ({
     css: false,
     clearMocks: true,
     restoreMocks: true,
+    // `just coverage` / `pnpm test:coverage` only; `pnpm test` stays fast.
+    coverage: {
+      provider: "v8",
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["src/**/*.test.{ts,tsx}", "src/test/**", "src/main.tsx"],
+      reporter: ["text-summary", "html", "json-summary"],
+      reportsDirectory: "coverage",
+    },
   },
 
   build: {
