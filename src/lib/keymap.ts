@@ -14,7 +14,8 @@
  * keys stay fixed (`RESERVED`).
  *
  * Unlike Iris, a bare key may be bound: Argus has no type-to-select for it to
- * fight, and its list keys (`r`, `1`–`4`, the arrows) are bare by default.
+ * fight, and its list keys (`1`–`4`, the arrows) and the review page's
+ * focus keys (`n`/`p`, `r`, `e`, `d`, M6) are bare by default.
  * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
  * `files` actions likewise, and only while a review is open; `composer`
  * actions only inside a comment composer (`CommentComposer`).
@@ -42,7 +43,15 @@ export type ActionId =
   | "openSettings"
   | "toggleThenNow"
   | "toggleFindings"
-  | "toggleFindingSelected";
+  | "toggleFindingSelected"
+  | "nextItem"
+  | "prevItem"
+  | "toggleThread"
+  | "replyThread"
+  | "editFinding"
+  | "dismissFinding"
+  | "openPalette"
+  | "showShortcuts";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
@@ -95,7 +104,8 @@ export const ACTIONS: ActionDef[] = [
     label: "Refresh",
     group: "Navigate",
     scope: "list",
-    defaults: ["KeyR", "Mod+KeyR"],
+    // Bare R replies to the focused thread (M6); refresh moved to ⇧R.
+    defaults: ["Shift+KeyR", "Mod+KeyR"],
   },
   {
     id: "showNeedsReview",
@@ -155,7 +165,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Comments",
     scope: "files",
     defaults: ["KeyC"],
-    note: "Opens a comment on the line you last clicked in a diff.",
+    note: "On the focused thread's or finding's line, else the line you last clicked in a diff.",
   },
   {
     id: "submitComment",
@@ -188,7 +198,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Comments",
     scope: "files",
     defaults: ["KeyH"],
-    note: "Shows or hides the code then and now of the thread you last clicked.",
+    note: "Shows or hides the code then and now of the focused thread.",
   },
   {
     id: "toggleFindings",
@@ -204,7 +214,71 @@ export const ACTIONS: ActionDef[] = [
     group: "Comments",
     scope: "files",
     defaults: ["KeyX"],
-    note: "Toggles the AI finding you last clicked. Posting stays a button.",
+    note: "Toggles the focused AI finding. Posting stays a button.",
+  },
+  {
+    id: "nextItem",
+    label: "Next thread or finding",
+    group: "Files",
+    scope: "files",
+    defaults: ["KeyN"],
+    note: "In a review: moves the focus down the page, in page order.",
+  },
+  {
+    id: "prevItem",
+    label: "Previous thread or finding",
+    group: "Files",
+    scope: "files",
+    defaults: ["KeyP"],
+    note: "In a review: moves the focus up the page.",
+  },
+  {
+    id: "toggleThread",
+    label: "Open or fold thread",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyT"],
+    note: "On the focused thread. Enter on it does the same (after ↑/↓ in the list, Enter opens that review).",
+  },
+  {
+    id: "replyThread",
+    label: "Reply to thread",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyR"],
+    note: "Opens a reply on the focused thread. It posts only with Reply or ⌘↩.",
+  },
+  {
+    id: "editFinding",
+    label: "Edit finding",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyE"],
+    note: "Edits the focused AI finding's text. Nothing is posted.",
+  },
+  {
+    id: "dismissFinding",
+    label: "Dismiss finding",
+    group: "Comments",
+    scope: "files",
+    defaults: ["KeyD"],
+    note: "Dismisses (or undismisses) the focused AI finding.",
+  },
+  {
+    id: "openPalette",
+    label: "Command palette",
+    group: "View",
+    scope: "list",
+    defaults: ["Mod+KeyK"],
+    note: "Every action, Go to review… and Go to file…",
+  },
+  {
+    id: "showShortcuts",
+    label: "Keyboard shortcuts",
+    group: "View",
+    scope: "list",
+    defaults: ["Shift+Slash"],
+    note: "Lists the shortcuts that work where you are.",
   },
 ];
 
@@ -296,6 +370,8 @@ export function codeOf(e: KeyEventLike): string | null {
   // Option changes the character (Option+S → "ß"): trust the physical key.
   if (!e.altKey || !code) {
     if (/^[a-z]$/i.test(e.key)) return `Key${e.key.toUpperCase()}`;
+    // "?" wherever the layout puts it (Shift+ß on German) is Shift+/.
+    if (e.key === "?") return "Slash";
     if (/^[0-9]$/.test(e.key) && !e.shiftKey) return `Digit${e.key}`;
   }
   if (code) return code;
@@ -480,14 +556,21 @@ function keyLabel(code: string, mac: boolean): string {
   return code;
 }
 
-/** `⇧⌘G` on a Mac, `Ctrl+Shift+G` elsewhere. */
+/** Keys shown as the character Shift makes of them (US layout). */
+const SHIFTED: Record<string, string> = { Slash: "?" };
+
+/** `⇧⌘G` on a Mac, `Ctrl+Shift+G` elsewhere; Shift+/ as `?`. */
 export function formatBinding(
   binding: string | Binding,
   mac: boolean = isMac,
 ): string {
-  const b = typeof binding === "string" ? parseBinding(binding) : binding;
-  if (!b) return "";
-  const key = keyLabel(b.code, mac);
+  const parsed = typeof binding === "string" ? parseBinding(binding) : binding;
+  if (!parsed) return "";
+  const b =
+    parsed.shift && !parsed.mod && !parsed.alt && parsed.code in SHIFTED
+      ? { ...parsed, shift: false }
+      : parsed;
+  const key = b !== parsed ? SHIFTED[parsed.code] : keyLabel(b.code, mac);
   if (mac) {
     return `${b.alt ? "⌥" : ""}${b.shift ? "⇧" : ""}${b.mod ? "⌘" : ""}${key}`;
   }

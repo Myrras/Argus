@@ -52,7 +52,7 @@ describe("SettingsModal — Shortcuts tab", () => {
     expect(keys("Next review")).toEqual(["↓"]);
     expect(keys("Previous review")).toEqual(["↑"]);
     expect(keys("Open review")).toEqual(["↩"]);
-    expect(keys("Refresh")).toEqual(["R", "⌘R"]);
+    expect(keys("Refresh")).toEqual(["⇧R", "⌘R"]);
     expect(keys("Needs review")).toEqual(["1"]);
     expect(keys("Closed without my approval")).toEqual(["4"]);
     // The native menu owns ⌘, on macOS.
@@ -75,10 +75,10 @@ describe("SettingsModal — Shortcuts tab", () => {
     // A modifier on its own keeps waiting.
     press({ key: "Meta", metaKey: true });
     expect(within(row("Refresh")).getByText("Press keys…")).toBeVisible();
-    const e = press({ key: "k", code: "KeyK", metaKey: true });
+    const e = press({ key: "u", code: "KeyU", metaKey: true });
     expect(e.defaultPrevented).toBe(true);
-    expect(keys("Refresh")).toEqual(["⌘K"]);
-    expect(stored()).toEqual({ refresh: ["Mod+KeyK"] });
+    expect(keys("Refresh")).toEqual(["⌘U"]);
+    expect(stored()).toEqual({ refresh: ["Mod+KeyU"] });
   });
 
   it("takes a bare key, unlike Iris (Argus has no type-to-select)", () => {
@@ -103,7 +103,7 @@ describe("SettingsModal — Shortcuts tab", () => {
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole("dialog", { name: "Settings" })).toBeVisible();
     expect(within(row("Refresh")).queryByText("Press keys…")).toBeNull();
-    expect(keys("Refresh")).toEqual(["R", "⌘R"]);
+    expect(keys("Refresh")).toEqual(["⇧R", "⌘R"]);
   });
 
   it("refuses a key another action uses, and offers a swap", () => {
@@ -161,7 +161,7 @@ describe("SettingsModal — Shortcuts tab", () => {
     expect(screen.getByRole("button", { name: "Reset all" })).toBeEnabled();
 
     fireEvent.click(reset("Refresh"));
-    expect(keys("Refresh")).toEqual(["R", "⌘R"]);
+    expect(keys("Refresh")).toEqual(["⇧R", "⌘R"]);
     expect(stored()).toEqual({ openReview: ["KeyO"] });
 
     fireEvent.click(screen.getByRole("button", { name: "Reset all" }));

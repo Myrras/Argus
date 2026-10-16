@@ -10,7 +10,8 @@
  *   Conversation section (`ConversationCard`: the threads without a code
  *   reference) and every shown file's `FileDiffCard` (its diff with its
  *   threads), in the tree's order. j/k (or the rebound keys) walk the
- *   Conversation and the files, v toggles Viewed (`useAppShortcuts`).
+ *   Conversation and the files, v toggles Viewed (`useAppShortcuts`);
+ *   n/p the threads and findings (`focusStore`, `usePageFocus`).
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -24,6 +25,7 @@ import {
 import { filterFiles, orderFiles } from "../lib/fileTree";
 import { formatBinding } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
+import { usePageFocus } from "../lib/usePageFocus";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useHistoryStore } from "../state/historyStore";
@@ -62,6 +64,8 @@ export function ReviewView({
   const keymap = useKeymap();
 
   const [query, setQuery] = useState("");
+  // Keyboard moves (n/p, j/k, the palette) put the DOM focus on the item.
+  usePageFocus(r.id);
   const canSince = canDiffSinceLastReview(r);
 
   useEffect(() => {
@@ -249,6 +253,8 @@ export function ReviewView({
             {formatBinding(keymap.nextFile[0] ?? "")}/
             {formatBinding(keymap.prevFile[0] ?? "")} next/prev ·{" "}
             {formatBinding(keymap.toggleViewed[0] ?? "")} viewed
+            {keymap.showShortcuts[0] &&
+              ` · ${formatBinding(keymap.showShortcuts[0])} all keys`}
           </span>
         </div>
         {entry?.error && (

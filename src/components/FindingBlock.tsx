@@ -8,7 +8,9 @@
  * posting" checkbox, Edit (the comment composer's textarea + Preview; Save
  * edit keeps the text, nothing posts), Dismiss / Undismiss, the reason a
  * post failed, and once posted a link to the comment. Posting happens only
- * from the AI island's "Post selected".
+ * from the AI island's "Post selected". The keyboard (M6): the focused
+ * finding (`aiStore.focused`, kept by `focusStore`) has a ring and the DOM
+ * focus; `x` selects it, `e` edits, `d` dismisses.
  */
 
 import { useEffect } from "react";
@@ -80,9 +82,14 @@ export function FindingBlock({
       data-posted={!!f.postedAt}
       data-failed={!!ui.error}
       data-focused={focused}
+      tabIndex={-1}
       aria-label={`AI finding: ${f.title}`}
+      aria-describedby={`finding-desc-${f.id}`}
       onMouseDown={() => focus(f.id)}
     >
+      <span id={`finding-desc-${f.id}`} className="visually-hidden">
+        {`${SEVERITY_LABEL[f.severity]} severity, ${findingLocation(f)}${f.dismissed ? ", dismissed" : ""}${f.postedAt ? ", posted" : ""}`}
+      </span>
       <div className={styles.head}>
         {canPost && (
           <input

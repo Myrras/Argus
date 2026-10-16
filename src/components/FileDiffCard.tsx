@@ -49,6 +49,7 @@ import {
 } from "../state/commentStore";
 import { findingPlacement } from "../lib/findings";
 import { useAiStore, useFindings } from "../state/aiStore";
+import { useRevealCard } from "../state/focusStore";
 import { DraftBlock, InlineComposer } from "./CommentBlocks";
 import { FindingBlock } from "./FindingBlock";
 import type { CommentGutter, LineItem } from "./DiffEditor";
@@ -128,6 +129,9 @@ export function FileDiffCard({
     }
     seenReveal.current = revealSeq;
   }, [revealSeq]);
+
+  // So does a keyboard move to one of its threads or findings (M6).
+  useRevealCard(f.path, () => setCollapsed(false));
 
   // Near the viewport? Without IntersectionObserver (tests), always.
   useEffect(() => {
@@ -438,6 +442,8 @@ export function FileDiffCard({
       className={styles.card}
       data-selected={selected}
       data-viewed={f.viewed}
+      data-file-card="file"
+      data-path={f.path}
       aria-label={`Diff of ${f.path}`}
     >
       <header className={styles.header}>
@@ -461,6 +467,7 @@ export function FileDiffCard({
         <button
           type="button"
           className={`ghost ${styles.path} mono`}
+          data-focus-target
           onClick={onSelect}
           title={f.path}
         >
