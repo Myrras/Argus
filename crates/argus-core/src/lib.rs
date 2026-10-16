@@ -18,10 +18,12 @@
 //! - [`settings`] — `settings.json`.
 //! - [`review`] — round detection, pure.
 //! - [`poll`] — refresh and the background loop.
+//! - [`files`] — the code view's file list and viewed marks.
 
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod files;
 pub mod ids;
 mod platform;
 pub mod poll;
@@ -33,12 +35,14 @@ pub mod store;
 #[cfg(test)]
 mod testutil;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
 
 pub use error::{CoreError, CoreResult};
+pub use files::{FileEntry, ReviewFiles};
 pub use ids::{ReviewId, ThreadId};
 pub use poll::{RefreshError, RefreshReport};
 pub use provider::{GithubStatus, GitlabStatus, ProviderStatus};
@@ -58,8 +62,10 @@ pub type RefreshCallback = Arc<dyn Fn(&RefreshReport) + Send + Sync>;
 /// into any detached task. Interior mutability ([`Mutex`]) keeps the public API
 /// `&self`, so callers never need a mutable borrow.
 ///
-/// Provider calls block (network, `gh`): call [`refresh`](Self::refresh)
-/// and [`file_at`](Self::file_at) from `spawn_blocking`, never the UI thread.
+/// Provider calls block (network, `gh`): call [`refresh`](Self::refresh),
+/// [`file_at`](Self::file_at), [`list_files`](Self::list_files) and
+/// [`set_file_viewed`](Self::set_file_viewed) from `spawn_blocking`, never
+/// the UI thread.
 pub struct Core {
     store: Arc<Store>,
     /// `None` for an in-memory core (tests): settings are not persisted.
@@ -67,6 +73,10 @@ pub struct Core {
     settings: Mutex<Settings>,
     providers: Mutex<Vec<Arc<dyn ReviewProvider>>>,
     poller: Mutex<Option<(poll::Poller, RefreshCallback)>>,
+    /// Per review: the head its content keys were read at, and the keys
+    /// (path → content sha) — what a viewed mark is stored with. Memory
+    /// only; refetched when the head moved.
+    content_keys: Mutex<HashMap<ReviewId, (String, files::ContentKeys)>>,
 }
 
 impl Default for Core {
@@ -114,6 +124,7 @@ impl Core {
             settings: Mutex::new(settings),
             providers: Mutex::new(providers),
             poller: Mutex::new(None),
+            content_keys: Mutex::new(HashMap::new()),
         }
     }
 
@@ -209,17 +220,82 @@ impl Core {
         Ok(next)
     }
 
+    /// The provider a review belongs to.
+    fn provider_for(&self, record: &ReviewRecord) -> CoreResult<Arc<dyn ReviewProvider>> {
+        self.providers()
+            .into_iter()
+            .find(|p| p.id() == record.review.provider && p.host() == record.review.host)
+            .ok_or_else(|| CoreError::Provider(format!("{} is not set up", record.review.provider)))
+    }
+
     /// The content of `path` at `sha` in the review's repository (blocking).
     pub fn file_at(&self, id: ReviewId, sha: &str, path: &str) -> CoreResult<String> {
         let record = self.review(id)?;
-        let provider = self
-            .providers()
-            .into_iter()
-            .find(|p| p.id() == record.review.provider && p.host() == record.review.host)
-            .ok_or_else(|| {
-                CoreError::Provider(format!("{} is not set up", record.review.provider))
+        self.provider_for(&record)?
+            .file_at(&record.review, sha, path)
+    }
+
+    /// The review's changed files with their viewed marks (blocking): its
+    /// own diff, or with `since_last_review` the diff from the commit last
+    /// marked reviewed to head (an error when there is none, or it is the
+    /// head).
+    pub fn list_files(&self, id: ReviewId, since_last_review: bool) -> CoreResult<ReviewFiles> {
+        let record = self.review(id)?;
+        let provider = self.provider_for(&record)?;
+        let (diff, keys) = files::fetch(provider.as_ref(), &record, since_last_review)?;
+        let marks = self.store.viewed(id)?;
+        let out = files::assemble(id, diff, &keys, &marks, since_last_review);
+        self.remember_keys(id, &record.head_sha, keys);
+        Ok(out)
+    }
+
+    /// Mark a changed file viewed (at its content at head) or not; returns
+    /// the review's viewed paths afterwards. Blocking: reads the review's
+    /// diff when its content keys are not known for the current head.
+    pub fn set_file_viewed(
+        &self,
+        id: ReviewId,
+        path: &str,
+        viewed: bool,
+    ) -> CoreResult<Vec<String>> {
+        let record = self.review(id)?;
+        let keys = self.keys_for(&record)?;
+        if viewed {
+            let sha = keys.get(path).ok_or_else(|| {
+                CoreError::InvalidInput("not a changed file of this review".into())
             })?;
-        provider.file_at(&record.review, sha, path)
+            self.store.set_viewed(id, path, sha, Utc::now())?;
+        } else {
+            self.store.clear_viewed(id, path)?;
+        }
+        Ok(store::viewed_paths(&self.store.viewed(id)?, &keys))
+    }
+
+    fn remember_keys(&self, id: ReviewId, head: &str, keys: files::ContentKeys) {
+        self.content_keys
+            .lock()
+            .expect("content keys lock poisoned")
+            .insert(id, (head.to_string(), keys));
+    }
+
+    /// The review's content keys at its current head, fetched when unknown.
+    fn keys_for(&self, record: &ReviewRecord) -> CoreResult<files::ContentKeys> {
+        let cached = self
+            .content_keys
+            .lock()
+            .expect("content keys lock poisoned")
+            .get(&record.id)
+            .filter(|(head, _)| *head == record.head_sha)
+            .map(|(_, keys)| keys.clone());
+        if let Some(keys) = cached {
+            return Ok(keys);
+        }
+        let diff = self
+            .provider_for(record)?
+            .fetch_files(&record.review, &files::review_range(record))?;
+        let keys = files::content_keys(&diff);
+        self.remember_keys(record.id, &record.head_sha, keys.clone());
+        Ok(keys)
     }
 
     /// Start the background refresh loop at the settings' interval (replacing

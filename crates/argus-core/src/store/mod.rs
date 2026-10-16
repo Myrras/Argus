@@ -7,6 +7,7 @@
 //!
 //! Nothing secret is ever stored here.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -128,6 +129,19 @@ const MIGRATIONS: &[&str] = &[
         round     INTEGER NOT NULL,
         text      TEXT NOT NULL,
         checked   INTEGER NOT NULL DEFAULT 0
+    );
+    "#,
+    // 2: files marked viewed in the code view, per review. `content_sha` is
+    // what the file was at head when marked (`ChangedFile::content_sha`): a
+    // mark only counts while the file still has it, so a file that changed
+    // since shows unviewed again.
+    r#"
+    CREATE TABLE viewed_files (
+        review_id   TEXT NOT NULL REFERENCES reviews(id) ON DELETE CASCADE,
+        path        TEXT NOT NULL,
+        content_sha TEXT NOT NULL,
+        viewed_at   TEXT NOT NULL,
+        PRIMARY KEY (review_id, path)
     );
     "#,
 ];
@@ -492,6 +506,60 @@ impl Store {
         }
         Ok(out)
     }
+}
+
+impl Store {
+    /// Mark `path` viewed at `content_sha` (replacing an older mark).
+    pub fn set_viewed(
+        &self,
+        review: ReviewId,
+        path: &str,
+        content_sha: &str,
+        at: DateTime<Utc>,
+    ) -> CoreResult<()> {
+        self.conn().execute(
+            "INSERT INTO viewed_files (review_id, path, content_sha, viewed_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(review_id, path) DO UPDATE SET
+                content_sha = excluded.content_sha, viewed_at = excluded.viewed_at",
+            params![review.to_string(), path, content_sha, at],
+        )?;
+        Ok(())
+    }
+
+    /// Drop the viewed mark of `path` (a no-op when there is none).
+    pub fn clear_viewed(&self, review: ReviewId, path: &str) -> CoreResult<()> {
+        self.conn().execute(
+            "DELETE FROM viewed_files WHERE review_id = ?1 AND path = ?2",
+            params![review.to_string(), path],
+        )?;
+        Ok(())
+    }
+
+    /// Every viewed mark of `review`: path → the content sha it was made at.
+    pub fn viewed(&self, review: ReviewId) -> CoreResult<HashMap<String, String>> {
+        let conn = self.conn();
+        let mut stmt =
+            conn.prepare("SELECT path, content_sha FROM viewed_files WHERE review_id = ?1")?;
+        let rows = stmt.query_map([review.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
+/// The paths of `current` (path → content sha at head) that are marked
+/// viewed at exactly that content: a mark made before the file changed
+/// does not count.
+pub fn viewed_paths(
+    marks: &HashMap<String, String>,
+    current: &HashMap<String, String>,
+) -> Vec<String> {
+    let mut out: Vec<String> = current
+        .iter()
+        .filter(|(path, sha)| marks.get(*path) == Some(*sha))
+        .map(|(path, _)| path.clone())
+        .collect();
+    out.sort();
+    out
 }
 
 /// Delete rows of `table` under `parent` whose `key` is not in `keep`.

@@ -479,4 +479,28 @@ fn refresh_end_to_end_through_the_core() {
             .unwrap(),
         "pub fn retries() -> u32 {\n    3\n}\n"
     );
+
+    // The code view: the files, a viewed mark that persists in the store.
+    let files = core.list_files(r21.id, false).unwrap();
+    assert_eq!(files.files.len(), 6);
+    assert_eq!(files.base_sha, BASE_SHA);
+    assert!(files.files.iter().all(|f| !f.viewed));
+    assert_eq!(
+        core.set_file_viewed(r21.id, "src/importer.rs", true)
+            .unwrap(),
+        ["src/importer.rs"]
+    );
+    let files = core.list_files(r21.id, false).unwrap();
+    let viewed: Vec<&str> = files
+        .files
+        .iter()
+        .filter(|f| f.viewed)
+        .map(|f| f.file.path.as_str())
+        .collect();
+    assert_eq!(viewed, ["src/importer.rs"]);
+    // Marked reviewed at the head: nothing to diff since.
+    assert!(matches!(
+        core.list_files(r21.id, true),
+        Err(CoreError::InvalidInput(_))
+    ));
 }
