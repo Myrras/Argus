@@ -23,6 +23,7 @@ import {
 import { age, fullTime } from "../lib/time";
 import { useReviewStore } from "../state/reviewStore";
 import { toastError, toastSuccess } from "../state/toastStore";
+import { AiRunIndicator } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import styles from "./ReviewList.module.css";
@@ -170,6 +171,7 @@ function ReviewItem({
           <PlatformBadge provider={r.provider} />
           <span className={`${styles.ref} mono`}>{reviewRef(r)}</span>
           {r.draft && <Badge>Draft</Badge>}
+          <AiRunIndicator reviewId={r.id} />
           <span
             className={styles.age}
             title={fullTime(r.updatedAt ?? r.fetchedAt)}

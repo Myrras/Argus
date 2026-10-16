@@ -1,0 +1,117 @@
+/* An AI finding under a line (inside CodeMirror) or at the top of a file.
+   Sans text in a mono editor, so the font is reset. The severity colours
+   the left edge; a solid edge apart from the threads' accent one. */
+.finding {
+  --sev: var(--info);
+  margin: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
+  max-width: 820px;
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  white-space: normal;
+  color: var(--text);
+  background: color-mix(in srgb, var(--sev) 5%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--sev) 35%, var(--border));
+  border-left: 3px solid var(--sev);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: box-shadow var(--dur-1) var(--ease-out);
+}
+
+.finding[data-severity="high"] {
+  --sev: var(--danger);
+}
+
+.finding[data-severity="medium"] {
+  --sev: var(--warning);
+}
+
+.finding[data-dismissed="true"],
+.finding[data-posted="true"] {
+  opacity: 0.75;
+  background: transparent;
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+.finding[data-focused="true"] {
+  box-shadow: 0 0 0 1px var(--sev);
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  background: color-mix(in srgb, var(--sev) 8%, var(--surface-2));
+  font-size: var(--fs-sm);
+}
+
+.head button {
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+}
+
+.check {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* The "AI" label: what sets a finding apart from a person's comment. */
+.ai {
+  flex-shrink: 0;
+  padding: 0 5px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  line-height: 16px;
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.title {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3) 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.where {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.body {
+  padding: var(--sp-1) var(--sp-3) var(--sp-2);
+  min-width: 0;
+}
+
+.editor {
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.error {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
+  -webkit-user-select: text;
+  user-select: text;
+}

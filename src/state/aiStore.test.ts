@@ -1,0 +1,290 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { fakeEvents, review, settings } from "../test/fixtures";
+import { aiRun, checklistItem, finding, verdict } from "../test/aiFixtures";
+
+const events = fakeEvents();
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn((name: string, cb: (e: { payload: unknown }) => void) =>
+    events.listen(name, cb),
+  ),
+}));
+vi.mock("@tauri-apps/plugin-log", () => ({
+  warn: vi.fn(() => Promise.resolve()),
+  error: vi.fn(() => Promise.resolve()),
+}));
+
+import { invoke } from "@tauri-apps/api/core";
+
+import type { FindingPostResult } from "../ipc/types";
+import { subscribeAiEvents, useAiStore } from "./aiStore";
+import { useBackendSettingsStore } from "./backendSettingsStore";
+import { useReviewStore } from "./reviewStore";
+import { useToastStore } from "./toastStore";
+
+const mockInvoke = vi.mocked(invoke);
+const initial = useAiStore.getState();
+const initialReviews = useReviewStore.getState();
+const initialSettings = useBackendSettingsStore.getState();
+
+const r = review();
+const ID = r.id;
+
+/** Every command that changes something (the platform or Argus' store). */
+const WRITES = [
+  "post_findings",
+  "run_ai",
+  "cancel_ai",
+  "dismiss_finding",
+  "set_checklist_checked",
+  "set_verdict_override",
+];
+
+const writes = () =>
+  mockInvoke.mock.calls.filter(([cmd]) => WRITES.includes(cmd));
+
+let findings = [
+  finding({ reviewId: ID, severity: "low", title: "Low one" }),
+  finding({ reviewId: ID, severity: "high", title: "High one" }),
+];
+let postResults: FindingPostResult[] = [];
+
+function backend(cmd: string, args?: unknown) {
+  const a = (args ?? {}) as Record<string, unknown>;
+  switch (cmd) {
+    case "ai_state":
+      return Promise.resolve(aiRun({ reviewId: String(a.reviewId) }));
+    case "list_findings":
+      return Promise.resolve(findings);
+    case "list_checklist":
+      return Promise.resolve([checklistItem({ reviewId: ID })]);
+    case "list_verdicts":
+      return Promise.resolve([verdict({ reviewId: ID })]);
+    case "post_findings":
+      return Promise.resolve(postResults);
+    case "dismiss_finding":
+      return Promise.resolve({ ...findings[0], dismissed: a.dismissed });
+    default:
+      return Promise.resolve(null);
+  }
+}
+
+beforeEach(() => {
+  mockInvoke.mockReset();
+  mockInvoke.mockImplementation(backend as typeof invoke);
+  useAiStore.setState({ ...initial, runs: {}, byReview: {}, ui: {} }, true);
+  useReviewStore.setState({ ...initialReviews, reviews: [] }, true);
+  useBackendSettingsStore.setState({ ...initialSettings }, true);
+  useToastStore.setState({ toasts: [] });
+  findings = [
+    finding({ reviewId: ID, severity: "low", title: "Low one" }),
+    finding({ reviewId: ID, severity: "high", title: "High one" }),
+  ];
+});
+
+describe("aiStore", () => {
+  it("loads the run and the output when a review opens", async () => {
+    await useAiStore.getState().load(ID);
+    expect(mockInvoke).toHaveBeenCalledWith("ai_state", { reviewId: ID });
+    expect(mockInvoke).toHaveBeenCalledWith("list_findings", { reviewId: ID });
+    expect(mockInvoke).toHaveBeenCalledWith("list_checklist", {
+      reviewId: ID,
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("list_verdicts", { reviewId: ID });
+    const s = useAiStore.getState();
+    expect(s.runs[ID].status).toBe("done");
+    expect(s.byReview[ID].findings).toHaveLength(2);
+    expect(s.byReview[ID].checklist).toHaveLength(1);
+    expect(s.byReview[ID].verdicts).toHaveLength(1);
+  });
+
+  it("re-reads the output when ai:state reports a finished run", async () => {
+    const off = await subscribeAiEvents();
+    await useAiStore.getState().load(ID);
+    events.emit("ai:state", aiRun({ reviewId: ID, status: "running" }));
+    expect(useAiStore.getState().runs[ID].status).toBe("running");
+    mockInvoke.mockClear();
+    // Running → no re-read yet.
+    events.emit("ai:state", aiRun({ reviewId: ID, status: "running" }));
+    expect(mockInvoke).not.toHaveBeenCalledWith("list_findings", {
+      reviewId: ID,
+    });
+    findings = [finding({ reviewId: ID, title: "New one" })];
+    events.emit(
+      "ai:state",
+      aiRun({ reviewId: ID, finishedAt: "2026-10-16T11:00:00Z" }),
+    );
+    await vi.waitFor(() =>
+      expect(useAiStore.getState().byReview[ID].findings[0].title).toBe(
+        "New one",
+      ),
+    );
+    off();
+  });
+
+  it("re-reads a loaded review on review:changed, and only that one", async () => {
+    const off = await subscribeAiEvents();
+    await useAiStore.getState().load(ID);
+    mockInvoke.mockClear();
+    events.emit("review:changed", { reviewId: "someone-else" });
+    expect(mockInvoke).not.toHaveBeenCalled();
+    events.emit("review:changed", { reviewId: ID });
+    await vi.waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("list_findings", {
+        reviewId: ID,
+      }),
+    );
+    off();
+  });
+
+  it("reads the run of every listed review, once", async () => {
+    const off = await subscribeAiEvents();
+    const other = review();
+    useReviewStore.setState({ reviews: [r, other] });
+    useReviewStore.setState({ reviews: [r, other] });
+    await vi.waitFor(() =>
+      expect(Object.keys(useAiStore.getState().runs)).toHaveLength(2),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "ai_state"),
+    ).toHaveLength(2);
+    off();
+  });
+
+  it("re-reads everything when the AI pass is switched in Settings", async () => {
+    const off = await subscribeAiEvents();
+    useBackendSettingsStore.setState({ settings: settings() });
+    await useAiStore.getState().load(ID);
+    mockInvoke.mockClear();
+    useBackendSettingsStore.setState({
+      settings: settings({
+        ai: { enabled: false, adapter: "claude", args: [], binary: null },
+      }),
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("ai_state", { reviewId: ID });
+    expect(mockInvoke).toHaveBeenCalledWith("list_findings", { reviewId: ID });
+    off();
+  });
+
+  it("writes nothing on its own: loads and events are reads only", async () => {
+    const off = await subscribeAiEvents();
+    useReviewStore.setState({ reviews: [r] });
+    await useAiStore.getState().load(ID);
+    useAiStore.getState().setSelected(findings[0].id, true);
+    events.emit("ai:state", aiRun({ reviewId: ID, finishedAt: "later" }));
+    events.emit("review:changed", { reviewId: ID });
+    await new Promise((res) => setTimeout(res, 0));
+    expect(writes()).toEqual([]);
+    off();
+  });
+
+  it("posts the selected findings with their edits; a failure keeps its selection and reason", async () => {
+    await useAiStore.getState().load(ID);
+    const [low, high] = findings;
+    const s = useAiStore.getState();
+    s.setSelected(low.id, true);
+    s.setSelected(high.id, true);
+    s.openEditor(low);
+    s.setEditorText(low.id, "My own words");
+    s.saveEditor(low);
+    postResults = [
+      {
+        findingId: high.id,
+        status: "posted",
+        postedUrl: "https://github.com/acme-fixture/widgets/pull/1#c1",
+        postedAt: "2026-10-16T12:00:00Z",
+      },
+      {
+        findingId: low.id,
+        status: "failed",
+        kind: "lineNotInDiff",
+        message: "The line is not in the diff any more.",
+      },
+    ];
+    await useAiStore.getState().postSelected(ID);
+    // High first (the list's order); the edit goes with the low one only.
+    expect(mockInvoke).toHaveBeenCalledWith("post_findings", {
+      reviewId: ID,
+      posts: [
+        { findingId: high.id, body: null },
+        { findingId: low.id, body: "My own words" },
+      ],
+    });
+    const ui = useAiStore.getState().ui;
+    expect(ui[high.id]?.selected).toBe(false);
+    expect(ui[low.id]).toMatchObject({
+      selected: true,
+      edit: "My own words",
+      error: { kind: "lineNotInDiff" },
+    });
+    const toasts = useToastStore.getState().toasts.map((t) => t.message);
+    expect(toasts).toContain("Posted 1 finding");
+    expect(toasts).toContain("1 of 2 findings not posted");
+    // Re-read after the post.
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "list_findings"),
+    ).toHaveLength(2);
+  });
+
+  it("keeps everything when nothing could be tried", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    useAiStore.getState().setSelected(low.id, true);
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "post_findings"
+        ? Promise.reject({ kind: "githubUnavailable", message: "gh is gone" })
+        : backend(cmd, args)) as typeof invoke);
+    await useAiStore.getState().postSelected(ID);
+    expect(useAiStore.getState().ui[low.id]?.selected).toBe(true);
+    expect(useAiStore.getState().posting[ID]).toBeUndefined();
+    expect(useToastStore.getState().toasts[0].message).toBe(
+      "Could not post the findings",
+    );
+  });
+
+  it("posts nothing when nothing is selected", async () => {
+    await useAiStore.getState().load(ID);
+    await useAiStore.getState().postSelected(ID);
+    expect(writes()).toEqual([]);
+  });
+
+  it("dismisses (deselecting) and re-reads", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    useAiStore.getState().setSelected(low.id, true);
+    mockInvoke.mockClear();
+    await useAiStore.getState().dismiss(low, true);
+    expect(mockInvoke).toHaveBeenCalledWith("dismiss_finding", {
+      findingId: low.id,
+      dismissed: true,
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("list_findings", { reviewId: ID });
+    expect(useAiStore.getState().ui[low.id]?.selected).toBe(false);
+  });
+
+  it("toggles the focused finding's selection, not a posted one", async () => {
+    findings = [
+      finding({ reviewId: ID }),
+      finding({ reviewId: ID, postedAt: "2026-10-16T12:00:00Z" }),
+    ];
+    await useAiStore.getState().load(ID);
+    const [open, posted] = findings;
+    const s = useAiStore.getState();
+    expect(s.toggleFocused(ID)).toBe(false);
+    s.focus(open.id);
+    expect(useAiStore.getState().toggleFocused(ID)).toBe(true);
+    expect(useAiStore.getState().ui[open.id]?.selected).toBe(true);
+    useAiStore.getState().focus(posted.id);
+    expect(useAiStore.getState().toggleFocused(ID)).toBe(false);
+  });
+
+  it("saving the unchanged default is no edit", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    const s = useAiStore.getState();
+    s.openEditor(low);
+    s.saveEditor(low);
+    expect(useAiStore.getState().ui[low.id]?.edit).toBeNull();
+  });
+});

@@ -31,6 +31,8 @@ import { useSettingsRequestStore } from "./state/settingsRequestStore";
 import { subscribeThreadEvents } from "./state/threadStore";
 import { subscribeHistoryEvents } from "./state/historyStore";
 import { subscribeCodeViewEvents } from "./state/codeViewStore";
+import { subscribeAiEvents } from "./state/aiStore";
+import { AiPanel } from "./components/AiPanel";
 import { LogoMark } from "./components/LogoMark";
 import { ReviewDetail } from "./components/ReviewDetail";
 import { SettingsModal } from "./components/SettingsModal";
@@ -71,6 +73,7 @@ export default function App() {
         subscribeHistoryEvents(),
         subscribeCodeViewEvents(),
         subscribeBackendSettingsEvents(),
+        subscribeAiEvents(),
       ]).catch(() => [] as (() => void)[]);
       if (cancelled) {
         subs.forEach((off) => off());
@@ -203,7 +206,11 @@ export default function App() {
           aria-label="Resize sidebar"
         />
         <main className={styles.work}>
-          <ReviewDetail now={now} />
+          {/* The detail island, with the AI island at its right. */}
+          <div className={styles.workRow}>
+            <ReviewDetail now={now} />
+            <AiPanel />
+          </div>
         </main>
       </div>
 

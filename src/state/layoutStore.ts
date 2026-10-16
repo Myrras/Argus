@@ -1,7 +1,8 @@
 /**
  * Persistent shell layout (Iris's `layoutStore`): sidebar width, the
- * Providers section's collapse, and the review view's file tree (open, tree
- * or flat) and diff layout (unified or side by side).
+ * Providers section's collapse, the review view's file tree (open, tree
+ * or flat) and diff layout (unified or side by side), and whether the AI
+ * island (findings and checklist) is open.
  *
  * Builds with a Threads / Files tab strip saved `detailTab`; `load` ignores
  * it and the next save drops it.
@@ -23,6 +24,8 @@ interface LayoutPersisted {
   fileTreeOpen: boolean;
   diffLayout: DiffLayout;
   fileListMode: FileListMode;
+  /** Whether the AI island right of the review is open. */
+  aiPanelOpen: boolean;
 }
 
 export const SIDEBAR_MIN_WIDTH = 240;
@@ -36,6 +39,7 @@ const DEFAULTS: LayoutPersisted = {
   fileTreeOpen: true,
   diffLayout: "unified",
   fileListMode: "tree",
+  aiPanelOpen: true,
 };
 
 function clampWidth(width: number): number {
@@ -56,6 +60,7 @@ function load(): LayoutPersisted {
       fileTreeOpen: saved.fileTreeOpen !== false,
       diffLayout: saved.diffLayout === "split" ? "split" : "unified",
       fileListMode: saved.fileListMode === "flat" ? "flat" : "tree",
+      aiPanelOpen: saved.aiPanelOpen !== false,
     };
   } catch {
     return { ...DEFAULTS };
@@ -72,6 +77,7 @@ function persist(state: LayoutPersisted) {
         fileTreeOpen: state.fileTreeOpen,
         diffLayout: state.diffLayout,
         fileListMode: state.fileListMode,
+        aiPanelOpen: state.aiPanelOpen,
       }),
     );
   } catch {
@@ -85,6 +91,8 @@ interface LayoutState extends LayoutPersisted {
   toggleFileTree: () => void;
   setDiffLayout: (layout: DiffLayout) => void;
   setFileListMode: (mode: FileListMode) => void;
+  setAiPanelOpen: (open: boolean) => void;
+  toggleAiPanel: () => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set, get) => {
@@ -100,5 +108,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => {
     toggleFileTree: () => update({ fileTreeOpen: !get().fileTreeOpen }),
     setDiffLayout: (layout) => update({ diffLayout: layout }),
     setFileListMode: (mode) => update({ fileListMode: mode }),
+    setAiPanelOpen: (open) => update({ aiPanelOpen: open }),
+    toggleAiPanel: () => update({ aiPanelOpen: !get().aiPanelOpen }),
   };
 });

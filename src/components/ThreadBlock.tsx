@@ -34,6 +34,7 @@ import { CaretIcon } from "./icons";
 import { Markdown, type RenderFence } from "./Markdown";
 import { SuggestedChange } from "./SuggestedChange";
 import { ThenNow, Timeline } from "./ThreadHistory";
+import { VerdictBadge } from "./VerdictBadge";
 import styles from "./ThreadBlock.module.css";
 
 function preview(t: StoredThread): string {
@@ -128,6 +129,11 @@ export function ThreadBlock({
           {t.resolved && <Badge tone="success">Resolved</Badge>}
           {!open && <span className={styles.preview}>{preview(t)}</span>}
         </button>
+        <VerdictBadge
+          reviewId={t.reviewId}
+          threadId={t.threadId}
+          provider={provider}
+        />
         <button
           type="button"
           className={`ghost ${styles.history}`}
