@@ -100,28 +100,48 @@ sibling app Iris (`../Iris`).
     count + Post all, Approve… with `ApproveModal`. Keys `commentLine`
     (`files`), `submitComment` / `cancelComment` (new `composer` scope;
     Escape is `fixed`). Ranges: `lib/commentRanges` (one hunk).
-- 🟡 **Milestones 3 + 5 — Thread history and the AI pass: cores merged,
-  IPC done, UI pending.**
-  - Core `history/` (M3): `thread_history(ThreadId)` /
-    `review_histories(ReviewId)` (then/now snapshots, line walk to head,
-    diff rows, timeline of notes, commits and resolve events; cached per
-    thread + head in SQLite), `cached_snapshot` (for the AI prompt),
-    `thread_review`. Provider `commit_diff` + `thread_resolutions`. A
-    history call that computes walks rewrites the review's untouched count.
-  - Core `ai/` (M5): a local agent CLI (`claude`, `auggie`; read-only flags,
-    token-free env) reviews the diff headless: findings, a checklist, and
-    verdicts on the user's threads in later rounds. Per review serial, two
-    runs at once. `run_ai` / `cancel_ai`, `on_refresh_report` (the poll
-    hook: queues runs, never waits), `on_ai_state`, `dismiss_finding`,
-    `set_checklist_checked`, `set_verdict_override` (local only),
-    `post_findings` (through the post API; explicit only). Migrations 3 and
-    4 are intentional no-ops, 5 adds `ai_runs` + `findings.side`;
-    `AiSettings.binary` (optional agent path).
-  - Shell: `commands/history.rs` (emits `review:changed` when the untouched
-    count moved), `commands/ai.rs` (`post_findings` emits `review:changed`
-    after any posted). TS types/wrappers in their own `// --- Thread
-    history (M3) ---` and `// --- AI pass (M5) ---` sections of
-    `src/ipc/*.ts`. No stores or UI yet.
+- ✅ **Milestone 3 — Thread history.** Core `history/`:
+  `thread_history(ThreadId)` / `review_histories(ReviewId)` (then/now
+  snapshots, line walk to head, diff rows, timeline of notes, commits and
+  resolve events; cached per thread + head in SQLite), `cached_snapshot`
+  (for the AI prompt), `thread_review`. Provider `commit_diff` +
+  `thread_resolutions`. A history call that computes walks rewrites the
+  review's untouched count. Shell `commands/history.rs` (emits
+  `review:changed` when the untouched count moved).
+  - UI: `historyStore` (histories per review + head, re-read on
+    `review:changed` and when the thread store sees changed content; the
+    then/now `expanded` set and the `focused` thread for the key),
+    `useThreadHistory` (per-thread load/error for `ThreadBlock`),
+    `ThreadHistory` = `ThenNow` (Then/Now columns aligned from the backend's
+    diff rows, side by side or stacked, a status line per `LineStatus`) +
+    `Timeline` (notes, commits, resolves; long comments fold),
+    `ThenNowEditor` (lazy CodeMirror column, plain rows until loaded),
+    pure rules in `lib/threadHistory`. Your own threads open it by default;
+    key `toggleThenNow` (`h`, scope `files`) acts on the thread last clicked.
+- ✅ **Milestone 5 — The AI pass.** Core `ai/`: a local agent CLI (`claude`,
+  `auggie`; read-only flags, token-free env) reviews the diff headless:
+  findings, a checklist, and verdicts on the user's threads in later rounds.
+  Per review serial, two runs at once. `run_ai` / `cancel_ai`,
+  `on_refresh_report` (the poll hook: queues runs, never waits),
+  `on_ai_state`, `dismiss_finding`, `set_checklist_checked`,
+  `set_verdict_override` (local only), `post_findings` (through the post
+  API; explicit only). Migrations 3 and 4 are intentional no-ops, 5 adds
+  `ai_runs` + `findings.side`; `AiSettings.binary` (optional agent path).
+  Shell `commands/ai.rs` (`post_findings` emits `review:changed` after any
+  posted). TS types/wrappers in the `// --- Thread history (M3) ---` and
+  `// --- AI pass (M5) ---` sections of `src/ipc/*.ts`.
+  - UI: `aiStore` (latest run per review via `ai_state` + `ai:state`;
+    findings, checklist and verdicts for opened reviews; per finding the
+    selection, edited text, open editor and last post failure; with the pass
+    off nothing shows), `AiStatus` (header chip, Run again / Retry / Cancel,
+    panel toggle; `AiRunIndicator` in the list), `AiPanel` (the island right
+    of the detail in `App`'s `workRow`: `FindingsList` by severity with
+    "Post selected", over `Checklist`; open state in
+    `layoutStore.aiPanelOpen`), `FindingBlock` (inline under its line or at
+    the top of its file), `VerdictBadge` (in the thread header; your own call
+    overrides, Argus-only), pure rules in `lib/findings`. Keys
+    `toggleFindings` (`a`, scope `files`) and `toggleFindingSelected` (`x`).
+    Only the "Post selected" button posts.
 
 ## Architecture
 
