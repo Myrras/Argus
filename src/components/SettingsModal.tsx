@@ -536,7 +536,7 @@ function AiTab() {
       <h3 className={styles.sectionLabel}>AI</h3>
       <SettingToggle
         label="AI analysis"
-        help="Saved now, used in a later release."
+        help="Analyses new reviews and rounds with your local agent (Claude Code or auggie)."
         value={ai?.enabled ?? false}
         disabled={!ai}
         onChange={(enabled) => ai && void save({ ai: { ...ai, enabled } })}

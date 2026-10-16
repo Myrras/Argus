@@ -82,15 +82,33 @@ when it merges.
   bar elsewhere), in tabs: General (dark, light or retro theme, reduced
   motion, the refresh interval), GitHub (on or off, host and account),
   GitLab (URL and token; the token goes to the keychain only, Settings shows
-  just whether one is set, and it can be removed), AI (analysis on or off,
-  saved now and used in a later release, and a local clone folder per
-  repository), and Shortcuts. Switches apply at once, text fields have their
+  just whether one is set, and it can be removed), AI (the AI analysis on
+  or off, and a local clone folder per repository), and Shortcuts. Switches apply at once, text fields have their
   own Save.
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` (or
   `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in a review, `c` to
   comment on the line you last clicked, `⌘↩` to submit a comment and `Esc`
   to cancel it, `⌘,` for Settings. Every shortcut except `Esc` can be
   rebound in Settings → Shortcuts.
+- AI analysis: with it on in Settings, your local agent (Claude Code or
+  auggie) reviews each new item and each new round on its own. The review
+  header shows where it stands (not started, queued, running, done with the
+  number of findings, or failed with the reason), with Run again, Retry or
+  Cancel, and the list marks items whose analysis is running. Findings sit
+  inline in the code under their line, coloured by severity and labelled
+  AI, or at the top of their file when the line is not in the diff. The AI
+  panel at the right (`a` shows or hides it) lists them by severity with
+  the ones from earlier rounds marked, and "Look here yourself": what the
+  AI could not check on its own, to tick off per round. Select findings
+  (click or `x`), edit their text with a preview, or dismiss them; "Post
+  selected" posts them as line comments, links each posted one, and keeps a
+  refused one selected with its reason without holding up the rest.
+  Nothing is posted until you press it. In later rounds each of your
+  threads shows whether the AI thinks it was addressed, partly addressed or
+  untouched, with its reasoning; you can set your own call or clear it. The
+  label stays in Argus and never changes the thread on GitHub or GitLab.
+  With the AI analysis off, none of this shows and everything else works
+  as before.
 
 ## [0.1.0] - 2026-10-16
 
