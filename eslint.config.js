@@ -12,6 +12,8 @@ export default tseslint.config(
       "src-tauri",
       "crates",
       "target",
+      ".claude",
+      ".podium",
       "**/*.config.js",
       "**/*.config.ts",
     ],
