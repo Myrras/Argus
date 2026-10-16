@@ -1,0 +1,39 @@
+/* A thread's AI verdict: a small pill in the thread header that opens the
+   override menu. */
+.badge {
+  --tone: var(--text-muted);
+  flex-shrink: 0;
+  height: 18px;
+  margin-right: var(--sp-1);
+  padding: 0 6px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1;
+  color: var(--tone);
+  background: color-mix(in srgb, var(--tone) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tone) 30%, transparent);
+  border-radius: var(--radius-sm);
+}
+
+.badge:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--tone) 20%, transparent);
+  border-color: color-mix(in srgb, var(--tone) 45%, transparent);
+}
+
+.badge[data-label="addressed"] {
+  --tone: var(--success);
+}
+
+.badge[data-label="partly"] {
+  --tone: var(--warning);
+}
+
+.badge[data-label="untouched"] {
+  --tone: var(--danger);
+}
+
+/* The user's own call: a solid edge, so it reads as theirs. */
+.badge[data-override="true"] {
+  border-style: solid;
+  border-width: 1px 1px 1px 3px;
+}
