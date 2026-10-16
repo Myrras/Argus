@@ -1,6 +1,6 @@
-/* Files tab: the file tree (collapsible) beside the diff, inside the detail
-   island. */
-.files {
+/* The review view: the navigation tree (collapsible) beside the scrolling
+   page (Conversation, then the files), inside the detail island. */
+.view {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -88,7 +88,7 @@
   overflow: auto;
 }
 
-/* The diff column scrolls as a whole; each file's header sticks. */
+/* The page scrolls as a whole; each section's header sticks. */
 .diff {
   flex: 1;
   min-width: 0;

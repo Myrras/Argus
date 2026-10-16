@@ -1,8 +1,10 @@
 /**
- * A thread as the code view shows it, under its line or in a file's
- * "Outdated threads" section: the user's own threads open and accent-edged,
- * everyone else's folded to one line (author, count, first words) until
- * clicked. Notes in order, as on the thread card.
+ * A thread as the review view shows it — under its line, in a file's
+ * "Outdated threads" / "Threads on this file" section, or in the
+ * Conversation: the user's own threads open and accent-edged, everyone
+ * else's folded to one line (author, count, first words) until clicked.
+ * Notes in order. A thread with a code reference has a "Then/now history"
+ * toggle that expands its then/now slot (M3) in place.
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
@@ -11,9 +13,9 @@
 import { useState } from "react";
 
 import type { ProviderId, StoredThread } from "../ipc/types";
+import { isConversationThread } from "../lib/diffThreads";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
-import { showInThreadsTab } from "../state/codeViewStore";
 import { Badge } from "./Badge";
 import { CaretIcon } from "./icons";
 import styles from "./ThreadBlock.module.css";
@@ -34,34 +36,68 @@ export function ThreadBlock({
   onResize?: () => void;
 }) {
   const [open, setOpen] = useState(t.mine);
+  const [history, setHistory] = useState(false);
   const comments = t.notes.filter((n) => !n.system).length;
+  const anchored = !isConversationThread(t);
+  // After React commits the new height.
+  const resized = () => requestAnimationFrame(() => onResize?.());
   const toggle = () => {
     setOpen((o) => !o);
-    // After React commits the new height.
-    requestAnimationFrame(() => onResize?.());
+    resized();
+  };
+  const toggleHistory = () => {
+    setHistory((h) => !h);
+    setOpen(true);
+    resized();
   };
 
   return (
     <article
+      id={`thread-${t.threadId}`}
       className={styles.thread}
       data-mine={t.mine}
       data-open={open}
+      data-resolved={t.resolved}
       aria-label={`Thread by ${t.author}`}
     >
-      <button
-        type="button"
-        className={styles.head}
-        aria-expanded={open}
-        onClick={toggle}
-      >
-        <CaretIcon size={12} className={styles.caret} data-open={open} />
-        <span className={styles.author}>{t.author}</span>
-        <span className={styles.count}>
-          {comments} {comments === 1 ? "comment" : "comments"}
-        </span>
-        {t.resolved && <Badge tone="success">Resolved</Badge>}
-        {!open && <span className={styles.preview}>{preview(t)}</span>}
-      </button>
+      <div className={styles.headRow}>
+        <button
+          type="button"
+          className={styles.head}
+          aria-expanded={open}
+          onClick={toggle}
+        >
+          <CaretIcon size={12} className={styles.caret} data-open={open} />
+          <span className={styles.author}>{t.author}</span>
+          <span className={styles.count}>
+            {comments} {comments === 1 ? "comment" : "comments"}
+          </span>
+          {t.resolved && <Badge tone="success">Resolved</Badge>}
+          {!open && <span className={styles.preview}>{preview(t)}</span>}
+        </button>
+        {anchored && (
+          <button
+            type="button"
+            className={`ghost ${styles.history}`}
+            aria-expanded={history}
+            aria-controls={`then-now-${t.threadId}`}
+            onClick={toggleHistory}
+          >
+            Then/now history
+          </button>
+        )}
+      </div>
+      {/* Then/now code view (M3): the code at the comment's commit and at the
+          current head, expanded in place. */}
+      {anchored && history && (
+        <div
+          id={`then-now-${t.threadId}`}
+          className={styles.thenNow}
+          data-slot="then-now"
+        >
+          Code then and now: coming soon
+        </div>
+      )}
       {open && (
         <ol className={styles.notes}>
           {t.notes.map((n) => (
@@ -82,8 +118,9 @@ export function ThreadBlock({
 }
 
 /**
- * A thread listed at the top of its file: outdated (badge, the platform's
- * snippet, a link to its then/now history) or current without a usable line.
+ * A thread listed at the top of its file or in the Conversation's "On other
+ * files": where it sits, outdated (badge, the commit, the platform's
+ * snippet) or current without a usable line, then the thread itself.
  */
 export function ListedThread({
   thread: t,
@@ -115,13 +152,6 @@ export function ListedThread({
             on {sha}
           </span>
         )}
-        <button
-          type="button"
-          className={`ghost ${styles.history}`}
-          onClick={() => showInThreadsTab(t.threadId)}
-        >
-          Then/now history
-        </button>
       </div>
       {t.outdated && a?.diffHunk && (
         <pre className={`${styles.hunk} mono`}>

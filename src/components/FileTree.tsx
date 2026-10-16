@@ -1,8 +1,9 @@
 /**
- * The Files tab's file list (`data-slot="file-tree"` body): folders with
- * single-child chains compacted, or a flat path list. Per file its status,
- * +/− counts, thread count (accent when some are the user's) and a Viewed
- * checkbox. Selecting a file scrolls the diff column to it.
+ * The review view's navigation (`data-slot="file-tree"` body): a
+ * Conversation entry with its thread count first, then the changed files as
+ * folders with single-child chains compacted, or a flat path list. Per file
+ * its status, +/− counts, thread count (accent when some are the user's) and
+ * a Viewed checkbox. Selecting an entry scrolls the page to it.
  */
 
 import { useState } from "react";
@@ -11,7 +12,7 @@ import type { FileEntry } from "../ipc/types";
 import { buildTree, type TreeNode } from "../lib/fileTree";
 import type { FileListMode } from "../state/layoutStore";
 import { FileStatusMark, LineStats, ThreadCount } from "./FileStatusMark";
-import { CaretIcon } from "./icons";
+import { CaretIcon, ThreadsIcon } from "./icons";
 import styles from "./FileTree.module.css";
 
 export interface FileTreeProps {
@@ -21,6 +22,14 @@ export interface FileTreeProps {
   counts: ReadonlyMap<string, { total: number; mine: number }>;
   onSelect: (path: string) => void;
   onToggleViewed: (file: FileEntry) => void;
+  /** Shown when `files` is empty; `null` shows nothing. */
+  empty?: string | null;
+  /** The Conversation entry above the files. */
+  conversation?: {
+    count: { total: number; mine: number };
+    selected: boolean;
+    onSelect: () => void;
+  };
 }
 
 export function FileTree(props: FileTreeProps) {
@@ -34,9 +43,7 @@ export function FileTree(props: FileTreeProps) {
       return next;
     });
 
-  if (files.length === 0) {
-    return <p className={styles.empty}>No files match.</p>;
-  }
+  const c = props.conversation;
   const rows =
     mode === "tree"
       ? renderNodes(buildTree(files), 0, closed, toggleDir, props)
@@ -44,9 +51,34 @@ export function FileTree(props: FileTreeProps) {
           <FileRow key={f.path} file={f} depth={0} label={f.path} {...props} />
         ));
   return (
-    <ul className={styles.tree} role="tree" aria-label="Changed files">
-      {rows}
-    </ul>
+    <>
+      <ul className={styles.tree} role="tree" aria-label="Changed files">
+        {c && (
+          <li
+            role="treeitem"
+            aria-selected={c.selected}
+            className={`${styles.fileItem} ${styles.conversationItem}`}
+            data-selected={c.selected}
+          >
+            <button
+              type="button"
+              className={styles.file}
+              style={{ paddingLeft: indent(0) }}
+              onClick={c.onSelect}
+              title="Comments on the review as a whole"
+            >
+              <ThreadsIcon className={styles.conversationIcon} />
+              <span className={styles.name}>Conversation</span>
+              <ThreadCount {...c.count} />
+            </button>
+          </li>
+        )}
+        {rows}
+      </ul>
+      {files.length === 0 && props.empty !== null && (
+        <p className={styles.empty}>{props.empty ?? "No files match."}</p>
+      )}
+    </>
   );
 }
 

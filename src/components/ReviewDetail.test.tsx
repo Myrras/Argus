@@ -9,18 +9,24 @@ vi.mock("@tauri-apps/plugin-log", () => ({
   warn: vi.fn(() => Promise.resolve()),
   error: vi.fn(() => Promise.resolve()),
 }));
+// CodeMirror needs a layout engine; ReviewView.test covers the diffs.
+vi.mock("./DiffEditor", () => ({
+  DiffEditor: (p: { path: string }) => <div data-testid={`editor-${p.path}`} />,
+}));
 
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { clearContentsCache, useCodeViewStore } from "../state/codeViewStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useThreadStore } from "../state/threadStore";
-import { review, thread } from "../test/fixtures";
+import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { ReviewDetail } from "./ReviewDetail";
 
 const mockInvoke = vi.mocked(invoke);
 const initialReviews = useReviewStore.getState();
 const initialThreads = useThreadStore.getState();
+const initialCode = useCodeViewStore.getState();
 const NOW = Date.parse("2026-10-16T12:00:00Z");
 
 const r = review({
@@ -45,6 +51,15 @@ const threads = [
     createdAt: "2026-10-15T08:00:00Z",
     outdated: true,
     anchor: { ...thread().anchor!, pathNew: "src/cache.rs", lineNew: 42 },
+    notes: [
+      {
+        id: "n-outdated",
+        author: "rev-fixture",
+        body: "Cache this lookup.",
+        createdAt: "2026-10-15T08:00:00Z",
+        system: false,
+      },
+    ],
   }),
   thread({
     reviewId: r.id,
@@ -56,13 +71,31 @@ const threads = [
   }),
 ];
 
+const files = reviewFiles({
+  reviewId: r.id,
+  files: [
+    file({ path: "src/cache.rs" }),
+    file({ path: "src/other.rs", additions: 1, deletions: 0 }),
+  ],
+});
+
 describe("ReviewDetail", () => {
   beforeEach(() => {
+    clearContentsCache();
     mockInvoke.mockImplementation((cmd: string) =>
       Promise.resolve(
-        cmd === "list_threads" ? threads : cmd === "list_reviews" ? [r] : r,
+        cmd === "list_threads"
+          ? threads
+          : cmd === "list_reviews"
+            ? [r]
+            : cmd === "list_files"
+              ? files
+              : cmd === "file_contents"
+                ? "a\nb\nc"
+                : r,
       ),
     );
+    useCodeViewStore.setState({ ...initialCode, byReview: {} }, true);
     useReviewStore.setState(
       { ...initialReviews, reviews: [r], loaded: true, selectedId: r.id },
       true,
@@ -78,32 +111,35 @@ describe("ReviewDetail", () => {
     ).toBeInTheDocument();
   });
 
-  it("lists the user's threads first, outdated ones included", async () => {
+  it("shows one page: the conversation, then each file with its threads", async () => {
     render(<ReviewDetail now={NOW} />);
     expect(mockInvoke).toHaveBeenCalledWith("list_threads", {
       reviewId: r.id,
     });
-    const cards = await screen.findAllByRole("article");
-    // Only the user's threads show until "Other threads" is expanded; mine
-    // are oldest first.
-    expect(cards.map((c) => c.getAttribute("aria-label"))).toEqual([
-      "Thread on PR-level",
-      "Thread on src/cache.rs:42",
-    ]);
-    const outdated = cards[1];
-    expect(within(outdated).getByText("Outdated")).toBeInTheDocument();
-    expect(within(outdated).getByText("Open")).toBeInTheDocument();
-    expect(within(cards[0]).getByText("Resolved")).toBeInTheDocument();
-    // The then/now slot is there for anchored threads only.
-    expect(outdated.querySelector('[data-slot="then-now"]')).not.toBeNull();
-    expect(cards[0].querySelector('[data-slot="then-now"]')).toBeNull();
-
-    const toggle = screen.getByRole("button", { name: /Other threads/ });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(toggle);
-    const all = screen.getAllByRole("article");
-    expect(all).toHaveLength(3);
-    expect(all[2]).toHaveAttribute("aria-label", "Thread on src/other.rs:7");
+    // No Threads / Files tabs any more.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    const conversation = screen.getByRole("region", { name: "Conversation" });
+    // The review-level thread sits in the Conversation, resolved.
+    const general = await within(conversation).findByRole("article", {
+      name: "Thread by rev-fixture",
+    });
+    expect(within(general).getByText("Resolved")).toBeInTheDocument();
+    expect(general.querySelector('[data-slot="then-now"]')).toBeNull();
+    // The outdated one at the top of its file, never hidden.
+    const cache = await screen.findByRole("region", {
+      name: "Diff of src/cache.rs",
+    });
+    expect(await within(cache).findByText("Outdated")).toBeInTheDocument();
+    expect(within(cache).getByText("Cache this lookup.")).toBeInTheDocument();
+    // Someone else's thread is inline in its file (the editor gets it).
+    expect(
+      screen.getByRole("region", { name: "Diff of src/other.rs" }),
+    ).toBeInTheDocument();
+    // Mine are open; the Conversation entry leads the tree.
+    const rows = within(
+      screen.getByRole("tree", { name: "Changed files" }),
+    ).getAllByRole("treeitem");
+    expect(rows[0]).toHaveTextContent("Conversation");
   });
 
   it("shows status, round and reasons, and marks the round reviewed", async () => {

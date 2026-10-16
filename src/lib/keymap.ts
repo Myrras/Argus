@@ -16,7 +16,7 @@
  * Unlike Iris, a bare key may be bound: Argus has no type-to-select for it to
  * fight, and its list keys (`r`, `1`–`4`, the arrows) are bare by default.
  * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
- * `files` actions likewise, and only while the Files tab is shown.
+ * `files` actions likewise, and only while a review is open.
  *
  * Pure rules, no React: `useAppShortcuts.ts` dispatches with `findAction`.
  */
@@ -121,7 +121,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Files",
     scope: "files",
     defaults: ["KeyJ"],
-    note: "In the Files tab.",
+    note: "In a review: the Conversation, then each file.",
   },
   {
     id: "prevFile",
@@ -129,7 +129,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Files",
     scope: "files",
     defaults: ["KeyK"],
-    note: "In the Files tab.",
+    note: "In a review: the Conversation, then each file.",
   },
   {
     id: "toggleViewed",

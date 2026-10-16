@@ -1,13 +1,13 @@
 /**
  * Persistent shell layout (Iris's `layoutStore`): sidebar width, the
- * Providers section's collapse, the detail island's tab, and the Files tab's
- * file tree (open, tree or flat) and diff layout (unified or side by side).
+ * Providers section's collapse, and the review view's file tree (open, tree
+ * or flat) and diff layout (unified or side by side).
+ *
+ * Builds with a Threads / Files tab strip saved `detailTab`; `load` ignores
+ * it and the next save drops it.
  */
 
 import { create } from "zustand";
-
-/** The detail island's tabs: the threads, and the changed files (diff). */
-export type DetailTab = "threads" | "files";
 
 /** The code view's diff: one column, or base and head side by side. */
 export type DiffLayout = "unified" | "split";
@@ -19,8 +19,7 @@ interface LayoutPersisted {
   sidebarWidth: number;
   /** Whether the sidebar's Providers section is collapsed to its title. */
   providersCollapsed: boolean;
-  detailTab: DetailTab;
-  /** Whether the Files tab's file tree is expanded. */
+  /** Whether the review view's file tree is expanded. */
   fileTreeOpen: boolean;
   diffLayout: DiffLayout;
   fileListMode: FileListMode;
@@ -34,7 +33,6 @@ const STORAGE_KEY = "argus.layout";
 const DEFAULTS: LayoutPersisted = {
   sidebarWidth: 340,
   providersCollapsed: false,
-  detailTab: "threads",
   fileTreeOpen: true,
   diffLayout: "unified",
   fileListMode: "tree",
@@ -55,7 +53,6 @@ function load(): LayoutPersisted {
           ? clampWidth(saved.sidebarWidth)
           : DEFAULTS.sidebarWidth,
       providersCollapsed: saved.providersCollapsed === true,
-      detailTab: saved.detailTab === "files" ? "files" : "threads",
       fileTreeOpen: saved.fileTreeOpen !== false,
       diffLayout: saved.diffLayout === "split" ? "split" : "unified",
       fileListMode: saved.fileListMode === "flat" ? "flat" : "tree",
@@ -72,7 +69,6 @@ function persist(state: LayoutPersisted) {
       JSON.stringify({
         sidebarWidth: state.sidebarWidth,
         providersCollapsed: state.providersCollapsed,
-        detailTab: state.detailTab,
         fileTreeOpen: state.fileTreeOpen,
         diffLayout: state.diffLayout,
         fileListMode: state.fileListMode,
@@ -86,7 +82,6 @@ function persist(state: LayoutPersisted) {
 interface LayoutState extends LayoutPersisted {
   setSidebarWidth: (width: number) => void;
   setProvidersCollapsed: (collapsed: boolean) => void;
-  setDetailTab: (tab: DetailTab) => void;
   toggleFileTree: () => void;
   setDiffLayout: (layout: DiffLayout) => void;
   setFileListMode: (mode: FileListMode) => void;
@@ -102,7 +97,6 @@ export const useLayoutStore = create<LayoutState>((set, get) => {
     setSidebarWidth: (width) => update({ sidebarWidth: clampWidth(width) }),
     setProvidersCollapsed: (collapsed) =>
       update({ providersCollapsed: collapsed }),
-    setDetailTab: (tab) => update({ detailTab: tab }),
     toggleFileTree: () => update({ fileTreeOpen: !get().fileTreeOpen }),
     setDiffLayout: (layout) => update({ diffLayout: layout }),
     setFileListMode: (mode) => update({ fileListMode: mode }),

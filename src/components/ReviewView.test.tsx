@@ -30,12 +30,16 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { FileEntry, ReviewFiles } from "../ipc/types";
 import { useAppShortcuts } from "../lib/useAppShortcuts";
-import { clearContentsCache, useCodeViewStore } from "../state/codeViewStore";
+import {
+  clearContentsCache,
+  CONVERSATION,
+  useCodeViewStore,
+} from "../state/codeViewStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
-import { FilesTab } from "./FilesTab";
+import { ReviewView } from "./ReviewView";
 
 const mockInvoke = vi.mocked(invoke);
 const initialCode = useCodeViewStore.getState();
@@ -108,6 +112,49 @@ const threads = [
       },
     ],
   }),
+  // On the review as a whole: someone else's first, then the user's.
+  thread({
+    reviewId: r.id,
+    author: "carol-fixture",
+    createdAt: "2026-10-12T09:00:00Z",
+    anchor: null,
+    notes: [
+      {
+        id: "n-carol",
+        author: "carol-fixture",
+        body: "Overall this looks fine.",
+        createdAt: "2026-10-12T09:00:00Z",
+        system: false,
+      },
+    ],
+  }),
+  thread({
+    reviewId: r.id,
+    mine: true,
+    author: "rev-fixture",
+    createdAt: "2026-10-13T09:00:00Z",
+    anchor: null,
+    notes: [
+      {
+        id: "n-mine-pr",
+        author: "rev-fixture",
+        body: "Please add a changelog entry.",
+        createdAt: "2026-10-13T09:00:00Z",
+        system: false,
+      },
+    ],
+  }),
+  // On a file outside this diff.
+  thread({
+    reviewId: r.id,
+    author: "bob-fixture",
+    anchor: {
+      ...anchor,
+      pathNew: "src/elsewhere.rs",
+      pathOld: "src/elsewhere.rs",
+      lineNew: 3,
+    },
+  }),
 ];
 
 let listed: ReviewFiles;
@@ -144,17 +191,13 @@ beforeEach(() => {
   clearContentsCache();
   listed = reviewFiles({ reviewId: r.id, files });
   mockInvoke.mockImplementation(backend as typeof invoke);
-  useCodeViewStore.setState(
-    { ...initialCode, byReview: {}, focusThread: null },
-    true,
-  );
+  useCodeViewStore.setState({ ...initialCode, byReview: {} }, true);
   useThreadStore.setState({ ...initialThreads, byReview: {} }, true);
   useReviewStore.setState(
     { ...initialReviews, reviews: [r], selectedId: r.id },
     true,
   );
   useLayoutStore.setState({
-    detailTab: "files",
     diffLayout: "unified",
     fileListMode: "tree",
     fileTreeOpen: true,
@@ -162,12 +205,13 @@ beforeEach(() => {
 });
 
 const tree = () => screen.getByRole("tree", { name: "Changed files" });
+const conversation = () => screen.getByRole("region", { name: "Conversation" });
 const card = (path: string) =>
   screen.getByRole("region", { name: `Diff of ${path}` });
 
-describe("FilesTab", () => {
+describe("ReviewView", () => {
   it("lists the files with their stats and thread counts", async () => {
-    render(<FilesTab review={r} now={NOW} />);
+    render(<ReviewView review={r} now={NOW} />);
     expect(mockInvoke).toHaveBeenCalledWith("list_files", {
       reviewId: r.id,
       sinceLastReview: false,
@@ -178,6 +222,8 @@ describe("FilesTab", () => {
     expect(
       rows.map((row) => row.textContent?.replace(/\s+/g, " ").trim()),
     ).toEqual([
+      // Conversation first: two review-level threads and one elsewhere.
+      "Conversation3",
       "assets",
       "Mlogo.png",
       "data",
@@ -200,12 +246,75 @@ describe("FilesTab", () => {
     fireEvent.change(screen.getByLabelText("Filter files"), {
       target: { value: "widget" },
     });
-    expect(within(tree()).getAllByRole("treeitem")).toHaveLength(2);
-    expect(screen.getAllByRole("region")).toHaveLength(1);
+    // Conversation stays; one file is left.
+    expect(within(tree()).getAllByRole("treeitem")).toHaveLength(3);
+    expect(screen.getAllByRole("region")).toHaveLength(2);
+  });
+
+  it("shows the conversation and the files in one page, without tabs", async () => {
+    render(<ReviewView review={r} now={NOW} />);
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByRole("tab")).toBeNull();
+    await screen.findByText("0 of 4 files viewed");
+    const regions = screen.getAllByRole("region");
+    // The Conversation section first, then the files in tree order.
+    expect(regions.map((x) => x.getAttribute("aria-label"))).toEqual([
+      "Conversation",
+      "Diff of assets/logo.png",
+      "Diff of data/big.json",
+      "Diff of src/cache.rs",
+      "Diff of src/widget.rs",
+    ]);
+    // Review-level threads, mine first and open, others folded.
+    const talk = await within(conversation()).findAllByRole("article");
+    expect(talk.map((t) => t.getAttribute("aria-label"))).toEqual([
+      "Thread by rev-fixture",
+      "Thread by carol-fixture",
+      "Thread by bob-fixture",
+    ]);
+    expect(
+      within(talk[0]).getByText("Please add a changelog entry."),
+    ).toBeInTheDocument();
+    expect(talk[1]).toHaveAttribute("data-open", "false");
+    // No code reference: no then/now history.
+    expect(
+      within(talk[0]).queryByRole("button", { name: "Then/now history" }),
+    ).toBeNull();
+    // A thread on a file this diff does not show is listed, not lost.
+    expect(within(conversation()).getByText("On other files")).toBeVisible();
+    expect(
+      within(conversation()).getByText("src/elsewhere.rs:3"),
+    ).toBeInTheDocument();
+    // The files still carry their own threads inline.
+    expect(await screen.findByTestId("editor-src/cache.rs")).toHaveAttribute(
+      "data-placements",
+      "b2,b1",
+    );
+  });
+
+  it("scrolls to the conversation from its tree entry", async () => {
+    // jsdom has no scrollIntoView; record what would scroll.
+    const scrolled: string[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.getAttribute("aria-label") ?? "");
+    };
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByText("0 of 4 files viewed");
+    const entry = within(tree()).getByRole("button", { name: /Conversation/ });
+    fireEvent.click(entry);
+    expect(useCodeViewStore.getState().byReview[r.id].selected).toBe(
+      CONVERSATION,
+    );
+    expect(scrolled[scrolled.length - 1]).toBe("Conversation");
+    expect(conversation()).toHaveAttribute("data-selected", "true");
+    fireEvent.click(within(tree()).getByRole("button", { name: /cache\.rs/ }));
+    expect(scrolled[scrolled.length - 1]).toBe("Diff of src/cache.rs");
+    Element.prototype.scrollIntoView = original;
   });
 
   it("renders each diff from both sides with the threads at their lines", async () => {
-    render(<FilesTab review={r} now={NOW} />);
+    render(<ReviewView review={r} now={NOW} />);
     const editor = await screen.findByTestId("editor-src/cache.rs");
     // Base at the left sha, head at the right one.
     expect(editor).toHaveTextContent("src/cache.rs@b 2 3|src/cache.rs@a 2 3");
@@ -222,7 +331,7 @@ describe("FilesTab", () => {
   });
 
   it("toggles viewed, folds the file and counts it; a reset unchecks it", async () => {
-    render(<FilesTab review={r} now={NOW} />);
+    render(<ReviewView review={r} now={NOW} />);
     await screen.findByText("0 of 4 files viewed");
     fireEvent.click(within(card("src/cache.rs")).getByRole("checkbox"));
     expect(mockInvoke).toHaveBeenCalledWith("set_file_viewed", {
@@ -245,7 +354,7 @@ describe("FilesTab", () => {
   });
 
   it("switches unified / side by side and remembers it", async () => {
-    render(<FilesTab review={r} now={NOW} />);
+    render(<ReviewView review={r} now={NOW} />);
     const editor = await screen.findByTestId("editor-src/cache.rs");
     expect(editor).toHaveAttribute("data-layout", "unified");
     fireEvent.click(screen.getByRole("button", { name: "Side by side" }));
@@ -261,8 +370,8 @@ describe("FilesTab", () => {
     ).toBe("split");
   });
 
-  it("shows outdated threads at the top of their file, with the hunk and history link", async () => {
-    render(<FilesTab review={r} now={NOW} />);
+  it("shows outdated threads at the top of their file, with the hunk and an in-place history", async () => {
+    render(<ReviewView review={r} now={NOW} />);
     const widget = await screen.findByRole("region", {
       name: "Diff of src/widget.rs",
     });
@@ -279,7 +388,7 @@ describe("FilesTab", () => {
       within(t).getByText("This was about the old version."),
     ).toBeInTheDocument();
     expect(
-      within(t).getByRole("button", { expanded: false }),
+      within(t).getByRole("button", { name: /bob-fixture/, expanded: false }),
     ).toBeInTheDocument();
     // Not placed in the diff.
     expect(screen.getByTestId("editor-src/widget.rs")).toHaveAttribute(
@@ -287,15 +396,23 @@ describe("FilesTab", () => {
       "",
     );
 
-    fireEvent.click(
-      within(widget).getByRole("button", { name: "Then/now history" }),
-    );
-    expect(useLayoutStore.getState().detailTab).toBe("threads");
-    expect(useCodeViewStore.getState().focusThread).toBe(threads[2].threadId);
+    // The then/now history expands in the card itself.
+    expect(t.querySelector('[data-slot="then-now"]')).toBeNull();
+    const history = within(t).getByRole("button", {
+      name: "Then/now history",
+    });
+    expect(history).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(history);
+    expect(history).toHaveAttribute("aria-expanded", "true");
+    expect(t.querySelector('[data-slot="then-now"]')).not.toBeNull();
+    // Opening the history opens the thread too.
+    expect(t).toHaveAttribute("data-open", "true");
+    fireEvent.click(history);
+    expect(t.querySelector('[data-slot="then-now"]')).toBeNull();
   });
 
   it("offers 'since my last review' only in later rounds", async () => {
-    const { unmount } = render(<FilesTab review={r} now={NOW} />);
+    const { unmount } = render(<ReviewView review={r} now={NOW} />);
     await screen.findByText("0 of 4 files viewed");
     expect(
       screen.queryByRole("button", { name: "Since my last review" }),
@@ -304,7 +421,7 @@ describe("FilesTab", () => {
 
     // Marked reviewed at the current head: nothing new yet.
     const caughtUp = { ...r, lastReviewedSha: r.headSha };
-    const second = render(<FilesTab review={caughtUp} now={NOW} />);
+    const second = render(<ReviewView review={caughtUp} now={NOW} />);
     await screen.findByText("0 of 4 files viewed");
     expect(
       screen.queryByRole("button", { name: "Since my last review" }),
@@ -312,7 +429,7 @@ describe("FilesTab", () => {
     second.unmount();
 
     const later = { ...r, lastReviewedSha: "c".repeat(40), round: 2 };
-    render(<FilesTab review={later} now={NOW} />);
+    render(<ReviewView review={later} now={NOW} />);
     await screen.findByText("0 of 4 files viewed");
     const toggle = screen.getByRole("button", { name: "Since my last review" });
     expect(toggle).toHaveAttribute("aria-pressed", "false");
@@ -326,7 +443,7 @@ describe("FilesTab", () => {
   });
 
   it("keeps binary and large files as cards; a large one loads on request", async () => {
-    render(<FilesTab review={r} now={NOW} />);
+    render(<ReviewView review={r} now={NOW} />);
     await screen.findByTestId("editor-src/cache.rs");
     expect(
       within(card("assets/logo.png")).getByText("Binary file"),
@@ -347,10 +464,10 @@ describe("FilesTab", () => {
     ).toBeInTheDocument();
   });
 
-  it("walks the files with j/k and toggles viewed with v", async () => {
+  it("walks the conversation and the files with j/k and toggles viewed with v", async () => {
     function Shell() {
       useAppShortcuts();
-      return <FilesTab review={r} now={NOW} />;
+      return <ReviewView review={r} now={NOW} />;
     }
     render(<Shell />);
     await screen.findByText("0 of 4 files viewed");
@@ -359,6 +476,14 @@ describe("FilesTab", () => {
         .getAllByRole("treeitem")
         .find((row) => row.getAttribute("aria-selected") === "true")
         ?.textContent?.replace(/\s+/g, " ");
+    // The Conversation is the first stop; v does nothing there.
+    fireEvent.keyDown(window, { key: "j", code: "KeyJ" });
+    expect(selected()).toContain("Conversation");
+    fireEvent.keyDown(window, { key: "v", code: "KeyV" });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "set_file_viewed",
+      expect.anything(),
+    );
     fireEvent.keyDown(window, { key: "j", code: "KeyJ" });
     expect(selected()).toContain("logo.png");
     fireEvent.keyDown(window, { key: "j", code: "KeyJ" });
@@ -373,10 +498,15 @@ describe("FilesTab", () => {
       viewed: true,
     });
     expect(await screen.findByText("1 of 4 files viewed")).toBeInTheDocument();
+    // k walks back up to the Conversation and stops there.
+    for (let i = 0; i < 4; i++) {
+      fireEvent.keyDown(window, { key: "k", code: "KeyK" });
+    }
+    expect(selected()).toContain("Conversation");
 
-    // Not on the Threads tab.
-    useLayoutStore.setState({ detailTab: "threads" });
+    // Not without an open review.
+    useReviewStore.setState({ selectedId: null });
     fireEvent.keyDown(window, { key: "j", code: "KeyJ" });
-    expect(selected()).toContain("big.json");
+    expect(selected()).toContain("Conversation");
   });
 });

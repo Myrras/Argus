@@ -2,9 +2,9 @@
  * The window-wide shortcuts, from the keymap (`lib/keymap`; rebindable in
  * Settings → Shortcuts) — Iris's `useTabShortcuts` for Argus: Settings off
  * macOS (macOS has the native menu's ⌘,), the review list keys (move, open,
- * refresh, switch lists) and, while the Files tab is shown, the file keys
- * (next/previous file, toggle viewed). Those are ignored while typing in a
- * field or inside a dialog.
+ * refresh, switch lists) and, while a review is open, the review view's keys
+ * (next/previous stop — Conversation, then the files — and toggle viewed).
+ * Those are ignored while typing in a field or inside a dialog.
  *
  * It also swallows the browser's own shortcuts (reload, print, find, save):
  * a desktop app must never reload its webview, wherever the focus is.
@@ -14,7 +14,6 @@ import { useEffect } from "react";
 
 import { TABS } from "./reviews";
 import { useCodeViewStore } from "../state/codeViewStore";
-import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
 import {
   findAction,
@@ -65,10 +64,10 @@ function runListAction(action: ActionId, target: EventTarget | null): boolean {
   }
 }
 
-/** Run a Files tab action; false when the Files tab is not shown. */
+/** Run a review view action; false when no review is open. */
 function runFilesAction(action: ActionId): boolean {
   const review = useReviewStore.getState().selectedId;
-  if (!review || useLayoutStore.getState().detailTab !== "files") return false;
+  if (!review) return false;
   const code = useCodeViewStore.getState();
   switch (action) {
     case "nextFile":

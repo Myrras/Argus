@@ -20,7 +20,6 @@ import {
   CircleCheck,
   Copy,
   ExternalLink,
-  FileDiff,
   FolderTree,
   GitPullRequest,
   Info,
@@ -58,7 +57,6 @@ function icon(Glyph: LucideIcon, defaults?: Partial<LucideProps>) {
 // Entities: reviews, their threads and changed files, and the providers.
 export const ReviewsIcon = icon(GitPullRequest);
 export const ThreadsIcon = icon(MessageSquare);
-export const FilesIcon = icon(FileDiff);
 export const FileTreeIcon = icon(FolderTree);
 export const ProvidersIcon = icon(Plug);
 
@@ -69,7 +67,7 @@ export const CloseIcon = icon(X);
 export const CheckIcon = icon(Check);
 export const RefreshIcon = icon(RotateCw);
 export const ExternalLinkIcon = icon(ExternalLink, { size: 13 });
-/** Collapse / expand the Files tab's file tree. */
+/** Collapse / expand the review view's file tree. */
 export const PanelCloseIcon = icon(PanelLeftClose);
 export const PanelOpenIcon = icon(PanelLeftOpen);
 

@@ -105,7 +105,7 @@
   /* Layout constants */
   --sidebar-w: 280px;
   --tabbar-h: 38px;
-  --file-tree-w: 240px; /* the Files tab's file tree, while expanded */
+  --file-tree-w: 240px; /* the review view's file tree, while expanded */
 
   /* Repeating animations that are not state transitions (spinner, pulsing
      status dots) — kept off the --dur-* scale on purpose. */

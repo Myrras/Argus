@@ -26,15 +26,26 @@ describe("layoutStore", () => {
     expect(reloaded.getState().providersCollapsed).toBe(true);
   });
 
-  it("remembers the detail tab and the file tree", async () => {
+  it("remembers the file tree", async () => {
     const store = await freshStore();
-    expect(store.getState().detailTab).toBe("threads");
     expect(store.getState().fileTreeOpen).toBe(true);
-    store.getState().setDetailTab("files");
     store.getState().toggleFileTree();
     const reloaded = await freshStore();
-    expect(reloaded.getState().detailTab).toBe("files");
     expect(reloaded.getState().fileTreeOpen).toBe(false);
+  });
+
+  it("ignores the old detail tab and drops it on the next save", async () => {
+    localStorage.setItem(
+      "argus.layout",
+      JSON.stringify({ detailTab: "files", diffLayout: "split" }),
+    );
+    const store = await freshStore();
+    expect(store.getState().diffLayout).toBe("split");
+    expect("detailTab" in store.getState()).toBe(false);
+    store.getState().toggleFileTree();
+    const saved = JSON.parse(localStorage.getItem("argus.layout") ?? "{}");
+    expect(saved).not.toHaveProperty("detailTab");
+    expect(saved.diffLayout).toBe("split");
   });
 
   it("remembers the diff layout and the file list mode", async () => {
@@ -52,13 +63,11 @@ describe("layoutStore", () => {
     localStorage.setItem(
       "argus.layout",
       JSON.stringify({
-        detailTab: "diff",
         sidebarWidth: "wide",
         diffLayout: "3d",
       }),
     );
     const store = await freshStore();
-    expect(store.getState().detailTab).toBe("threads");
     expect(store.getState().sidebarWidth).toBe(340);
     expect(store.getState().fileTreeOpen).toBe(true);
     expect(store.getState().diffLayout).toBe("unified");

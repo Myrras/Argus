@@ -1,34 +1,42 @@
 /**
- * The detail island's Files tab: the code view.
+ * The detail island's body: one scrolling review page, a platform's
+ * conversation and "Files changed" in one.
  *
- * - File tree (`data-slot="file-tree"`, collapsible, `layoutStore`): a filter
- *   box, folders or a flat list, per file its status, +/−, threads and a
- *   Viewed checkbox.
- * - Diff column (`data-slot="diff"`): a toolbar ("N of M files viewed",
- *   "Since my last review" in later rounds, unified / side by side) over
- *   every shown file's `FileDiffCard`, in the tree's order. j/k (or the
- *   rebound keys) walk the files, v toggles Viewed (`useAppShortcuts`).
+ * - Navigation (`data-slot="file-tree"`, collapsible, `layoutStore`): a
+ *   filter box, the Conversation entry, then the files as folders or a flat
+ *   list, per file its status, +/−, threads and a Viewed checkbox.
+ * - The page (`data-slot="diff"`): a toolbar ("N of M files viewed",
+ *   "Since my last review" in later rounds, unified / side by side) over the
+ *   Conversation section (`ConversationCard`: the threads without a code
+ *   reference) and every shown file's `FileDiffCard` (its diff with its
+ *   threads), in the tree's order. j/k (or the rebound keys) walk the
+ *   Conversation and the files, v toggles Viewed (`useAppShortcuts`).
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { FileEntry, ReviewRecord, StoredThread } from "../ipc/types";
-import { threadCounts, threadsOnFile } from "../lib/diffThreads";
+import {
+  conversationThreads,
+  threadCounts,
+  threadsOnFile,
+} from "../lib/diffThreads";
 import { filterFiles, orderFiles } from "../lib/fileTree";
 import { formatBinding } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
-import { useCodeViewStore } from "../state/codeViewStore";
+import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
 import { useThreadStore } from "../state/threadStore";
+import { ConversationCard } from "./ConversationCard";
 import { FileDiffCard } from "./FileDiffCard";
 import { FileTree } from "./FileTree";
 import { FileTreeIcon, PanelCloseIcon, PanelOpenIcon } from "./icons";
-import styles from "./FilesTab.module.css";
+import styles from "./ReviewView.module.css";
 
 const EMPTY_THREADS: StoredThread[] = [];
 
-export function FilesTab({
+export function ReviewView({
   review: r,
   now = Date.now(),
 }: {
@@ -47,8 +55,8 @@ export function FilesTab({
   const setViewed = useCodeViewStore((s) => s.setViewed);
   const select = useCodeViewStore((s) => s.select);
   const setOrder = useCodeViewStore((s) => s.setOrder);
-  const threads =
-    useThreadStore((s) => s.byReview[r.id]?.threads) ?? EMPTY_THREADS;
+  const threadEntry = useThreadStore((s) => s.byReview[r.id]);
+  const threads = threadEntry?.threads ?? EMPTY_THREADS;
   const loadThreads = useThreadStore((s) => s.load);
   const keymap = useKeymap();
 
@@ -74,11 +82,17 @@ export function FilesTab({
     [files, query, listMode],
   );
   useEffect(() => {
-    setOrder(
-      r.id,
-      shown.map((f) => f.path),
-    );
+    setOrder(r.id, [CONVERSATION, ...shown.map((f) => f.path)]);
   }, [r.id, shown, setOrder]);
+
+  const talk = useMemo(
+    () => conversationThreads(threads, files?.files ?? null, !!entry?.error),
+    [threads, files, entry?.error],
+  );
+  const talkCount = useMemo(
+    () => threadCounts([...talk.conversation, ...talk.elsewhere]),
+    [talk],
+  );
 
   const byFile = useMemo(() => {
     const m = new Map<string, StoredThread[]>();
@@ -92,7 +106,7 @@ export function FilesTab({
     return m;
   }, [byFile]);
 
-  // Scroll to the selected file (tree click, j/k).
+  // Scroll to the selected stop (tree click, j/k).
   const selected = entry?.selected ?? null;
   const cards = useRef(new Map<string, HTMLElement>());
   const lastScrolled = useRef<string | null>(null);
@@ -105,19 +119,28 @@ export function FilesTab({
     lastScrolled.current = null;
     select(r.id, path);
   };
+  const total = files?.files.length ?? 0;
   const toggleViewed = (f: FileEntry) =>
     void setViewed(r.id, f.path, !f.viewed);
+  const cardRef = (key: string) => (el: HTMLElement | null) => {
+    if (el) cards.current.set(key, el);
+    else cards.current.delete(key);
+  };
+  const conversationEntry = {
+    count: talkCount,
+    selected: selected === CONVERSATION,
+    onSelect: () => pick(CONVERSATION),
+  };
 
-  const total = files?.files.length ?? 0;
   const viewed = files?.files.filter((f) => f.viewed).length ?? 0;
 
   return (
-    <div className={styles.files}>
+    <div className={styles.view}>
       <aside
         className={styles.tree}
         data-open={open ? "true" : "false"}
         data-slot="file-tree"
-        aria-label="Changed files"
+        aria-label="Review navigation"
       >
         <div className={styles.treeHeader}>
           {open && (
@@ -168,19 +191,24 @@ export function FilesTab({
               />
             </div>
             <div className={styles.treeBody}>
-              {files ? (
-                <FileTree
-                  files={shown}
-                  mode={listMode}
-                  selected={selected}
-                  counts={counts}
-                  onSelect={pick}
-                  onToggleViewed={toggleViewed}
-                />
-              ) : (
-                <p className={styles.placeholder}>
-                  {entry?.loading ? "Loading files…" : ""}
-                </p>
+              <FileTree
+                files={shown}
+                mode={listMode}
+                selected={selected}
+                counts={counts}
+                onSelect={pick}
+                onToggleViewed={toggleViewed}
+                conversation={conversationEntry}
+                empty={
+                  !files
+                    ? null
+                    : total === 0
+                      ? "No files changed."
+                      : "No files match."
+                }
+              />
+              {!files && entry?.loading && (
+                <p className={styles.placeholder}>Loading files…</p>
               )}
             </div>
           </>
@@ -213,7 +241,7 @@ export function FilesTab({
           <LayoutToggle layout={layout} onChange={setLayout} />
           <span className={styles.keys}>
             {formatBinding(keymap.nextFile[0] ?? "")}/
-            {formatBinding(keymap.prevFile[0] ?? "")} files ·{" "}
+            {formatBinding(keymap.prevFile[0] ?? "")} next/prev ·{" "}
             {formatBinding(keymap.toggleViewed[0] ?? "")} viewed
           </span>
         </div>
@@ -232,6 +260,20 @@ export function FilesTab({
           </p>
         )}
         <div className={styles.stack}>
+          <ConversationCard
+            conversation={talk.conversation}
+            elsewhere={talk.elsewhere}
+            provider={r.provider}
+            loading={
+              !threadEntry ||
+              (threadEntry.loading && threadEntry.threads.length === 0)
+            }
+            error={threadEntry?.error ?? null}
+            selected={selected === CONVERSATION}
+            now={now}
+            onSelect={() => select(r.id, CONVERSATION)}
+            cardRef={cardRef(CONVERSATION)}
+          />
           {!files ? (
             <p className={styles.placeholder}>
               {entry?.loading || !entry ? "Loading the changed files…" : ""}
@@ -253,10 +295,7 @@ export function FilesTab({
                 now={now}
                 onSelect={() => select(r.id, f.path)}
                 onToggleViewed={() => toggleViewed(f)}
-                cardRef={(el) => {
-                  if (el) cards.current.set(f.path, el);
-                  else cards.current.delete(f.path);
-                }}
+                cardRef={cardRef(f.path)}
               />
             ))
           )}

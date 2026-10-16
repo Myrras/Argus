@@ -4,16 +4,21 @@
  * The pragmatic outdated-thread rule: a thread the platform calls outdated
  * is never placed in the current diff (its line may now hold other code);
  * it is listed in an "Outdated threads" section at the top of its file, with
- * GitHub's `diff_hunk` (or GitLab's line + commit) as the snippet and a link
- * to its then/now history in the Threads tab. A current thread goes under
+ * GitHub's `diff_hunk` (or GitLab's line + commit) as the snippet; its
+ * then/now history expands in the thread itself. A current thread goes under
  * its line; one that cannot be placed (a file-level comment, a line past the
  * end, a base-side line in "since my last review" mode) is listed at the top
  * too, without the badge.
+ *
+ * Threads without a code reference (the MR/PR as a whole) go in the review
+ * view's Conversation section, and so do anchored threads whose file the
+ * file list does not show — nothing is ever left without a place.
  */
 
 import type { Text } from "@codemirror/state";
 
 import type { FileEntry, StoredThread } from "../ipc/types";
+import { splitThreads } from "./reviews";
 
 /** One side of the split view: `a` the base (left), `b` the head (right). */
 export type DiffSide = "a" | "b";
@@ -34,17 +39,62 @@ export interface FileThreads {
   unplaced: StoredThread[];
 }
 
+/** A thread on the review as a whole: no anchor, or one without a path. */
+export function isConversationThread(t: StoredThread): boolean {
+  const a = t.anchor;
+  return !a || (!a.pathNew && !a.pathOld);
+}
+
+/** Whether `t` is anchored to `file` (on either path of a rename). */
+function onFile(t: StoredThread, file: Pick<FileEntry, "path" | "oldPath">) {
+  const a = t.anchor;
+  if (!a) return false;
+  return a.pathNew === file.path || a.pathOld === (file.oldPath ?? file.path);
+}
+
+/** What the review view's Conversation section lists. */
+export interface ConversationThreads {
+  /** On the review as a whole: the user's first, each group oldest first. */
+  conversation: StoredThread[];
+  /**
+   * Anchored to a file the file list does not show (outside "since my last
+   * review", past the platform's file limit), or every anchored thread
+   * while the file list failed to load. Mine first, oldest first.
+   */
+  elsewhere: StoredThread[];
+}
+
+/**
+ * Split a review's threads for the Conversation section. `files` is the
+ * whole (unfiltered) file list, `null` while it loads or after it failed
+ * (`failed`): while loading nothing is "elsewhere" yet, after a failure
+ * every anchored thread is, so none is hidden.
+ */
+export function conversationThreads(
+  threads: readonly StoredThread[],
+  files: readonly Pick<FileEntry, "path" | "oldPath">[] | null,
+  failed: boolean,
+): ConversationThreads {
+  const general = threads.filter(isConversationThread);
+  const anchored = threads.filter((t) => !isConversationThread(t));
+  const away = files
+    ? anchored.filter((t) => !files.some((f) => onFile(t, f)))
+    : failed
+      ? anchored
+      : [];
+  const mineFirst = (list: StoredThread[]) => {
+    const { mine, others } = splitThreads(list);
+    return [...mine, ...others];
+  };
+  return { conversation: mineFirst(general), elsewhere: mineFirst(away) };
+}
+
 /** The anchored threads of `file` (matched on either path of a rename). */
 export function threadsOnFile(
   threads: readonly StoredThread[],
   file: Pick<FileEntry, "path" | "oldPath">,
 ): StoredThread[] {
-  const old = file.oldPath ?? file.path;
-  return threads.filter((t) => {
-    const a = t.anchor;
-    if (!a) return false;
-    return a.pathNew === file.path || a.pathOld === old;
-  });
+  return threads.filter((t) => onFile(t, file));
 }
 
 /** Total and mine, for the file tree and the card header. */

@@ -1,5 +1,5 @@
 /**
- * The Files tab's file list as a directory tree (folders first, single-child
+ * The review view's file list as a directory tree (folders first, single-child
  * folder chains compacted as `src/lib`) or a flat path list, and the filter.
  * Pure. The diff column stacks the files in the same order, so j/k, the tree
  * and the scroll position agree.

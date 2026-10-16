@@ -186,8 +186,8 @@
   background: var(--accent);
 }
 
-/* The work column: the detail tab strip and the detail island. It has no
-   island chrome of its own — the canvas shows around its island. */
+/* The work column: the detail island. It has no island chrome of its own —
+   the canvas shows around its island. */
 .work {
   flex: 1;
   min-width: 0;

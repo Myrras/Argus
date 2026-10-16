@@ -1,5 +1,6 @@
-/* A thread in the code view: under a line (inside CodeMirror) or listed at
-   the top of a file. Sans text in a mono editor, so the font is reset. */
+/* A thread in the review view: under a line (inside CodeMirror), listed at
+   the top of a file, or in the Conversation. Sans text in a mono editor, so
+   the font is reset. */
 .thread {
   margin: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
   max-width: 820px;
@@ -24,12 +25,28 @@
   border-style: dashed;
 }
 
+.thread[data-resolved="true"][data-open="true"] {
+  opacity: 0.85;
+}
+
+.headRow {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  background: var(--surface-2);
+}
+
+.thread[data-open="false"] .headRow {
+  background: transparent;
+}
+
 .head {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   justify-content: flex-start;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
-  background: var(--surface-2);
+  background: transparent;
   border: none;
   border-radius: 0;
   text-align: left;
@@ -37,8 +54,31 @@
   color: var(--text-muted);
 }
 
-.thread[data-open="false"] .head {
-  background: transparent;
+.head:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.history {
+  flex-shrink: 0;
+  height: 24px;
+  margin-right: var(--sp-1);
+  padding: 0 var(--sp-2);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+}
+
+.history[aria-expanded="true"] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+/* The then/now slot (M3), expanded in place under the head. */
+.thenNow {
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
 }
 
 .caret {
@@ -148,13 +188,6 @@
 .commit {
   font-size: var(--fs-xs);
   color: var(--text-faint);
-}
-
-.history {
-  margin-left: auto;
-  flex-shrink: 0;
-  color: var(--accent);
-  font-size: var(--fs-xs);
 }
 
 .hunk {

@@ -1,9 +1,8 @@
 /**
- * The work column for the selected review: the detail tab strip (Threads /
- * Files, `DetailTabBar`) on the canvas and the detail island under it — the
- * review's header (round state, "Mark round reviewed") and the active tab's
- * body (`ThreadsTab` or `FilesTab`). Without a selection the island shows
- * the `WelcomeScreen`.
+ * The detail island for the selected review: its header (round state, "Mark
+ * round reviewed") over one review page (`ReviewView`: the Conversation, then
+ * every changed file with its threads inline). Without a selection the
+ * island shows the `WelcomeScreen`.
  */
 
 import type { ReviewRecord } from "../ipc/types";
@@ -16,14 +15,10 @@ import {
   untouchedLabel,
 } from "../lib/reviews";
 import { ago, fullTime } from "../lib/time";
-import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
-import { useThreadStore } from "../state/threadStore";
 import { Badge, PlatformBadge } from "./Badge";
-import { DetailTabBar } from "./DetailTabBar";
-import { FilesTab } from "./FilesTab";
 import { ExternalLinkIcon } from "./icons";
-import { ThreadsTab } from "./ThreadsTab";
+import { ReviewView } from "./ReviewView";
 import { WelcomeScreen } from "./WelcomeScreen";
 import styles from "./ReviewDetail.module.css";
 
@@ -51,30 +46,11 @@ export function ReviewDetail({ now }: { now: number }) {
 }
 
 function Detail({ review: r, now }: { review: ReviewRecord; now: number }) {
-  const tab = useLayoutStore((s) => s.detailTab);
-  const setTab = useLayoutStore((s) => s.setDetailTab);
-  const threadCount = useThreadStore(
-    (s) => s.byReview[r.id]?.threads.length ?? null,
-  );
-
   return (
-    <div className={styles.column}>
-      <DetailTabBar tab={tab} onChange={setTab} threadCount={threadCount} />
-      <section
-        className={styles.island}
-        aria-label="Review detail"
-        id="detail-panel"
-        role="tabpanel"
-        aria-labelledby={`detail-tab-${tab}`}
-      >
-        <ReviewHeader review={r} now={now} />
-        {tab === "threads" ? (
-          <ThreadsTab review={r} now={now} />
-        ) : (
-          <FilesTab review={r} now={now} />
-        )}
-      </section>
-    </div>
+    <section className={styles.island} aria-label="Review detail">
+      <ReviewHeader review={r} now={now} />
+      <ReviewView review={r} now={now} />
+    </section>
   );
 }
 

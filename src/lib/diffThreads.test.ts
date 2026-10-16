@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest";
 import { thread } from "../test/fixtures";
 import {
   collapsedRanges,
+  conversationThreads,
   fitPlacements,
+  isConversationThread,
   mapOldLine,
   placeThreads,
   threadCounts,
@@ -12,6 +14,43 @@ import {
 } from "./diffThreads";
 
 const anchor = thread().anchor!;
+
+describe("conversationThreads", () => {
+  const general = thread({ anchor: null, createdAt: "2026-10-10T00:00:00Z" });
+  const mineGeneral = thread({
+    anchor: null,
+    mine: true,
+    createdAt: "2026-10-11T00:00:00Z",
+  });
+  const pathless = thread({
+    anchor: { ...anchor, pathNew: null, pathOld: null },
+    createdAt: "2026-10-09T00:00:00Z",
+  });
+  const onCache = thread({ anchor: { ...anchor, pathNew: "src/cache.rs" } });
+  const away = thread({
+    anchor: { ...anchor, pathNew: "src/gone.rs", pathOld: "src/gone.rs" },
+  });
+  const all = [onCache, general, away, mineGeneral, pathless];
+  const files = [{ path: "src/cache.rs", oldPath: null }];
+
+  it("lists threads without a code reference, mine first", () => {
+    expect(isConversationThread(general)).toBe(true);
+    expect(isConversationThread(pathless)).toBe(true);
+    expect(isConversationThread(onCache)).toBe(false);
+    const got = conversationThreads(all, files, false);
+    expect(got.conversation).toEqual([mineGeneral, pathless, general]);
+    // Anchored to a file the list does not show: kept, not dropped.
+    expect(got.elsewhere).toEqual([away]);
+  });
+
+  it("holds the anchored ones back while loading, shows them all on failure", () => {
+    expect(conversationThreads(all, null, false).elsewhere).toEqual([]);
+    expect(conversationThreads(all, null, true).elsewhere).toEqual([
+      onCache,
+      away,
+    ]);
+  });
+});
 
 describe("threadsOnFile", () => {
   it("matches either side of a rename and skips MR-level threads", () => {

@@ -79,3 +79,23 @@
   accent-color: var(--accent);
   cursor: pointer;
 }
+
+/* The Conversation entry: set off from the files below it. The trailing
+   spacer stands in for the Viewed checkbox so the counts line up. */
+.conversationItem {
+  margin-bottom: var(--sp-1);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.conversationItem::after {
+  content: "";
+  flex-shrink: 0;
+  width: 13px;
+  margin: 0 var(--sp-2) 0 var(--sp-1);
+}
+
+.conversationIcon {
+  flex-shrink: 0;
+  color: var(--accent);
+}

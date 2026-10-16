@@ -1,12 +1,10 @@
 /**
- * The Files tab's state per review: the changed files (and the viewed marks,
- * which the backend owns), the "since my last review" mode, the selected
- * file and the visible order j/k walk. File contents are cached in memory
- * per (review, sha, path) outside the store: they are large and never
- * rendered from state.
- *
- * Also the hand-off to the Threads tab: `focusThread` names a thread the
- * Threads tab scrolls to (an outdated thread's "then/now" link).
+ * The review view's state per review: the changed files (and the viewed
+ * marks, which the backend owns), the "since my last review" mode, the
+ * selected stop (the Conversation section, `CONVERSATION`, or a file's path)
+ * and the visible order j/k walk. File contents are cached in memory per
+ * (review, sha, path) outside the store: they are large and never rendered
+ * from state.
  */
 
 import { create } from "zustand";
@@ -18,8 +16,13 @@ import {
   toIpcError,
 } from "../ipc/commands";
 import { onReviewChanged } from "../ipc/events";
-import { useLayoutStore } from "./layoutStore";
 import type { IpcError, ReviewFiles, ReviewId } from "../ipc/types";
+
+/**
+ * The Conversation section's key in `selected` / `order`: the first stop of
+ * j/k. A NUL can never be part of a file path, so it cannot collide.
+ */
+export const CONVERSATION = "\u0000conversation";
 
 export interface ReviewCode {
   /** The mode `files` was loaded in (and the next load uses). */
@@ -27,25 +30,23 @@ export interface ReviewCode {
   files: ReviewFiles | null;
   loading: boolean;
   error: IpcError | null;
-  /** The selected file's path. */
+  /** The selected file's path, or `CONVERSATION`. */
   selected: string | null;
-  /** The files as shown (filtered, tree order), for next/prev. */
+  /** `CONVERSATION`, then the files as shown (filtered, tree order). */
   order: string[];
 }
 
 interface CodeViewState {
   byReview: Record<ReviewId, ReviewCode>;
-  focusThread: string | null;
   /** Load (or reload) the review's files in `since` mode (default: the current one). */
   load: (id: ReviewId, since?: boolean) => Promise<void>;
   setViewed: (id: ReviewId, path: string, viewed: boolean) => Promise<void>;
   select: (id: ReviewId, path: string | null) => void;
   setOrder: (id: ReviewId, order: string[]) => void;
-  /** Select the next (+1) or previous (-1) file of the shown order. */
+  /** Select the next (+1) or previous (-1) stop of the shown order. */
   move: (id: ReviewId, delta: 1 | -1) => string | null;
-  /** Flip the selected file's viewed mark. */
+  /** Flip the selected file's viewed mark (nothing on Conversation). */
   toggleSelectedViewed: (id: ReviewId) => Promise<void>;
-  setFocusThread: (threadId: string | null) => void;
   /** `review:changed`: reload when that review's files are loaded. */
   applyChanged: (id: ReviewId) => Promise<void>;
 }
@@ -71,7 +72,6 @@ export const useCodeViewStore = create<CodeViewState>((set, get) => {
 
   return {
     byReview: {},
-    focusThread: null,
 
     load: async (id, since) => {
       const mode = since ?? entry(id).since;
@@ -148,8 +148,6 @@ export const useCodeViewStore = create<CodeViewState>((set, get) => {
       if (file) await get().setViewed(id, file.path, !file.viewed);
     },
 
-    setFocusThread: (threadId) => set({ focusThread: threadId }),
-
     applyChanged: async (id) => {
       if (get().byReview[id]?.files) await get().load(id);
     },
@@ -161,15 +159,6 @@ export function subscribeCodeViewEvents(): Promise<() => void> {
   return onReviewChanged(
     (e) => void useCodeViewStore.getState().applyChanged(e.reviewId),
   );
-}
-
-/**
- * Open a thread's then/now history in the Threads tab (the M3 slot): the
- * Threads tab scrolls to it.
- */
-export function showInThreadsTab(threadId: string) {
-  useCodeViewStore.getState().setFocusThread(threadId);
-  useLayoutStore.getState().setDetailTab("threads");
 }
 
 // -- File contents --------------------------------------------------------
