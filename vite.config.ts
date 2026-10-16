@@ -30,6 +30,36 @@ export default defineConfig(async () => ({
     restoreMocks: true,
   },
 
+  build: {
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        // The heavy vendor trees each go in their own chunk, so the app entry
+        // stays small and a dependency bump only invalidates its own chunk.
+        // Matched by path because the weight is in transitive packages
+        // (micromark/mdast under react-markdown) that naming the direct
+        // dependency would not pull along. CodeMirror is already split off by
+        // its dynamic imports.
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return;
+          if (
+            id.includes("react-markdown") ||
+            id.includes("remark") ||
+            id.includes("micromark") ||
+            id.includes("mdast") ||
+            id.includes("hast") ||
+            id.includes("unist") ||
+            id.includes("unified")
+          )
+            return "markdown";
+          if (id.includes("lucide-react")) return "icons";
+          if (id.includes("/react-dom/") || id.includes("/react/"))
+            return "react";
+        },
+      },
+    },
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
