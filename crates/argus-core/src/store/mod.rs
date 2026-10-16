@@ -20,6 +20,9 @@ use crate::ids::{ReviewId, ThreadId};
 use crate::provider::{Anchor, Note, ProviderId, ReviewRef, ReviewState, Thread};
 use crate::review::{ReviewStatus, RoundReason};
 
+/// How long a call waits for a lock another connection holds.
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Schema steps; index `i` takes the database from version `i` to `i + 1`.
 /// Append only — never edit a released step.
 const MIGRATIONS: &[&str] = &[
@@ -245,6 +248,9 @@ impl Store {
 
     fn init(mut conn: Connection) -> CoreResult<Self> {
         conn.pragma_update(None, "foreign_keys", true)?;
+        // Another connection to the file (a second Argus, a backup tool)
+        // holding a lock: wait for it rather than fail the call at once.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
         // WAL keeps the UI's reads from waiting on a poll's writes; an
         // in-memory database answers "memory" and that is fine.
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
