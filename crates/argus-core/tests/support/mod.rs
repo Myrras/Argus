@@ -115,6 +115,10 @@ pub struct World {
     pub threads: Vec<Thread>,
     /// The list call still returns the review.
     pub listed: bool,
+    /// File and commit reads fail as a network error would.
+    pub offline: bool,
+    /// What `thread_resolutions` reports (`None`: it fails).
+    pub resolutions: Option<Vec<ThreadResolution>>,
     next_id: u64,
 }
 
@@ -211,6 +215,8 @@ impl Platform {
                 detail,
                 threads: vec![mine, general],
                 listed: true,
+                offline: false,
+                resolutions: Some(Vec::new()),
                 next_id: 0,
             }),
             calls: Mutex::new(Vec::new()),
@@ -239,6 +245,13 @@ impl Platform {
 
     pub fn reads(&self) -> usize {
         self.calls().iter().filter(|c| !c.write).count()
+    }
+
+    fn online(&self) -> CoreResult<()> {
+        if self.world.lock().unwrap().offline {
+            return Err(CoreError::Provider("could not reach GitHub".into()));
+        }
+        Ok(())
     }
 
     pub fn clear_calls(&self) {
@@ -295,6 +308,7 @@ impl ReviewProvider for Platform {
     }
     fn file_at(&self, _: &ReviewRef, sha: &str, path: &str) -> CoreResult<String> {
         self.log("file_at", false);
+        self.online()?;
         if path != PATH {
             return Err(CoreError::NotFound);
         }
@@ -309,6 +323,7 @@ impl ReviewProvider for Platform {
     }
     fn commit_diff(&self, _: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
         self.log("commit_diff", false);
+        self.online()?;
         let parent = match sha {
             "c1" => "b0",
             "c2" => "c1",
@@ -319,7 +334,12 @@ impl ReviewProvider for Platform {
     }
     fn thread_resolutions(&self, _: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
         self.log("thread_resolutions", false);
-        Ok(Vec::new())
+        self.world
+            .lock()
+            .unwrap()
+            .resolutions
+            .clone()
+            .ok_or_else(|| CoreError::Provider("offline".into()))
     }
 
     fn post_comment(&self, r: &ReviewRef, c: &PlacedComment) -> Result<PostedComment, PostError> {
