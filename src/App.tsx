@@ -6,43 +6,37 @@
  * the left (the review lists and the providers) and the work column on the
  * right (the detail tab strip and the detail island). This component also
  * owns the app-level wiring: the backend event subscriptions, the keyboard
- * shortcuts, settings access, the sidebar resizer, and suppressing the
- * webview's browser context menu.
+ * shortcuts (`lib/keymap`, `useAppShortcuts`), settings access (native menu
+ * on macOS, title-bar gear elsewhere, `settingsRequestStore` from deeper in
+ * the tree), the sidebar resizer, and suppressing the webview's browser
+ * context menu.
  */
 
 import { useCallback, useEffect, useState } from "react";
 
-import { TABS } from "./lib/reviews";
+import { onMenuOpenSettings } from "./ipc/events";
+import { withHint } from "./lib/keymap";
 import { isMac, isWindows } from "./lib/platform";
 import { ago, fullTime } from "./lib/time";
+import { useAppShortcuts } from "./lib/useAppShortcuts";
+import { useKeymap } from "./lib/useKeymap";
 import { useNow } from "./lib/useNow";
+import {
+  subscribeBackendSettingsEvents,
+  useBackendSettingsStore,
+} from "./state/backendSettingsStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { subscribeReviewEvents, useReviewStore } from "./state/reviewStore";
-import {
-  subscribeSettingsEvents,
-  useSettingsStore,
-} from "./state/settingsStore";
+import { useSettingsRequestStore } from "./state/settingsRequestStore";
 import { subscribeThreadEvents } from "./state/threadStore";
 import { LogoMark } from "./components/LogoMark";
 import { ReviewDetail } from "./components/ReviewDetail";
-import { SettingsDialog } from "./components/SettingsDialog";
+import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { Toasts } from "./components/Toasts";
 import { WindowControls } from "./components/WindowControls";
 import { RefreshIcon, SettingsIcon } from "./components/icons";
 import styles from "./App.module.css";
-
-/** Typing in a field, or a modifier chord: not ours. */
-function ignoreKey(e: KeyboardEvent): boolean {
-  if (e.altKey || e.ctrlKey || e.metaKey) return true;
-  const t = e.target;
-  if (!(t instanceof HTMLElement)) return false;
-  return (
-    t.isContentEditable ||
-    ["INPUT", "TEXTAREA", "SELECT"].includes(t.tagName) ||
-    t.closest('[role="dialog"]') !== null
-  );
-}
 
 export default function App() {
   const refreshing = useReviewStore((s) => s.refreshing);
@@ -50,9 +44,16 @@ export default function App() {
   const refresh = useReviewStore((s) => s.refresh);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const now = useNow();
+  const keymap = useKeymap();
 
+  // Ctrl+, off macOS (rebindable) and the list keys; the browser shortcuts
+  // are swallowed everywhere.
   const openSettings = useCallback(() => setSettingsOpen(true), []);
-  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  useAppShortcuts({ onOpenSettings: openSettings });
+  const settingsRequest = useSettingsRequestStore((s) => s.request);
+  useEffect(() => {
+    if (settingsRequest) setSettingsOpen(true);
+  }, [settingsRequest]);
 
   const sidebarWidth = useLayoutStore((s) => s.sidebarWidth);
   const setSidebarWidth = useLayoutStore((s) => s.setSidebarWidth);
@@ -65,7 +66,7 @@ export default function App() {
       const subs = await Promise.all([
         subscribeReviewEvents(),
         subscribeThreadEvents(),
-        subscribeSettingsEvents(),
+        subscribeBackendSettingsEvents(),
       ]).catch(() => [] as (() => void)[]);
       if (cancelled) {
         subs.forEach((off) => off());
@@ -74,41 +75,13 @@ export default function App() {
       offs.push(...subs);
       await Promise.all([
         useReviewStore.getState().load(),
-        useSettingsStore.getState().load(),
+        useBackendSettingsStore.getState().load(),
       ]);
     })();
     return () => {
       cancelled = true;
       offs.forEach((off) => off());
     };
-  }, []);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
-        e.preventDefault();
-        setSettingsOpen(true);
-        return;
-      }
-      if (ignoreKey(e)) return;
-      const store = useReviewStore.getState();
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        store.moveCursor(e.key === "ArrowDown" ? 1 : -1);
-      } else if (e.key === "Enter") {
-        // A focused button handles its own Enter.
-        if (e.target instanceof HTMLButtonElement) return;
-        e.preventDefault();
-        store.openCursor();
-      } else if (e.key === "r") {
-        e.preventDefault();
-        void store.refresh();
-      } else if (/^[1-4]$/.test(e.key)) {
-        store.setTab(TABS[Number(e.key) - 1].id);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   const onSidebarResizerDown = useCallback(
@@ -150,6 +123,16 @@ export default function App() {
     return () => window.removeEventListener("contextmenu", onContextMenu);
   }, []);
 
+  // macOS: the native menu's Settings… item (⌘,) emits `menu:open-settings`.
+  // Elsewhere the shortcut comes from the keymap (`useAppShortcuts`), so
+  // the two never double-fire.
+  useEffect(() => {
+    const menuSub = onMenuOpenSettings(() => setSettingsOpen(true));
+    return () => {
+      menuSub.then((unlisten) => unlisten()).catch(() => undefined);
+    };
+  }, []);
+
   return (
     <div className={styles.app}>
       <header
@@ -181,29 +164,33 @@ export default function App() {
           <button
             type="button"
             className={styles.refreshBtn}
-            aria-label="Refresh (r)"
-            title="Refresh (r)"
+            aria-label="Refresh"
+            title={withHint("Refresh", keymap, "refresh")}
             disabled={refreshing}
             data-spinning={refreshing ? "true" : undefined}
             onClick={() => void refresh()}
           >
             <RefreshIcon size={16} />
           </button>
-          <button
-            type="button"
-            className={styles.settingsBtn}
-            aria-label="Settings"
-            title="Settings (⌘,)"
-            onClick={openSettings}
-          >
-            <SettingsIcon size={16} />
-          </button>
+          {/* macOS reaches Settings via the native menu bar (⌘,); the gear
+              lives in the custom title bar on the other platforms. */}
+          {!isMac && (
+            <button
+              type="button"
+              className={styles.settingsBtn}
+              aria-label="Settings"
+              title={withHint("Settings", keymap, "openSettings")}
+              onClick={openSettings}
+            >
+              <SettingsIcon size={16} />
+            </button>
+          )}
           {isWindows && <WindowControls />}
         </div>
       </header>
 
       <div className={styles.body}>
-        <Sidebar now={now} onOpenSettings={openSettings} />
+        <Sidebar now={now} />
         <div
           className={styles.sidebarResizer}
           onMouseDown={onSidebarResizerDown}
@@ -217,7 +204,13 @@ export default function App() {
       </div>
 
       <Toasts />
-      <SettingsDialog open={settingsOpen} onClose={closeSettings} />
+      <SettingsModal
+        open={settingsOpen}
+        onClose={() => {
+          setSettingsOpen(false);
+          useSettingsRequestStore.getState().clear();
+        }}
+      />
     </div>
   );
 }

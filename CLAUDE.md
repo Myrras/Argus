@@ -36,6 +36,17 @@ sibling app Iris (`../Iris`).
     selection), `Modal`, `Toasts` (`toastStore`), `ContextMenu`, lucide
     `icons.tsx`. UI prefs are localStorage-only: `themeStore` → `argus.theme`
     (dark/light/retro), `layoutStore` → `argus.layout`.
+  - Settings as in Iris: `SettingsModal` (tabs General / GitHub / GitLab /
+    AI / Shortcuts; switches and steppers apply at once, text fields in a
+    form with its own Save, failures as toasts), `settingsStore` (UI prefs →
+    `argus.settings`: reduced motion, shortcut overrides),
+    `backendSettingsStore` (the core's `settings.json`, provider status,
+    token presence; the GitLab token only ever goes to `set_gitlab_token`),
+    `settingsRequestStore` (open on a tab from deeper in the tree). Opened by
+    the macOS menu's Settings… (`menu:open-settings`, `lib.rs`) or the
+    keymap's `openSettings` (Ctrl+, elsewhere). Shortcuts: `lib/keymap`
+    (rebindable, bare keys allowed unlike Iris), `useAppShortcuts`,
+    `ShortcutsTab`. Local clones use the dialog plugin's folder picker.
   - Files tab (`FilesTab`): placeholder with a collapsible file-tree slot
     (`data-slot="file-tree"`) and a diff slot (`data-slot="diff"`); the diff
     view plugs in there. Next: M3 (then/now

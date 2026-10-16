@@ -1,92 +1,128 @@
 /**
- * Settings and provider status. The GitLab token is write-only from here:
- * it goes to `set_gitlab_token` and nowhere else (never into `Settings`),
- * and only whether one is stored ever comes back.
+ * UI preferences, persisted to localStorage. Deep-merged over DEFAULTS
+ * (Iris's `settingsStore`).
+ *
+ * Only what the frontend alone needs lives here; backend-relevant settings
+ * (providers, refresh interval, AI, clones) are the core's `settings.json`
+ * via `backendSettingsStore`. The theme has its own store (`themeStore`), as
+ * in Podium and Iris.
  */
 
 import { create } from "zustand";
 
-import {
-  getSettings,
-  gitlabTokenPresent,
-  providerStatus,
-  setGitlabToken,
-  toIpcError,
-  updateSettings,
-} from "../ipc/commands";
-import { onReviewsRefreshed } from "../ipc/events";
-import type { IpcError, ProviderStatus, Settings } from "../ipc/types";
+import type { ActionId, ShortcutOverrides } from "../lib/keymap";
 
-/** What to do with the stored GitLab token on save. */
-export type TokenChange =
-  { action: "keep" } | { action: "set"; token: string } | { action: "clear" };
-
-interface SettingsStoreState {
-  settings: Settings | null;
-  tokenPresent: boolean;
-  status: ProviderStatus | null;
-  saving: boolean;
-  lastError: IpcError | null;
-  load: () => Promise<void>;
-  /** Re-read the provider status and whether a token is stored. */
-  refreshStatus: () => Promise<void>;
-  /** Save settings, then apply the token change; resolves true on success. */
-  save: (settings: Settings, token: TokenChange) => Promise<boolean>;
+export interface Settings {
+  appearance: { reduceMotion: boolean };
+  /**
+   * Only the shortcuts the user changed (action → its bindings); the rest
+   * follow `lib/keymap`'s defaults, also for actions added later.
+   */
+  shortcuts: ShortcutOverrides;
 }
 
-export const useSettingsStore = create<SettingsStoreState>((set, get) => ({
-  settings: null,
-  tokenPresent: false,
-  status: null,
-  saving: false,
-  lastError: null,
+export const DEFAULTS: Settings = {
+  appearance: { reduceMotion: false },
+  shortcuts: {},
+};
 
-  load: async () => {
-    try {
-      set({ settings: await getSettings(), lastError: null });
-    } catch (e) {
-      set({ lastError: toIpcError(e) });
+const STORAGE_KEY = "argus.settings";
+
+/** Keeps the entries that are a non-empty list of strings for a known action. */
+function loadShortcuts(saved: unknown): ShortcutOverrides {
+  const out: ShortcutOverrides = {};
+  if (!saved || typeof saved !== "object") return out;
+  for (const [action, list] of Object.entries(saved)) {
+    if (
+      Array.isArray(list) &&
+      list.length > 0 &&
+      list.every((b) => typeof b === "string")
+    ) {
+      out[action as ActionId] = list;
     }
-    await get().refreshStatus();
-  },
-
-  refreshStatus: async () => {
-    try {
-      const [status, tokenPresent] = await Promise.all([
-        providerStatus(),
-        gitlabTokenPresent(),
-      ]);
-      set({ status, tokenPresent });
-    } catch (e) {
-      set({ lastError: toIpcError(e) });
-    }
-  },
-
-  save: async (settings, token) => {
-    set({ saving: true, lastError: null });
-    try {
-      // Settings first: the token is stored for the GitLab URL just saved.
-      const stored = await updateSettings(settings);
-      set({ settings: stored });
-      if (token.action === "set") await setGitlabToken(token.token);
-      if (token.action === "clear") await setGitlabToken("");
-      await get().refreshStatus();
-      return true;
-    } catch (e) {
-      set({ lastError: toIpcError(e) });
-      return false;
-    } finally {
-      set({ saving: false });
-    }
-  },
-}));
-
-/**
- * After every refresh, re-check the providers (a `gh auth login` or a new
- * token shows up without reopening Settings). Resolves to an unsubscribe.
- */
-export function subscribeSettingsEvents(): Promise<() => void> {
-  return onReviewsRefreshed(
-    () => void useSettingsStore.getState().refreshStatus(),
-  );
+  }
+  return out;
 }
+
+function persist(s: Settings): void {
+  try {
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ appearance: s.appearance, shortcuts: s.shortcuts }),
+    );
+  } catch {
+    /* quota exceeded: keep the in-memory value for this session */
+  }
+}
+
+function load(): Settings {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return structuredClone(DEFAULTS);
+    // Spread saved values over defaults per section, so a blob whose shape
+    // predates a newer field still gets that field's default.
+    const saved = JSON.parse(raw) as Partial<Settings>;
+    return {
+      appearance: { ...DEFAULTS.appearance, ...saved.appearance },
+      shortcuts: loadShortcuts(saved.shortcuts),
+    };
+  } catch {
+    return structuredClone(DEFAULTS);
+  }
+}
+
+/** Sets the manual reduced-motion override on <html>. Turning the toggle on
+ *  sets `data-reduce-motion="true"` (matched by the global.css guard); turning
+ *  it off removes the attribute, so the OS-level media query still applies. */
+export function applyReduceMotion(reduce: boolean): void {
+  const el = document.documentElement;
+  if (reduce) {
+    el.dataset.reduceMotion = "true";
+  } else {
+    delete el.dataset.reduceMotion;
+  }
+}
+
+interface SettingsState extends Settings {
+  set: <K extends keyof Settings>(
+    section: K,
+    patch: Partial<Settings[K]>,
+  ) => void;
+  resetSettings: () => void;
+  /** Rebinds an action; `null` puts its default back. */
+  setShortcut: (action: ActionId, bindings: string[] | null) => void;
+  /** Puts every shortcut back to its default. */
+  resetShortcuts: () => void;
+}
+
+export const useSettingsStore = create<SettingsState>((set, get) => {
+  const initial = load();
+  applyReduceMotion(initial.appearance.reduceMotion);
+  return {
+    ...initial,
+    set: (section, patch) => {
+      const next = { ...get()[section], ...patch } as Settings[typeof section];
+      persist({ ...get(), [section]: next });
+      if (section === "appearance") {
+        applyReduceMotion((next as Settings["appearance"]).reduceMotion);
+      }
+      set({ [section]: next } as Partial<SettingsState>);
+    },
+    resetSettings: () => {
+      localStorage.removeItem(STORAGE_KEY);
+      applyReduceMotion(DEFAULTS.appearance.reduceMotion);
+      set({ ...structuredClone(DEFAULTS) });
+    },
+    setShortcut: (action, bindings) => {
+      const next = { ...get().shortcuts };
+      if (bindings && bindings.length > 0) next[action] = bindings;
+      else delete next[action];
+      persist({ ...get(), shortcuts: next });
+      set({ shortcuts: next });
+    },
+    resetShortcuts: () => {
+      persist({ ...get(), shortcuts: {} });
+      set({ shortcuts: {} });
+    },
+  };
+});

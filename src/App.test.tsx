@@ -1,21 +1,40 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+const events = vi.hoisted(() => {
+  const handlers = new Map<string, (() => void)[]>();
+  return {
+    listen: (name: string, cb: () => void) => {
+      handlers.set(name, [...(handlers.get(name) ?? []), cb]);
+      return Promise.resolve(() => undefined);
+    },
+    emit: (name: string) => (handlers.get(name) ?? []).forEach((h) => h()),
+    clear: () => handlers.clear(),
+  };
+});
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => undefined)),
+  listen: vi.fn((name: string, cb: () => void) => events.listen(name, cb)),
 }));
 
 import { invoke } from "@tauri-apps/api/core";
 
 import App from "./App";
 import { useReviewStore } from "./state/reviewStore";
-import { useSettingsStore } from "./state/settingsStore";
+import { useBackendSettingsStore } from "./state/backendSettingsStore";
+import { useSettingsRequestStore } from "./state/settingsRequestStore";
 import { review, settings, status } from "./test/fixtures";
 
 const mockInvoke = vi.mocked(invoke);
 const initialReviews = useReviewStore.getState();
-const initialSettings = useSettingsStore.getState();
+const initialSettings = useBackendSettingsStore.getState();
 
 const a = review({ title: "Fixture A" });
 const b = review({ title: "Fixture B" });
@@ -23,7 +42,9 @@ const b = review({ title: "Fixture B" });
 describe("App", () => {
   beforeEach(() => {
     useReviewStore.setState({ ...initialReviews }, true);
-    useSettingsStore.setState({ ...initialSettings }, true);
+    useBackendSettingsStore.setState({ ...initialSettings }, true);
+    useSettingsRequestStore.getState().clear();
+    events.clear();
     mockInvoke.mockImplementation((cmd: string) => {
       switch (cmd) {
         case "list_reviews":
@@ -90,9 +111,32 @@ describe("App", () => {
 
   it("opens settings from the title bar", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    fireEvent.click(screen.getByTitle("Settings (Ctrl+,)"));
     expect(
       await screen.findByRole("dialog", { name: "Settings" }),
     ).toBeInTheDocument();
+  });
+
+  it("opens settings from the native menu event", async () => {
+    render(<App />);
+    await screen.findByText("Fixture A");
+    act(() => events.emit("menu:open-settings"));
+    expect(
+      await screen.findByRole("dialog", { name: "Settings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens the provider's tab from the Providers section", async () => {
+    render(<App />);
+    const providers = screen.getByRole("region", { name: "Providers" });
+    await within(providers).findByText("GitLab is not set up.");
+    fireEvent.click(
+      within(providers).getByRole("button", { name: "Settings" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    expect(within(dialog).getByRole("tab", { name: "GitLab" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
   });
 });

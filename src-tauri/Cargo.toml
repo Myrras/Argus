@@ -25,6 +25,8 @@ tauri-plugin-window-state = "2"
 # Opens review links in the OS default browser instead of navigating the
 # webview (a bare target="_blank" does nothing in WKWebView/WebView2).
 tauri-plugin-opener = "2"
+# Native folder picker for a repository's local clone (Settings → AI).
+tauri-plugin-dialog = "2"
 serde.workspace = true
 serde_json.workspace = true
 # Structured instrumentation. The `log` feature makes `tracing` events fall

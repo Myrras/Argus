@@ -4,23 +4,19 @@
  * below it, the Providers section.
  */
 
+import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
-import { useSettingsStore } from "../state/settingsStore";
+import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import { ProvidersSection } from "./ProvidersSection";
 import { ReviewList } from "./ReviewList";
 import { ReviewsIcon } from "./icons";
 import styles from "./Sidebar.module.css";
 
-export function Sidebar({
-  now,
-  onOpenSettings,
-}: {
-  now: number;
-  onOpenSettings: () => void;
-}) {
+export function Sidebar({ now }: { now: number }) {
   const sidebarWidth = useLayoutStore((s) => s.sidebarWidth);
-  const status = useSettingsStore((s) => s.status);
+  const status = useBackendSettingsStore((s) => s.status);
+  const openSettings = useSettingsRequestStore((s) => s.open);
   const report = useReviewStore((s) => s.lastRefresh);
 
   return (
@@ -39,7 +35,7 @@ export function Sidebar({
       <ProvidersSection
         status={status}
         errors={report?.errors ?? []}
-        onOpenSettings={onOpenSettings}
+        onOpenSettings={openSettings}
       />
     </aside>
   );

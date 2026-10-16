@@ -37,12 +37,19 @@ when it merges.
   The sidebar's Providers section shows each provider's state and says when
   `gh` is missing or logged out or GitLab is not set up, and a provider that
   fails to refresh is reported there without blocking the other. Other
-  failures show as a notification. GitHub also works when Argus is launched from Finder or the Dock.
-- Settings: GitHub host and account, GitLab URL and token (the token goes to
-  the keychain only; Settings shows just whether one is set), the refresh
-  interval, and AI analysis on or off (saved now, used in a later release).
-- Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` to
-  refresh, `1`–`4` for the tabs, `⌘,` for Settings. Light and dark theme.
+  failures show as a notification. GitHub also works when Argus is launched
+  from Finder or the Dock.
+- Settings, opened with `⌘,` (the app menu on macOS, the gear in the title
+  bar elsewhere), in tabs: General (dark, light or retro theme, reduced
+  motion, the refresh interval), GitHub (on or off, host and account),
+  GitLab (URL and token; the token goes to the keychain only, Settings shows
+  just whether one is set, and it can be removed), AI (analysis on or off,
+  saved now and used in a later release, and a local clone folder per
+  repository), and Shortcuts. Switches apply at once, text fields have their
+  own Save.
+- Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` (or
+  `⌘R`) to refresh, `1`–`4` for the tabs, `⌘,` for Settings. Every shortcut
+  can be rebound in Settings → Shortcuts.
 
 ## [0.1.0] - 2026-10-16
 

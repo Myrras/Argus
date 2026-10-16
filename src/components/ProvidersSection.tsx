@@ -7,7 +7,7 @@
  * sections; collapsed, the title counts the problems.
  */
 
-import type { ProviderStatus, RefreshError } from "../ipc/types";
+import type { ProviderId, ProviderStatus, RefreshError } from "../ipc/types";
 import { bannerItems } from "../lib/banner";
 import { providerLines } from "../lib/providers";
 import { useLayoutStore } from "../state/layoutStore";
@@ -23,7 +23,8 @@ export function ProvidersSection({
 }: {
   status: ProviderStatus | null;
   errors: readonly RefreshError[];
-  onOpenSettings: () => void;
+  /** Opens Settings on that provider's tab. */
+  onOpenSettings: (provider: ProviderId) => void;
 }) {
   const collapsed = useLayoutStore((s) => s.providersCollapsed);
   const setCollapsed = useLayoutStore((s) => s.setProvidersCollapsed);
@@ -81,7 +82,7 @@ export function ProvidersSection({
                     <button
                       type="button"
                       className={`ghost ${styles.action}`}
-                      onClick={onOpenSettings}
+                      onClick={() => onOpenSettings(item.provider)}
                     >
                       Settings
                     </button>

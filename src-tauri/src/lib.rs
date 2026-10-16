@@ -16,6 +16,8 @@ mod error;
 mod events;
 mod state;
 
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -39,6 +41,8 @@ pub fn run() {
         )
         // Opens review links in the OS default browser.
         .plugin(tauri_plugin_opener::init())
+        // Native folder picker for a repository's local clone (Settings → AI).
+        .plugin(tauri_plugin_dialog::init())
         // Logging sinks: stdout (dev), the per-OS log directory (support), and
         // the webview console (in-app diagnostics).
         .plugin(
@@ -52,6 +56,57 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // macOS: native menu bar with Settings… (⌘,) in the app menu, as in
+            // Iris; the other platforms use the in-app title-bar gear instead.
+            // The menu item emits a Tauri event the frontend listens for.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{MenuBuilder, MenuItem, SubmenuBuilder};
+
+                let settings = MenuItem::with_id(
+                    app,
+                    "settings",
+                    "Settings\u{2026}", // "Settings…"
+                    true,
+                    Some("CmdOrCtrl+,"),
+                )?;
+                let app_menu = SubmenuBuilder::new(app, "Argus")
+                    .about(None)
+                    .separator()
+                    .item(&settings)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+                // Setting a custom menu replaces the default one, so Edit must
+                // be re-added or Cmd+C/V/X stop working in the webview.
+                let edit_menu = SubmenuBuilder::new(app, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .separator()
+                    .select_all()
+                    .build()?;
+                let menu = MenuBuilder::new(app)
+                    .item(&app_menu)
+                    .item(&edit_menu)
+                    .build()?;
+                app.set_menu(menu)?;
+                app.on_menu_event(|app, event| {
+                    if event.id() == "settings" {
+                        let _ = app.emit("menu:open-settings", ());
+                    }
+                });
+            }
+
             // The database and settings.json live in the app data dir, which
             // only exists once the app does — hence managing state here
             // rather than on the builder.

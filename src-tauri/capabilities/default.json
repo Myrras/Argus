@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window: core APIs, logging, window-state persistence, opening review links in the browser, and the custom-title-bar window controls (Windows; dragging on macOS and Windows).",
+  "description": "Capability for the main window: core APIs, logging, window-state persistence, opening review links in the browser, the native folder picker (a local clone in Settings), and the custom-title-bar window controls (Windows; dragging on macOS and Windows).",
   "windows": [
     "main"
   ],
@@ -10,6 +10,7 @@
     "log:default",
     "window-state:default",
     "opener:default",
+    "dialog:default",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
