@@ -1,0 +1,4 @@
+allowBuilds:
+  # esbuild's postinstall links its platform-specific binary; required by vite/vitest.
+  esbuild: true
+enablePrePostScripts: true

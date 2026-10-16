@@ -1,0 +1,29 @@
+[package]
+name = "argus"
+description = "Argus desktop shell — a thin Tauri 2 IPC adapter over argus-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+# The `_lib` suffix avoids a name clash with the binary on Windows.
+# See https://github.com/rust-lang/cargo/issues/8519
+name = "argus_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+argus-core = { path = "../crates/argus-core" }
+tauri = { version = "2", features = [] }
+# Global logger sink (stdout + per-OS log dir + webview console).
+tauri-plugin-log = "2"
+# Persist and restore window size/position across runs.
+tauri-plugin-window-state = "2"
+serde.workspace = true
+serde_json.workspace = true
+# Structured instrumentation. The `log` feature makes `tracing` events fall
+# through to the global `log` logger that `tauri-plugin-log` installs.
+tracing = { workspace = true, features = ["log"] }

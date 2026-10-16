@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Capability for the main window: core APIs, the logging plugin, and window-state persistence.","local":true,"windows":["main"],"permissions":["core:default","log:default","window-state:default"]}}

@@ -1,0 +1,62 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0 var(--sp-4);
+  background: var(--canvas);
+}
+
+.product {
+  font-weight: 700;
+  font-size: var(--fs-lg);
+  letter-spacing: 0.01em;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-4);
+  background: var(--canvas);
+}
+
+.card {
+  max-width: 520px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  padding: var(--sp-5);
+  text-align: center;
+  animation: cardIn var(--dur-3) var(--ease-out);
+}
+
+@keyframes cardIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+.title {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xl);
+  font-weight: 700;
+}
+
+.description {
+  margin: 0;
+  color: var(--text-muted);
+}
