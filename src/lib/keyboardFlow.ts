@@ -17,9 +17,10 @@ import { loadCommentable, useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useOverlayStore } from "../state/overlayStore";
+import { useReviewStore } from "../state/reviewStore";
 import { toastInfo } from "../state/toastStore";
 import { clampRange, commentableSet } from "./commentRanges";
-import type { ActionId } from "./keymap";
+import { ownsEnter, type ActionId } from "./keymap";
 
 /** Where a new comment on `line` of `path` goes; null when it cannot. */
 export async function lineTarget(
@@ -71,6 +72,8 @@ export function commentOnFocusedItem(reviewId: ReviewId): boolean {
   const side = item.side;
   if (!side || item.line < 1) return false;
   void lineTarget(reviewId, item.card, side, item.line).then((target) => {
+    // The lines came in after the user moved to another review.
+    if (useReviewStore.getState().selectedId !== reviewId) return;
     if (!target) {
       toastInfo("That line cannot take a comment in this view");
       return;
@@ -111,8 +114,8 @@ export function runFlowAction(
     case "prevItem":
       return focus.move(reviewId, action === "nextItem" ? 1 : -1);
     case "toggleThread": {
-      // A focused button handles its own keys.
-      if (target instanceof HTMLButtonElement) return false;
+      // A focused button or link handles its own keys.
+      if (ownsEnter(target)) return false;
       const t = focusedThread(reviewId);
       if (!t) return false;
       focus.commandThread(t.threadId, "toggle");

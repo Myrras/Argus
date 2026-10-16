@@ -74,6 +74,8 @@ export interface ActionDef {
   windowsLinuxOnly?: boolean;
   /** Listed but not rebindable (Escape: it cancels everywhere). */
   fixed?: boolean;
+  /** Held down, it repeats (moves); every other action acts once a press. */
+  repeats?: boolean;
 }
 
 export const ACTIONS: ActionDef[] = [
@@ -83,6 +85,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Navigate",
     scope: "list",
     defaults: ["ArrowDown"],
+    repeats: true,
   },
   {
     id: "prevReview",
@@ -90,6 +93,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Navigate",
     scope: "list",
     defaults: ["ArrowUp"],
+    repeats: true,
   },
   {
     id: "openReview",
@@ -141,6 +145,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Files",
     scope: "files",
     defaults: ["KeyJ"],
+    repeats: true,
     note: "In a review: the Conversation, then each file.",
   },
   {
@@ -149,6 +154,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Files",
     scope: "files",
     defaults: ["KeyK"],
+    repeats: true,
     note: "In a review: the Conversation, then each file.",
   },
   {
@@ -222,6 +228,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Files",
     scope: "files",
     defaults: ["KeyN"],
+    repeats: true,
     note: "In a review: moves the focus down the page, in page order.",
   },
   {
@@ -230,6 +237,7 @@ export const ACTIONS: ActionDef[] = [
     group: "Files",
     scope: "files",
     defaults: ["KeyP"],
+    repeats: true,
     note: "In a review: moves the focus up the page.",
   },
   {
@@ -605,16 +613,37 @@ export function withHint(
 
 // -- Event helpers --------------------------------------------------------------
 
+/** Inputs that take no typing: a click on one must not mute the keys. */
+const KEYLESS_INPUTS = new Set([
+  "checkbox",
+  "radio",
+  "button",
+  "submit",
+  "reset",
+  "image",
+  "color",
+  "file",
+]);
+
 /** Typing in a field never triggers the list shortcuts. */
 export function isEditableTarget(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.tagName === "INPUT") {
+    return !KEYLESS_INPUTS.has((el as HTMLInputElement).type);
+  }
   return (
-    !!el &&
-    (el.tagName === "INPUT" ||
-      el.tagName === "TEXTAREA" ||
-      el.tagName === "SELECT" ||
-      el.isContentEditable)
+    el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable
   );
+}
+
+/** Elements whose own Enter does something (follow, toggle, press). */
+const OWN_ENTER =
+  'button, a[href], summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="switch"]';
+
+/** A focused control that handles its own Enter: the shortcut leaves it. */
+export function ownsEnter(target: EventTarget | null): boolean {
+  return target instanceof Element && target.matches(OWN_ENTER);
 }
 
 /**

@@ -146,4 +146,39 @@ describe("useAppShortcuts", () => {
     expect(press({ key: "r" }, input).defaultPrevented).toBe(false);
     input.remove();
   });
+  it("leaves Enter to focused links, summaries and role buttons", () => {
+    renderHook(() => useAppShortcuts());
+    useReviewStore.setState({ cursorId: a.id });
+    const link = document.createElement("a");
+    link.href = "https://example.test/fixture";
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    details.appendChild(summary);
+    const fake = document.createElement("span");
+    fake.setAttribute("role", "button");
+    fake.tabIndex = 0;
+    document.body.append(link, details, fake);
+    for (const el of [link, summary, fake]) {
+      expect(press({ key: "Enter" }, el).defaultPrevented).toBe(false);
+    }
+    expect(useReviewStore.getState().selectedId).toBeNull();
+    link.remove();
+    details.remove();
+    fake.remove();
+  });
+
+  it("leaves Enter alone without a cursor", () => {
+    renderHook(() => useAppShortcuts());
+    expect(press({ key: "Enter" }).defaultPrevented).toBe(false);
+  });
+
+  it("keeps the keys after clicking a checkbox", () => {
+    renderHook(() => useAppShortcuts());
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    document.body.appendChild(box);
+    expect(press({ key: "3" }, box).defaultPrevented).toBe(true);
+    expect(useReviewStore.getState().tab).toBe("waitingOnAuthor");
+    box.remove();
+  });
 });

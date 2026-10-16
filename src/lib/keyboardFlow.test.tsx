@@ -293,6 +293,48 @@ describe("keys on the focused item", () => {
 });
 
 describe("guards", () => {
+  it("c opens nothing once another review is open", async () => {
+    let answer: (v: unknown) => void = () => {};
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === "commentable_lines"
+        ? new Promise((r) => (answer = r))
+        : Promise.resolve([]),
+    );
+    renderHook(() => useAppShortcuts());
+    press({ key: "n", code: "KeyN" });
+    press({ key: "n", code: "KeyN" });
+    expect(press({ key: "c", code: "KeyC" }).defaultPrevented).toBe(true);
+    // The lines arrive after the user moved on.
+    act(() => useReviewStore.setState({ selectedId: "another-review" }));
+    await act(async () => {
+      answer({
+        reviewId: r.id,
+        path: "src/a.rs",
+        baseSha: r.baseSha,
+        headSha: r.headSha,
+        hunks: [{ old: [], new: [1, 2, 3, 4, 5] }],
+      });
+      await Promise.resolve();
+    });
+    expect(useCommentStore.getState().composer).toBeNull();
+  });
+
+  it("held keys repeat moves only, never toggles", () => {
+    renderHook(() => useAppShortcuts());
+    press({ key: "j", code: "KeyJ" });
+    press({ key: "j", code: "KeyJ", repeat: true });
+    expect(useCodeViewStore.getState().byReview[r.id]?.selected).toBe(
+      "src/a.rs",
+    );
+    vi.mocked(invoke).mockClear();
+    press({ key: "v", code: "KeyV" });
+    press({ key: "v", code: "KeyV", repeat: true });
+    press({ key: "v", code: "KeyV", repeat: true });
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([c]) => c === "set_file_viewed"),
+    ).toHaveLength(1);
+  });
+
   it("no page key fires while typing or with a modal open", () => {
     renderHook(() => useAppShortcuts());
     const input = document.createElement("textarea");

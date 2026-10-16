@@ -40,6 +40,7 @@ import {
   findAction,
   isBrowserShortcut,
   isEditableTarget,
+  ownsEnter,
   type ActionId,
 } from "./keymap";
 import { currentKeymap } from "./useKeymap";
@@ -74,8 +75,9 @@ function runListAction(action: ActionId, target: EventTarget | null): boolean {
       store.moveCursor(-1);
       return true;
     case "openReview":
-      // A focused button handles its own Enter.
-      if (target instanceof HTMLButtonElement) return false;
+      // A focused button or link handles its own Enter; without a cursor
+      // there is nothing to open.
+      if (ownsEnter(target) || !store.cursorId) return false;
       store.openCursor();
       return true;
     case "refresh":
@@ -158,13 +160,20 @@ export function useAppShortcuts(options?: { onOpenSettings?: () => void }) {
           return;
         }
         if (!isEditableTarget(e.target) && !inDialog(e.target)) {
+          // A held key repeats the moves only: a toggle (viewed, dismiss)
+          // would flap and write on every repeat.
+          const once = (a: ActionId) => !e.repeat || !!actionDef(a).repeats;
           const fileAction = findAction(e, keymap, "files");
-          if (fileAction && runFilesAction(fileAction, e.target)) {
+          if (
+            fileAction &&
+            once(fileAction) &&
+            runFilesAction(fileAction, e.target)
+          ) {
             e.preventDefault();
             return;
           }
           const action = findAction(e, keymap, "list");
-          if (action && runListAction(action, e.target)) {
+          if (action && once(action) && runListAction(action, e.target)) {
             e.preventDefault();
             return;
           }
