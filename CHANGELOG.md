@@ -91,6 +91,18 @@ when it merges.
   comment on the line you last clicked, `⌘↩` to submit a comment and `Esc`
   to cancel it, `⌘,` for Settings. Every shortcut except `Esc` can be
   rebound in Settings → Shortcuts.
+- Thread history: every thread on code shows the code it was left on and
+  that same code now, side by side (stacked in a narrow card), highlighted,
+  with the changed lines marked and the commented lines edged. Your own
+  threads show it straight away; other reviewers' threads open it with
+  "Then/now history" or `h` on the thread you last clicked. A line above
+  says what happened: moved from one line to another, renamed, touched by N
+  commits or untouched since your comment, removed or deleted in which
+  commit, or that Argus could not locate the lines (never a guessed line).
+  The comments become a timeline with the commits that touched the lines
+  and resolves in between, so you see at a glance whether someone replied
+  before changing anything; long comments fold. Outdated threads stay fully
+  readable, and comments on the review as a whole get the timeline too.
 
 ## [0.1.0] - 2026-10-16
 
