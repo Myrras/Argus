@@ -221,7 +221,53 @@ just test-core      # argus-core only
 just lint           # clippy -D warnings + eslint
 just format         # rustfmt + prettier
 just version-check  # versions in sync across manifests
+just coverage       # cargo-llvm-cov + Vitest v8 (not in `just test` or CI)
 ```
+
+## Testing
+
+No network, no real tokens, fictitious data only (`acme-fixture/*`,
+`*-fixture` users, `glpat-fixture-…`), no fixed sleeps (wait on a channel,
+`AiRuntime::wait_idle` or `support::tick()`).
+
+- **Core unit tests** sit next to the code (`src/<module>/tests.rs`,
+  builders in `src/testutil.rs`); they may reach private state
+  (`core.ai.set_executor`, `Store { conn }` for old schemas).
+- **Core integration tests** (`crates/argus-core/tests/`) use the public
+  API only. Doubles: a fake `gh` shell script per file that routes argument
+  lines to `tests/fixtures/github/*.json` and logs calls + token env
+  (Unix-only: `#[cfg_attr(windows, ignore)]`); a `TcpListener` GitLab
+  double routing paths to `tests/fixtures/gitlab/*.json`; `tests/support`'s
+  `Platform`, a scripted provider that logs every call as read or write
+  (the guarantee tests); a real temp git repo as the walk's ground truth
+  (`history_git.rs`).
+- **New provider fixture:** save the anonymised API response under
+  `tests/fixtures/<github|gitlab>/`, add its route (the `case` in the fake
+  `gh` of `github_provider.rs`, `fixture_routes` in `gitlab_provider.rs`),
+  assert on the normalised model, never on raw JSON.
+- **Spec guarantees** (`tests/guarantees.rs`, `src/ai/guarantees.rs`): no
+  platform write without an explicit post/reply/approve/post_findings
+  (refresh, code view, history, polling, settings, AI runs); a review
+  leaves the active list exactly when approved; waiting-on-me + reasons
+  per status; outdated threads fully readable; re-review to posted comment;
+  AI off keeps tracking and history. `tests/token_safety.rs` fuzzes error
+  bodies echoing the token through every provider call;
+  `tests/history_edges.rs` and `store/tests.rs` (upgrade from every schema
+  version) cover the rest.
+- **IPC contract:** `src-tauri/tests/ipc_contract.rs` checks every
+  `generate_handler!` command against its `commands.ts` wrapper (name +
+  camelCased args), that only `src/ipc/` touches `invoke`/`listen`, and the
+  event names. `src/ipc/wire-shapes.json` holds the wire structs' key paths
+  and enum values: `tests/wire_shapes.rs` (Rust) and `src/ipc/wire.test.ts`
+  (literals typed by `types.ts`) both compare against it. After a deliberate
+  wire change: `ARGUS_UPDATE_WIRE=1 cargo test -p argus-core --test
+  wire_shapes`, then fix `types.ts` until Vitest passes.
+- **Frontend** (Vitest + Testing Library, jsdom, `src/test/setup.ts`):
+  builders in `src/test/*Fixtures.ts`; mock `@tauri-apps/api/core` /
+  `event` per file; `DiffEditor` is stubbed (CodeMirror needs layout).
+  `App.flow.test.tsx` runs the whole app over a stateful fake backend.
+  Assert that writes happen only on their button (filter `invoke` calls by
+  the write commands).
 
 ## Conventions
 
