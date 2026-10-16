@@ -47,10 +47,28 @@ sibling app Iris (`../Iris`).
     keymap's `openSettings` (Ctrl+, elsewhere). Shortcuts: `lib/keymap`
     (rebindable, bare keys allowed unlike Iris), `useAppShortcuts`,
     `ShortcutsTab`. Local clones use the dialog plugin's folder picker.
-  - Files tab (`FilesTab`): placeholder with a collapsible file-tree slot
-    (`data-slot="file-tree"`) and a diff slot (`data-slot="diff"`); the diff
-    view plugs in there. Next: M3 (then/now
-  thread history; the thread card has a `data-slot="then-now"` placeholder).
+  - Code view (Files tab): `FilesTab` = `FileTree` (`data-slot="file-tree"`,
+    tree/flat + filter) beside the diff column (`data-slot="diff"`): one
+    `FileDiffCard` per file, contents loaded lazily (IntersectionObserver or
+    selection; cached per review/sha/path in `codeViewStore`), binary and
+    large (>1500 lines or no patch) diffs as cards. `DiffEditor` wraps
+    `@codemirror/merge` (`unifiedMergeView` / `MergeView`, layout in
+    `layoutStore.diffLayout`); the editor setup (`lib/codemirror`) is
+    Selene's, themed on the tokens (`--diff-*`). Threads: `lib/diffThreads`
+    places current ones in CodeMirror block widgets (`ThreadBlock`, its own
+    React root), outdated ones are listed at the top of their file (GitHub
+    `diff_hunk` / GitLab line + commit) with a "Then/now history" link that
+    focuses the thread in the Threads tab (`codeViewStore.focusThread`).
+    The gutter "+" is the disabled M4 comment hook. Core: `fetch_files`
+    (`DiffRange::Review` / `Compare`) per provider; left side = GitHub merge
+    base (compare API), GitLab latest version `base_sha`; since-last-review
+    = GitHub `compare/last...head` (left: its merge base), GitLab
+    `compare?straight=true` (left: last). Viewed marks: `viewed_files`
+    (migration 2), keyed path + `content_sha` (GitHub blob sha, GitLab diff
+    digest) of the review's own diff. Keys `nextFile`/`prevFile`/
+    `toggleViewed` (scope `files`).
+  - Next: M3 (then/now thread history; the thread card has a
+    `data-slot="then-now"` placeholder).
 
 ## Architecture
 
@@ -76,7 +94,8 @@ src/                 # React (presentation only)
 ```
 
 `argus-core` modules: `provider/` (GitLab/GitHub clients, provider status),
-`review/` (rounds), `store/` (SQLite), `settings/`, `poll/`. Planned (create
+`review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
+code view's file list + viewed marks). Planned (create
 them when their milestone starts): `history/`, `ai/`.
 
 ### IPC contract
