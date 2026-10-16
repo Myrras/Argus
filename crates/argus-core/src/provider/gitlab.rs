@@ -20,8 +20,14 @@ use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
     ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
-use super::{count_patch, digest, encode_segment, first_line, looks_binary, ReviewProvider};
+use super::{
+    count_patch, digest, encode_segment, first_line, looks_binary, PostResultOf, ReviewProvider,
+};
 use crate::error::{CoreError, CoreResult};
+use crate::post::{
+    sanitize, DiffLine, LineKind, PlacedComment, PostError, PostErrorKind, PostedComment,
+    PostedNote,
+};
 
 const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
 
@@ -419,6 +425,72 @@ impl ReviewProvider for GitlabProvider {
                 })
             }
         }
+    }
+    // --- M4 writes (helpers in the "M4: writes" section at the end) ---
+
+    /// The position comes from the latest diff version, read right before
+    /// posting: GitLab anchors a comment to a version's three shas.
+    fn post_comment(&self, r: &ReviewRef, c: &PlacedComment) -> PostResultOf<PostedComment> {
+        let p = Self::mr_path(r);
+        let versions: Vec<GlVersion> = self.get_json(&format!("{p}/versions"))?;
+        // Newest first, as GitLab lists them.
+        let latest = versions.into_iter().next().ok_or_else(|| {
+            PostError::new(
+                PostErrorKind::Provider,
+                "GitLab has no diff for this merge request yet",
+            )
+        })?;
+        if latest.head_commit_sha != c.head_sha {
+            return Err(PostError::new(
+                PostErrorKind::HeadMoved,
+                "The merge request got new commits while posting; refresh and post again.",
+            ));
+        }
+        let body = discussion_body(c, &latest);
+        let created: GlCreatedDiscussion =
+            self.post_json(&format!("{p}/discussions"), Some(&body), GlWrite::Comment)?;
+        let note = created
+            .notes
+            .first()
+            .map(|n| n.id)
+            .ok_or_else(|| PostError::from(unexpected()))?;
+        Ok(PostedComment {
+            url: self.note_url(r, note),
+            provider_thread_id: created.id,
+            provider_note_id: note.to_string(),
+            path: c.path.clone(),
+            side: c.side,
+            line: c.line_number(),
+            start_line: c.start_number(),
+            head_sha: c.head_sha.clone(),
+        })
+    }
+
+    fn reply(&self, r: &ReviewRef, thread: &str, body: &str) -> PostResultOf<PostedNote> {
+        let path = format!(
+            "{}/discussions/{}/notes",
+            Self::mr_path(r),
+            encode_segment(thread)
+        );
+        let note: GlCreatedNote = self.post_json(
+            &path,
+            Some(&serde_json::json!({ "body": body })),
+            GlWrite::Reply,
+        )?;
+        Ok(PostedNote {
+            url: self.note_url(r, note.id),
+            provider_thread_id: thread.to_string(),
+            provider_note_id: note.id.to_string(),
+        })
+    }
+
+    fn approve(&self, r: &ReviewRef) -> PostResultOf<()> {
+        let _: serde_json::Value = self.post_json(
+            &format!("{}/approve", Self::mr_path(r)),
+            None,
+            GlWrite::Approve,
+        )?;
+        Ok(())
     }
 }
 
@@ -852,6 +924,202 @@ struct GlCompare {
 struct GlDiscussion {
     id: String,
     notes: Vec<GlNote>,
+}
+
+// ---------------------------------------------------------------------------
+// M4: writes. Only `Core`'s post API reaches these, on an explicit user
+// action.
+// ---------------------------------------------------------------------------
+
+/// Which write a response answers (GitLab's 401 means different things).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GlWrite {
+    Comment,
+    Reply,
+    Approve,
+}
+
+impl GitlabProvider {
+    /// POST `body` (JSON) to `path` under `/api/v4`; the response parsed as
+    /// `T`. Retried only when the connection could not be made: a request
+    /// that was sent is never sent twice, so a comment is never doubled.
+    fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        what: GlWrite,
+    ) -> PostResultOf<T> {
+        let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
+        let url = format!("{}/api/v4{path}", self.base);
+        let payload = body.map(|b| b.to_string()).unwrap_or_default();
+        let mut response = None;
+        for delay_ms in [0, 500, 1500] {
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            let mut req = CLIENT.post(&url).header("PRIVATE-TOKEN", &token);
+            if body.is_some() {
+                req = req
+                    .header("Content-Type", "application/json")
+                    .body(payload.clone());
+            }
+            match req.send() {
+                Ok(r) => {
+                    response = Some(r);
+                    break;
+                }
+                Err(e) if e.is_connect() => {
+                    tracing::debug!("GitLab write could not connect: {e}");
+                }
+                Err(e) => {
+                    tracing::debug!("GitLab write failed: {e}");
+                    return Err(PostError::new(
+                        PostErrorKind::Provider,
+                        "GitLab did not answer; refresh to see whether it went through",
+                    ));
+                }
+            }
+        }
+        let Some(response) = response else {
+            return Err(
+                CoreError::Provider("could not reach GitLab (connection failed)".into()).into(),
+            );
+        };
+        let status = response.status().as_u16();
+        let text = response.text().unwrap_or_default();
+        if (200..300).contains(&status) {
+            return serde_json::from_str(&text).map_err(|_| unexpected().into());
+        }
+        let reason = gitlab_error_message(&text).map(|m| sanitize(&m, &[&token]));
+        Err(write_error(status, reason, what))
+    }
+
+    /// The web URL of note `id` of the MR.
+    fn note_url(&self, r: &ReviewRef, id: u64) -> String {
+        let mr = if r.url.is_empty() {
+            format!("{}/{}/-/merge_requests/{}", self.base, r.repo, r.number)
+        } else {
+            r.url.clone()
+        };
+        format!("{mr}#note_{id}")
+    }
+}
+
+/// A failed write as a [`PostError`]; `reason` is GitLab's own message
+/// (sanitized), forwarded so the user sees why.
+fn write_error(status: u16, reason: Option<String>, what: GlWrite) -> PostError {
+    let with = |fallback: &str| {
+        format!(
+            "GitLab: {}",
+            reason.clone().unwrap_or_else(|| fallback.to_string())
+        )
+    };
+    match status {
+        300..=399 => CoreError::Provider(
+            "GitLab redirected the request; check the URL in Settings (https, host and path)"
+                .into(),
+        )
+        .into(),
+        // Approving answers 401 when the user may not approve (already
+        // approved, own MR, not eligible), not only for a bad token.
+        401 if what == GlWrite::Approve => PostError::new(
+            PostErrorKind::PostRejected,
+            with("401 Unauthorized")
+                + " (already approved, or you may not approve this merge request)",
+        ),
+        401 => CoreError::GitlabAuth.into(),
+        404 => PostError::new(PostErrorKind::NotFound, with("404 Not found")),
+        429 => CoreError::Provider("GitLab rate limit reached, try again later".into()).into(),
+        400..=499 => PostError::new(PostErrorKind::PostRejected, with(&format!("HTTP {status}"))),
+        _ => PostError::new(
+            PostErrorKind::Provider,
+            with(&format!("could not post (HTTP {status})")),
+        ),
+    }
+}
+
+/// GitLab's error text from a JSON error body: `message` (a string, a list
+/// or a field → errors object) or `error` + `error_description`. `None` for
+/// a body that is not such JSON (a proxy's HTML page is never forwarded).
+fn gitlab_error_message(body: &str) -> Option<String> {
+    fn flatten(v: &serde_json::Value) -> String {
+        match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(items) => {
+                items.iter().map(flatten).collect::<Vec<_>>().join(", ")
+            }
+            serde_json::Value::Object(map) => map
+                .iter()
+                .map(|(k, v)| format!("{k}: {}", flatten(v)))
+                .collect::<Vec<_>>()
+                .join("; "),
+            other => other.to_string(),
+        }
+    }
+    let v: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    if let Some(m) = v.get("message") {
+        return Some(flatten(m));
+    }
+    let error = flatten(v.get("error")?);
+    Some(match v.get("error_description").and_then(|d| d.as_str()) {
+        Some(d) => format!("{error}: {d}"),
+        None => error,
+    })
+}
+
+/// GitLab's line code: `<sha1 of the path>_<old>_<new>` with its own line
+/// counters ([`DiffLine::old_pos`] / [`DiffLine::new_pos`]).
+fn line_code(path: &str, row: &DiffLine) -> String {
+    let digest = sha1_smol::Sha1::from(path).digest().to_string();
+    format!("{digest}_{}_{}", row.old_pos, row.new_pos)
+}
+
+/// One end of a `line_range`.
+fn range_point(path: &str, row: &DiffLine) -> serde_json::Value {
+    serde_json::json!({
+        "line_code": line_code(path, row),
+        // GitLab: "new" for an added line, otherwise "old".
+        "type": if row.kind == LineKind::Added { "new" } else { "old" },
+        "old_line": row.old_line(),
+        "new_line": row.new_line(),
+    })
+}
+
+/// The body of a new diff discussion: a text position on `version`.
+/// `new_line` alone for an added line, `old_line` alone for a removed one,
+/// both for an unchanged line (GitLab rejects a context line given one
+/// side only).
+fn discussion_body(c: &PlacedComment, version: &GlVersion) -> serde_json::Value {
+    let mut position = serde_json::json!({
+        "position_type": "text",
+        "base_sha": version.base_commit_sha,
+        "start_sha": version.start_commit_sha,
+        "head_sha": version.head_commit_sha,
+        "old_path": c.old_path,
+        "new_path": c.path,
+    });
+    if let Some(old) = c.line.old_line() {
+        position["old_line"] = old.into();
+    }
+    if let Some(new) = c.line.new_line() {
+        position["new_line"] = new.into();
+    }
+    if let Some(start) = &c.start {
+        position["line_range"] = serde_json::json!({
+            "start": range_point(&c.path, start),
+            "end": range_point(&c.path, &c.line),
+        });
+    }
+    serde_json::json!({ "body": c.body, "position": position })
+}
+
+#[derive(Deserialize)]
+struct GlCreatedNote {
+    id: u64,
+}
+
+#[derive(Deserialize)]
+struct GlCreatedDiscussion {
+    id: String,
+    notes: Vec<GlCreatedNote>,
 }
 
 #[cfg(test)]
