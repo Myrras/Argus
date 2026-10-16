@@ -122,7 +122,8 @@ impl Settings {
     }
 
     /// Normalise and check: trims hosts, drops a trailing slash from the
-    /// GitLab URL, and rejects a GitLab URL that is not http(s).
+    /// GitLab URL, and rejects a GitLab URL that is not https (plain http
+    /// only for localhost).
     pub fn validated(mut self) -> CoreResult<Self> {
         self.github.host = self.github.host.trim().to_string();
         if self.github.host.is_empty() {
@@ -138,7 +139,11 @@ impl Settings {
             String::new()
         } else {
             normalize_base_url(url).ok_or_else(|| {
-                CoreError::InvalidInput("the GitLab URL must start with https:// or http://".into())
+                CoreError::InvalidInput(
+                    "the GitLab URL must start with https:// (http:// only for localhost: \
+                     plain http would send the token unencrypted)"
+                        .into(),
+                )
             })?
         };
         Ok(self)
@@ -245,5 +250,27 @@ mod tests {
         let mut bad = Settings::default();
         bad.gitlab.base_url = "gitlab.example.test".into();
         assert!(matches!(bad.validated(), Err(CoreError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn plain_http_is_only_for_a_local_gitlab() {
+        // The token would go out in cleartext.
+        let mut s = Settings::default();
+        s.gitlab.base_url = "http://gitlab.example.test".into();
+        let err = s.validated().unwrap_err();
+        assert!(err.to_string().contains("https://"), "{err}");
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:8080",
+        ] {
+            let mut s = Settings::default();
+            s.gitlab.base_url = local.into();
+            assert!(s.validated().is_ok(), "{local}");
+        }
+        // A host that merely starts like one is not local.
+        let mut s = Settings::default();
+        s.gitlab.base_url = "http://localhost.example.test".into();
+        assert!(s.validated().is_err());
     }
 }

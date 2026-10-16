@@ -168,7 +168,7 @@ pub fn from_settings(settings: &Settings) -> Vec<Arc<dyn ReviewProvider>> {
             Ok(p) => out.push(Arc::new(p)),
             // `Settings::validated` rejects such a URL before it is saved;
             // a hand-edited file lands here.
-            Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not http(s)"),
+            Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not https"),
         }
     }
     out

@@ -122,12 +122,26 @@ pub fn url_host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-/// Trim and drop a trailing slash; `None` when not an http(s) URL.
+/// Trim and drop a trailing slash; `None` when not an https URL, or a
+/// plain http one off this machine: every request carries the token in a
+/// header, which plain http sends in cleartext. Local http (`localhost`,
+/// `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own machine.
 pub fn normalize_base_url(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches('/');
-    let ok =
-        (url.starts_with("https://") || url.starts_with("http://")) && !url_host(url).is_empty();
+    let host = url_host(url);
+    let ok = !host.is_empty()
+        && (url.starts_with("https://") || (url.starts_with("http://") && is_local(host)));
     ok.then(|| url.to_string())
+}
+
+/// `host[:port]` names this machine.
+fn is_local(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        // `[::1]:8080`
+        Some(rest) => rest.split_once(']').map_or(rest, |(h, _)| h),
+        None => host.split_once(':').map_or(host, |(h, _)| h),
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
 }
 
 /// The longest one request may take, start to end of body.
@@ -1375,6 +1389,11 @@ mod tests {
             GitlabProvider::new("", StaticToken("t".into())),
             Err(CoreError::GitlabNotConfigured)
         ));
+        // A hand-edited settings file with plain http is refused too.
+        assert!(
+            GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_err()
+        );
+        assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
     }
 
     #[test]
