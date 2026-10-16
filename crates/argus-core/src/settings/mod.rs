@@ -27,8 +27,9 @@ pub struct Settings {
     pub poll_interval_secs: u64,
     pub ai: AiSettings,
     /// Local clone per repository, keyed `host/repo` (e.g.
-    /// `github.com/acme/widgets`). Recommended for deeper AI analysis, never
-    /// required.
+    /// `github.com/acme/widgets`). Recommended for deeper AI analysis, and
+    /// read (never written, never fetched) for faster, exact thread history
+    /// and file contents; never required: what it lacks comes from the API.
     pub clone_paths: BTreeMap<String, PathBuf>,
 }
 

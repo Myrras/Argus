@@ -120,7 +120,8 @@ fn warm_histories(
         return;
     }
     let provider = Ok(ctx.provider.clone());
-    if let Err(e) = crate::history::compute_histories(store, record, &provider, Some(&ids)) {
+    let clone = ctx.settings.clone_path(&record.review);
+    if let Err(e) = crate::history::compute_histories(store, record, &provider, clone, Some(&ids)) {
         tracing::debug!("AI run: thread history unavailable: {e}");
     }
 }

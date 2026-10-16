@@ -4,7 +4,10 @@
 //! serve), and every answer is checked against `git blame` and
 //! `git log -L`.
 //!
-//! The [`GitSource`] here is also a sketch of the M6 local-clone source.
+//! The same corpus runs through both sources: the test's [`GitSource`]
+//! (per-commit patches shaped as the platform APIs serve them, the API
+//! path) and Argus' own local-clone source ([`LocalClone`]), which must
+//! agree with git and with each other, and leave the clone untouched.
 //! Skipped when `git` is not installed; Unix-only (paths, shell-free but
 //! line-ending sensitive).
 
@@ -12,10 +15,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
+use argus_core::git::LocalClone;
 use argus_core::history::{walk_line, LineHistorySource, LineStatus, WalkStart};
 use argus_core::provider::{ChangedFile, FileDiff, FileStatus};
-use argus_core::CoreResult;
+use argus_core::{CoreError, CoreResult};
 
 struct Repo {
     _dir: tempfile::TempDir,
@@ -243,6 +248,8 @@ fn build() -> Option<(Repo, Vec<String>)> {
 /// origin file).
 fn blame(repo: &Repo, rev: &str, path: &str, line: u32) -> (String, u32, String) {
     let out = repo.git(&[
+        "-c",
+        "core.quotePath=false",
         "blame",
         "--porcelain",
         "-L",
@@ -286,11 +293,270 @@ fn the_walk_agrees_with_git() {
     let Some((repo, commits)) = build() else {
         return;
     };
-    let src = GitSource(&repo, Mutex::new(HashMap::new()));
+    check_against_git(
+        &repo,
+        &commits,
+        &GitSource(&repo, Mutex::new(HashMap::new())),
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_clone_walk_agrees_with_git_and_with_the_api_walk() {
+    let Some((repo, commits)) = build() else {
+        return;
+    };
+    let clone = LocalClone::open(&repo.path).expect("a usable clone");
+    check_against_git(&repo, &commits, &clone);
+
+    // Line by line, range by range, at every head: the same answer, events
+    // and all.
+    let api = GitSource(&repo, Mutex::new(HashMap::new()));
+    let mut compared = 0;
+    for head in &commits[1..] {
+        for (start_line, line) in (1..=30).map(|l| (l, l)).chain([(8, 12), (18, 23), (4, 6)]) {
+            let start = WalkStart {
+                sha: commits[0].clone(),
+                path: "src/lib.rs".into(),
+                start_line,
+                line,
+            };
+            assert_eq!(
+                walk_line(&clone, &start, head).unwrap(),
+                walk_line(&api, &start, head).unwrap(),
+                "{start_line}-{line} at {head}"
+            );
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, 6 * 33);
+
+    // From a later commit too.
+    let start = WalkStart {
+        sha: commits[2].clone(),
+        path: "src/lib.rs".into(),
+        start_line: 11,
+        line: 11,
+    };
+    assert_eq!(
+        walk_line(&clone, &start, &commits[5]).unwrap(),
+        walk_line(&api, &start, &commits[5]).unwrap()
+    );
+
+    // A comment on a commit force-pushed away (still in the clone): no line
+    // of commits to head, so one direct diff, exactly from that commit.
+    repo.git(&["checkout", "-q", "-b", "old", &commits[0]]);
+    let mut v = lines(1..=30);
+    v.insert(0, "// gone".into());
+    repo.write("src/lib.rs", &text(&v));
+    let old = repo.commit("old: a line on top");
+    repo.git(&["checkout", "-q", "main"]);
+    assert_eq!(clone.commits_between(&old, &commits[5]).unwrap(), None);
+    for line in [1, 8, 11, 26] {
+        let start = WalkStart {
+            sha: old.clone(),
+            path: "src/lib.rs".into(),
+            start_line: line,
+            line,
+        };
+        let m = walk_line(&clone, &start, &commits[5]).unwrap();
+        assert!(!m.attributed, "line {line}");
+        assert_eq!(
+            m,
+            walk_line(&api, &start, &commits[5]).unwrap(),
+            "line {line}"
+        );
+    }
+    // Old line 8 is c1's line 7 under one extra line: both land on the same
+    // line at head.
+    let at_head = |sha: &str, line| {
+        walk_line(
+            &clone,
+            &WalkStart {
+                sha: sha.to_string(),
+                path: "src/lib.rs".into(),
+                start_line: line,
+                line,
+            },
+            &commits[5],
+        )
+        .unwrap()
+        .status
+    };
+    let (LineStatus::Located { line: a, .. }, LineStatus::Located { line: b, .. }) =
+        (at_head(&old, 8), at_head(&commits[0], 7))
+    else {
+        panic!("not located");
+    };
+    assert_eq!(a, b);
+}
+
+/// What a read could have changed in a clone: worktree and index state
+/// (through a status that takes no lock itself), HEAD, refs, and every
+/// file under `.git` with its size and modification time.
+fn clone_state(repo: &Repo) -> (String, String, String, Vec<(String, u64, SystemTime)>) {
+    let out = Command::new("git")
+        .args(["status", "--porcelain=v1", "--ignored", "-uall"])
+        .current_dir(&repo.path)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let status = String::from_utf8(out.stdout).unwrap();
+    let head = repo.git(&["rev-parse", "HEAD"]) + &repo.git(&["symbolic-ref", "HEAD"]);
+    let refs = repo.git(&["for-each-ref"]);
+    let mut files = Vec::new();
+    let mut dirs = vec![repo.path.join(".git")];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let e = e.unwrap();
+            let meta = e.metadata().unwrap();
+            if meta.is_dir() {
+                dirs.push(e.path());
+            } else {
+                let rel = e
+                    .path()
+                    .strip_prefix(&repo.path)
+                    .unwrap()
+                    .display()
+                    .to_string();
+                files.push((rel, meta.len(), meta.modified().unwrap()));
+            }
+        }
+    }
+    files.sort();
+    (status, head, refs, files)
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_clone_is_read_exactly_and_never_changed() {
+    let Some((repo, commits)) = build() else {
+        return;
+    };
+    // The user's own work in progress: a modified tracked file, a staged
+    // file, an untracked one.
+    repo.write("README.md", "local edit\n");
+    repo.write("staged.txt", "staged\n");
+    repo.git(&["add", "staged.txt"]);
+    repo.write("scratch.txt", "untracked\n");
+    let before = clone_state(&repo);
+    assert!(before.0.contains(" M README.md") && before.0.contains("?? scratch.txt"));
+
+    let clone = LocalClone::open(&repo.path).unwrap();
+    // Files: exactly the committed blobs, whatever the working tree says.
+    let mut read = 0;
+    for sha in &commits {
+        let paths = repo.git(&["ls-tree", "-r", "--name-only", sha]);
+        for path in paths.lines() {
+            let want = repo.git(&["show", &format!("{sha}:{path}")]);
+            assert_eq!(
+                clone.file_at(sha, path).unwrap().unwrap(),
+                want,
+                "{path}@{sha}"
+            );
+            read += 1;
+        }
+        assert!(matches!(
+            clone.file_at(sha, "staged.txt"),
+            Some(Err(CoreError::NotFound))
+        ));
+    }
+    assert!(read > 10);
+    let head = commits.last().unwrap();
+    assert_eq!(
+        clone.file_at(head, "README.md").unwrap().unwrap(),
+        "readme, more\n"
+    );
+    // Walks, commit diffs and direct diffs over the whole history.
+    check_against_git(&repo, &commits, &clone);
+    for sha in &commits[1..] {
+        clone.commit_diff(sha).unwrap();
+    }
+    clone.direct_diff(&commits[0], head).unwrap().unwrap();
+    // A commit the clone has never seen: not there, and not fetched.
+    let unknown = "ab".repeat(20);
+    assert!(!clone.has_commit(&unknown));
+    assert!(clone.file_at(&unknown, "README.md").is_none());
+
+    assert_eq!(clone_state(&repo), before);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn paths_with_spaces_and_non_ascii_are_followed() {
+    if Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let repo = Repo {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    };
+    repo.git(&["init", "-q", "-b", "main"]);
+    let (from, to) = ("src/my file é.rs", "src/über dir/b \"q\" file.rs");
+    let mut v = lines(1..=30);
+    repo.write(from, &text(&v));
+    let c1 = repo.commit("c1");
+    repo.git(&["mv", from, "src/tmp.rs"]);
+    std::fs::create_dir_all(repo.path.join("src/über dir")).unwrap();
+    repo.git(&["mv", "src/tmp.rs", to]);
+    v.insert(0, "// top".into());
+    v[5] = "line 5 changed".into();
+    repo.write(to, &text(&v));
+    let c2 = repo.commit("c2: rename and edit");
+    v[20] = "line 20 changed".into();
+    repo.write(to, &text(&v));
+    let c3 = repo.commit("c3: edit");
+
+    let clone = LocalClone::open(&repo.path).unwrap();
+    for line in 1..=30 {
+        let m = walk_line(
+            &clone,
+            &WalkStart {
+                sha: c1.clone(),
+                path: from.into(),
+                start_line: line,
+                line,
+            },
+            &c3,
+        )
+        .unwrap();
+        let LineStatus::Located {
+            path,
+            line: now,
+            renamed,
+            ..
+        } = &m.status
+        else {
+            panic!("line {line}: {:?}", m.status);
+        };
+        assert_eq!((path.as_str(), *renamed), (to, true));
+        let (origin, origin_line, origin_file) = blame(&repo, &c3, path, *now);
+        match m.touched_by.last() {
+            None => assert_eq!(
+                (origin.as_str(), origin_line, origin_file.as_str()),
+                (c1.as_str(), line, from),
+                "line {line}"
+            ),
+            Some(by) => assert_eq!(&origin, by, "line {line}"),
+        }
+    }
+    assert_eq!(
+        clone.file_at(&c2, to).unwrap().unwrap(),
+        repo.git(&["show", &format!("{c2}:{to}")])
+    );
+}
+
+/// Every line of c1 walked to every later head through `src`, checked
+/// against `git blame` / `git log -L`, plus the story of a few lines.
+fn check_against_git(repo: &Repo, commits: &[String], src: &dyn LineHistorySource) {
     let c = |i: usize| commits[i - 1].clone();
     let walk = |line: u32, head: &str| {
         walk_line(
-            &src,
+            src,
             &WalkStart {
                 sha: c(1),
                 path: "src/lib.rs".into(),
@@ -314,7 +580,7 @@ fn the_walk_agrees_with_git() {
                     touched,
                     ..
                 } => {
-                    let (origin, origin_line, origin_file) = blame(&repo, &head, path, *now);
+                    let (origin, origin_line, origin_file) = blame(repo, &head, path, *now);
                     if m.touched_by.is_empty() {
                         assert!(!touched);
                         // Untouched: git traces the line at head back to
@@ -329,7 +595,7 @@ fn the_walk_agrees_with_git() {
                     }
                     // The commits git names for the line since c1 are the
                     // ones the walk says touched it.
-                    let since: Vec<String> = log_l(&repo, &head, path, *now)
+                    let since: Vec<String> = log_l(repo, &head, path, *now)
                         .into_iter()
                         .filter(|s| *s != c(1))
                         .collect();
