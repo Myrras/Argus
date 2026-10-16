@@ -542,10 +542,10 @@ fn hunk_window(
     from_diff_hunk(&anchor.head_sha, path, hunk, side, start, end)
 }
 
-/// The now window for where the walk put the lines. A located line that is
-/// not in the file at head, or an untouched line whose text differs from
-/// then, means the walk went wrong: the status turns Unlocated rather than
-/// show a wrong line.
+/// The now window for where the walk put the lines. A located line in a
+/// file that is not at head, a line past its end, or an untouched line
+/// whose text differs from then, means the walk went wrong: the status
+/// turns Unlocated rather than show a wrong line.
 fn now_window(
     ctx: &Ctx<'_>,
     mapping: &mut LineMapping,
@@ -562,6 +562,15 @@ fn now_window(
         } => {
             let text = match file_at(ctx, ctx.head, path) {
                 Ok(t) => t,
+                // A definite answer: there is no such file at head (the
+                // located path is a fallback's, e.g. GitHub's current line
+                // under the path the comment was made on). Never cache a
+                // line in a file that is not there.
+                Err(CoreError::NotFound) => {
+                    mapping.status =
+                        LineStatus::unlocated("the file is not at head under this name");
+                    return None;
+                }
                 Err(e) => {
                     *transient |= is_transient(&e);
                     return None;

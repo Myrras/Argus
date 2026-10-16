@@ -1260,3 +1260,29 @@ fn caching_for_a_thread_that_is_gone_stores_nothing() {
     store.put_history(gone, "h1", &h).unwrap();
     assert_eq!(store.cached_history(gone, "h1").unwrap(), None);
 }
+
+#[test]
+fn githubs_current_line_on_a_file_gone_at_head_is_unlocated() {
+    let repo = repo();
+    // The walk cannot follow (a commit diff is missing), so GitHub's own
+    // current line stands in, under the path the comment was made on; but
+    // that path is not at head (renamed or removed there).
+    repo.diffs.lock().unwrap().remove("c2");
+    repo.files
+        .lock()
+        .unwrap()
+        .remove(&("c3".to_string(), "src/cache.rs".to_string()));
+    {
+        let mut threads = repo.threads.lock().unwrap();
+        threads[0].anchor.as_mut().unwrap().current_line = Some(12);
+    }
+    let core = core_over(&repo);
+    let id = core.reviews().unwrap()[0].id;
+    let h = &core.review_histories(id).unwrap()[0];
+    assert!(
+        matches!(&h.status, LineStatus::Unlocated { reason } if reason.contains("not at head")),
+        "{:?}",
+        h.status
+    );
+    assert!(h.now_snapshot.is_none());
+}
