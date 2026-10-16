@@ -1,0 +1,1021 @@
+//! Tests over the AI pass' moving parts: the trigger rule, the store, the
+//! scheduler, the Core API, and real spawns of fake agent CLIs.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use super::adapter::{self, AgentError, Invocation, OutputKind};
+use super::job::{self, JobContext};
+use super::model::{AiRunStatus, Severity, VerdictLabel};
+use super::output::{RawFinding, RunOutput};
+use super::runtime::{AiRuntime, Executor};
+use super::store::{self as ai_store, RunRow};
+use super::*;
+use crate::error::{CoreError, CoreResult};
+use crate::ids::{ReviewId, ThreadId};
+use crate::provider::{
+    ChangedFile, DiffRange, FileDiff, FileStatus, ProviderId, ReviewDetail, ReviewProvider,
+    ReviewRef, Side, Thread,
+};
+use crate::review::{advance, ReviewStatus};
+use crate::settings::Settings;
+use crate::store::{ReviewRecord, Store};
+use crate::testutil::{at, detail, note, review_ref, thread, AUTHOR, ME};
+use crate::{Core, RefreshReport};
+
+// ---------------------------------------------------------------- fixtures
+
+fn record(number: u64) -> ReviewRecord {
+    let mut d = detail("h1");
+    d.review = review_ref(number);
+    advance(None, &d, &[], ME, true, at(10, 10))
+}
+
+fn changed(path: &str) -> ChangedFile {
+    ChangedFile {
+        path: path.into(),
+        old_path: None,
+        status: FileStatus::Modified,
+        additions: 1,
+        deletions: 1,
+        patch: Some("@@ -1,2 +1,2 @@\n-let ttl = 10;\n+let ttl = 0;\n ctx".into()),
+        content_sha: "c1".into(),
+        binary: false,
+        too_large: false,
+    }
+}
+
+/// Serves a fixed diff for any range, and records the ranges asked for.
+struct FakeProvider {
+    files: Vec<ChangedFile>,
+    asked: Mutex<Vec<DiffRange>>,
+}
+
+impl FakeProvider {
+    fn new(paths: &[&str]) -> Arc<Self> {
+        Arc::new(Self {
+            files: paths.iter().map(|p| changed(p)).collect(),
+            asked: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+impl ReviewProvider for FakeProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Github
+    }
+    fn host(&self) -> &str {
+        "github.com"
+    }
+    fn current_user(&self) -> CoreResult<String> {
+        Ok(ME.into())
+    }
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        Ok(Vec::new())
+    }
+    fn fetch_review(&self, _: &ReviewRef) -> CoreResult<ReviewDetail> {
+        Err(CoreError::NotFound)
+    }
+    fn fetch_threads(&self, _: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        Ok(Vec::new())
+    }
+    fn file_at(&self, _: &ReviewRef, _: &str, _: &str) -> CoreResult<String> {
+        Err(CoreError::NotFound)
+    }
+    fn fetch_files(&self, _: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+        self.asked.lock().unwrap().push(range.clone());
+        Ok(FileDiff {
+            base_sha: "base".into(),
+            head_sha: "h1".into(),
+            files: self.files.clone(),
+            truncated: false,
+        })
+    }
+}
+
+fn ctx(settings: Settings, provider: Arc<dyn ReviewProvider>) -> JobContext {
+    JobContext {
+        settings,
+        provider,
+        timeout: Duration::from_secs(20),
+    }
+}
+
+fn finding(path: &str, line: u32, severity: Severity, title: &str) -> RawFinding {
+    RawFinding {
+        path: path.into(),
+        line,
+        side: Side::New,
+        severity,
+        title: title.into(),
+        body: "why".into(),
+    }
+}
+
+fn run_row(status: AiRunStatus, round: u32, last_done: Option<u32>, interrupted: bool) -> RunRow {
+    RunRow {
+        review_id: ReviewId::from_key("x"),
+        status,
+        round,
+        adapter: "claude".into(),
+        error: None,
+        interrupted,
+        started_at: None,
+        finished_at: None,
+        last_done_round: last_done,
+        dropped_findings: 0,
+        dropped_verdicts: 0,
+    }
+}
+
+// ---------------------------------------------------------------- trigger
+
+#[test]
+fn trigger_rule() {
+    let r1 = record(1);
+    // New item: never ran.
+    assert!(needs_run(&r1, None));
+    // Same round, done: no rerun.
+    assert!(!needs_run(
+        &r1,
+        Some(&run_row(AiRunStatus::Done, 1, Some(1), false))
+    ));
+    // New round past the last successful run.
+    let mut r2 = r1.clone();
+    r2.round = 2;
+    r2.status = ReviewStatus::NeedsReReview;
+    assert!(needs_run(
+        &r2,
+        Some(&run_row(AiRunStatus::Done, 1, Some(1), false))
+    ));
+    // A failure is not retried in its own round, but a new round runs.
+    assert!(!needs_run(
+        &r2,
+        Some(&run_row(AiRunStatus::Failed, 2, Some(1), false))
+    ));
+    assert!(needs_run(
+        &r2,
+        Some(&run_row(AiRunStatus::Failed, 1, Some(1), false))
+    ));
+    // Interrupted by a restart: retried.
+    assert!(needs_run(
+        &r2,
+        Some(&run_row(AiRunStatus::Failed, 2, Some(1), true))
+    ));
+    // Running: never doubled.
+    assert!(!needs_run(
+        &r1,
+        Some(&run_row(AiRunStatus::Running, 1, None, false))
+    ));
+    // Closed, merged, approved: nothing.
+    let mut closed = r1.clone();
+    closed.state = crate::provider::ReviewState::Merged;
+    assert!(!needs_run(&closed, None));
+    let mut approved = r1.clone();
+    approved.status = ReviewStatus::Approved;
+    assert!(!needs_run(&approved, None));
+}
+
+// ---------------------------------------------------------------- store
+
+#[test]
+fn migration_5_adds_ai_runs_and_finding_side() {
+    let store = Store::in_memory().unwrap();
+    assert_eq!(store.schema_version().unwrap(), 5);
+    let conn = store.conn();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'ai_runs'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+    let side: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('findings') WHERE name = 'side'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(side, 1);
+}
+
+#[test]
+fn store_round_trips_findings_checklist_verdicts_and_overrides() {
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let mine = thread("t1", ME, "h1", vec![note("n1", ME, at(1, 1))]);
+    let theirs = thread("t2", AUTHOR, "h1", vec![note("n2", AUTHOR, at(1, 2))]);
+    store.upsert_threads(r.id, &[mine, theirs], ME).unwrap();
+    let t1 = ThreadId::from_key(r.id, "t1");
+    let t2 = ThreadId::from_key(r.id, "t2");
+
+    // Round 1.
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    let out1 = RunOutput {
+        findings: vec![
+            finding("src/b.rs", 9, Severity::Low, "Typo"),
+            finding("src/a.rs", 3, Severity::High, "Off by one"),
+            finding("src/a.rs", 1, Severity::Medium, "Leak"),
+        ],
+        checklist: vec!["Is a TTL of 0 intended?".into(), "Who calls this?".into()],
+        verdicts: vec![(t1, VerdictLabel::Untouched, "nothing changed".into())],
+        dropped_findings: 2,
+        dropped_verdicts: 1,
+    };
+    ai_store::save_done(&store, r.id, 1, &out1, at(10, 12)).unwrap();
+    let run = ai_store::run(&store, r.id).unwrap().unwrap();
+    assert_eq!(run.status, AiRunStatus::Done);
+    assert_eq!(run.last_done_round, Some(1));
+    assert_eq!((run.dropped_findings, run.dropped_verdicts), (2, 1));
+
+    let fs = ai_store::findings(&store, r.id).unwrap();
+    let order: Vec<_> = fs
+        .iter()
+        .map(|f| (f.severity, f.path.as_str(), f.line))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (Severity::High, "src/a.rs", 3),
+            (Severity::Medium, "src/a.rs", 1),
+            (Severity::Low, "src/b.rs", 9)
+        ]
+    );
+    assert_eq!(fs[0].side, Side::New);
+    let dismissed = ai_store::set_dismissed(&store, fs[0].id, true).unwrap();
+    assert!(dismissed.dismissed);
+
+    let items = ai_store::checklist(&store, r.id).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].text, "Is a TTL of 0 intended?");
+    assert!(
+        ai_store::set_checked(&store, items[0].id, true)
+            .unwrap()
+            .checked
+    );
+
+    // Rerun of round 1: same items keep their marks.
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 13)).unwrap();
+    ai_store::save_done(&store, r.id, 1, &out1, at(10, 14)).unwrap();
+    let fs = ai_store::findings(&store, r.id).unwrap();
+    assert_eq!(fs.len(), 3);
+    assert!(fs[0].dismissed && !fs[1].dismissed);
+    assert!(ai_store::checklist(&store, r.id).unwrap()[0].checked);
+
+    // Round 2: round-1 findings stay, with their round.
+    let out2 = RunOutput {
+        findings: vec![finding("src/a.rs", 3, Severity::High, "Still off by one")],
+        checklist: vec!["Check the migration".into()],
+        verdicts: vec![(t1, VerdictLabel::Addressed, "fixed".into())],
+        ..RunOutput::default()
+    };
+    ai_store::mark_running(&store, r.id, 2, "h2", "claude", at(11, 1)).unwrap();
+    ai_store::save_done(&store, r.id, 2, &out2, at(11, 2)).unwrap();
+    let fs = ai_store::findings(&store, r.id).unwrap();
+    assert_eq!(fs.len(), 4);
+    assert_eq!((fs[0].round, fs[0].title.as_str()), (2, "Still off by one"));
+    assert_eq!(fs[1].round, 1);
+    let items = ai_store::checklist(&store, r.id).unwrap();
+    assert_eq!(items[0].round, 2);
+    assert_eq!(items.len(), 3);
+
+    // Verdicts: the latest round's per thread; the override is kept apart.
+    let vs = ai_store::verdicts(&store, r.id).unwrap();
+    assert_eq!(vs.len(), 1);
+    assert_eq!(
+        (vs[0].round, vs[0].ai_label),
+        (2, Some(VerdictLabel::Addressed))
+    );
+    let v = ai_store::set_override(&store, t1, Some(VerdictLabel::Partly)).unwrap();
+    assert_eq!(v.ai_label, Some(VerdictLabel::Addressed));
+    assert_eq!(v.user_override, Some(VerdictLabel::Partly));
+    assert_eq!(v.label, Some(VerdictLabel::Partly));
+    // A rerun of the round keeps the override.
+    ai_store::save_done(&store, r.id, 2, &out2, at(11, 3)).unwrap();
+    let vs = ai_store::verdicts(&store, r.id).unwrap();
+    assert_eq!(vs[0].user_override, Some(VerdictLabel::Partly));
+    let cleared = ai_store::set_override(&store, t1, None).unwrap();
+    assert_eq!(cleared.label, Some(VerdictLabel::Addressed));
+    // A thread with no AI verdict gets one at the review's round.
+    let v2 = ai_store::set_override(&store, t2, Some(VerdictLabel::Untouched)).unwrap();
+    assert_eq!((v2.round, v2.ai_label), (r.round, None));
+    assert!(matches!(
+        ai_store::set_override(&store, ThreadId::from_key(r.id, "nope"), None),
+        Err(CoreError::NotFound)
+    ));
+    assert!(matches!(
+        ai_store::set_dismissed(&store, FindingId::new(), true),
+        Err(CoreError::NotFound)
+    ));
+}
+
+#[test]
+fn restart_turns_running_into_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("argus.db");
+    let r = record(12);
+    {
+        let store = Store::open(&db).unwrap();
+        store.upsert_review(&r).unwrap();
+        ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    }
+    let core = Core::open(&db, &dir.path().join("settings.json")).unwrap();
+    let state = core.ai_state(r.id).unwrap();
+    assert_eq!(state.status, AiRunStatus::Failed);
+    assert_eq!(state.error.as_deref(), Some(ai_store::INTERRUPTED));
+    assert!(state.finished_at.is_some());
+    // And it is retried on the next refresh.
+    let run = ai_store::run(&core.store, r.id).unwrap().unwrap();
+    assert!(run.interrupted);
+    assert!(needs_run(&r, Some(&run)));
+}
+
+// ---------------------------------------------------------------- runtime
+
+/// An executor that blocks until the gate opens (or it is cancelled) and
+/// records how many runs overlap, overall and per review.
+#[derive(Default)]
+struct Probe {
+    current: AtomicUsize,
+    max: AtomicUsize,
+    starts: AtomicUsize,
+    per_review: Mutex<HashMap<ReviewId, usize>>,
+    overlap_same_review: AtomicBool,
+    gate: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Probe {
+    fn executor(self: &Arc<Self>) -> Executor {
+        let p = Arc::clone(self);
+        Arc::new(
+            move |_store: &Store, rec: &ReviewRecord, _ctx: &JobContext, cancel: &AtomicBool| {
+                p.starts.fetch_add(1, Ordering::SeqCst);
+                {
+                    let mut m = p.per_review.lock().unwrap();
+                    let n = m.entry(rec.id).or_default();
+                    *n += 1;
+                    if *n > 1 {
+                        p.overlap_same_review.store(true, Ordering::SeqCst);
+                    }
+                }
+                let now = p.current.fetch_add(1, Ordering::SeqCst) + 1;
+                p.max.fetch_max(now, Ordering::SeqCst);
+                let mut open = p.gate.lock().unwrap();
+                while !*open && !cancel.load(Ordering::Relaxed) {
+                    open = p
+                        .opened
+                        .wait_timeout(open, Duration::from_millis(20))
+                        .unwrap()
+                        .0;
+                }
+                drop(open);
+                p.current.fetch_sub(1, Ordering::SeqCst);
+                *p.per_review.lock().unwrap().get_mut(&rec.id).unwrap() -= 1;
+                Ok(RunOutput {
+                    checklist: vec!["probe".into()],
+                    ..RunOutput::default()
+                })
+            },
+        )
+    }
+
+    fn open(&self) {
+        *self.gate.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+
+    fn wait_starts(&self, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.starts.load(Ordering::SeqCst) < n {
+            assert!(Instant::now() < deadline, "runs did not start");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+fn store_with(numbers: &[u64]) -> (Arc<Store>, Vec<ReviewId>) {
+    let store = Arc::new(Store::in_memory().unwrap());
+    let ids = numbers
+        .iter()
+        .map(|n| {
+            let r = record(*n);
+            store.upsert_review(&r).unwrap();
+            r.id
+        })
+        .collect();
+    (store, ids)
+}
+
+#[test]
+fn at_most_two_run_at_once_and_one_per_review() {
+    let (store, ids) = store_with(&[1, 2, 3, 4]);
+    let probe = Arc::new(Probe::default());
+    let rt = AiRuntime::new(store.clone(), true, probe.executor(), MAX_CONCURRENT);
+    let states = Arc::new(Mutex::new(Vec::new()));
+    let s2 = states.clone();
+    rt.set_callback(Arc::new(move |s| s2.lock().unwrap().push(s.clone())));
+    let provider: Arc<dyn ReviewProvider> = FakeProvider::new(&["src/a.rs"]);
+    let c = ctx(Settings::default(), provider);
+    for id in &ids {
+        assert!(rt.enqueue(*id, c.clone()));
+    }
+    probe.wait_starts(2);
+    // The first review again while it runs: queued behind itself.
+    assert!(rt.enqueue(ids[0], c.clone()));
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(probe.current.load(Ordering::SeqCst), 2);
+    assert_eq!(rt.state(ids[0]).unwrap().status, AiRunStatus::Running);
+    assert!(rt.state(ids[0]).unwrap().queued);
+    assert!(rt.state(ids[3]).unwrap().queued);
+    assert!(rt.busy(ids[3]));
+    probe.open();
+    assert!(rt.wait_idle(Duration::from_secs(5)));
+    assert_eq!(probe.max.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 5);
+    assert!(!probe.overlap_same_review.load(Ordering::SeqCst));
+    for id in &ids {
+        let st = rt.state(*id).unwrap();
+        assert_eq!(st.status, AiRunStatus::Done);
+        assert!(!st.queued);
+        assert_eq!(ai_store::checklist(&store, *id).unwrap()[0].text, "probe");
+    }
+    let seen = states.lock().unwrap();
+    assert!(seen.iter().any(|s| s.queued));
+    assert!(seen.iter().any(|s| s.status == AiRunStatus::Running));
+    assert!(seen.iter().any(|s| s.status == AiRunStatus::Done));
+}
+
+#[test]
+fn cancel_stops_running_and_drops_queued_runs() {
+    let (store, ids) = store_with(&[1, 2, 3]);
+    let probe = Arc::new(Probe::default());
+    let rt = AiRuntime::new(store.clone(), true, probe.executor(), MAX_CONCURRENT);
+    let c = ctx(Settings::default(), FakeProvider::new(&["src/a.rs"]));
+    for id in &ids {
+        rt.enqueue(*id, c.clone());
+    }
+    probe.wait_starts(2);
+    rt.cancel(ids[2]); // queued
+    assert!(!rt.state(ids[2]).unwrap().queued);
+    rt.cancel(ids[0]); // running
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while rt.state(ids[0]).unwrap().status == AiRunStatus::Running {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let st = rt.state(ids[0]).unwrap();
+    assert_eq!(st.status, AiRunStatus::Failed);
+    assert_eq!(st.error.as_deref(), Some(CANCELLED));
+    // Cancelled output never reaches the store.
+    assert!(ai_store::checklist(&store, ids[0]).unwrap().is_empty());
+    probe.open();
+    assert!(rt.wait_idle(Duration::from_secs(5)));
+    assert_eq!(rt.state(ids[1]).unwrap().status, AiRunStatus::Done);
+    assert_eq!(rt.state(ids[2]).unwrap().status, AiRunStatus::NotStarted);
+}
+
+#[test]
+fn a_failed_or_crashed_run_stores_nothing() {
+    let (store, ids) = store_with(&[1, 2]);
+    let ex: Executor = Arc::new(
+        |_: &Store, rec: &ReviewRecord, _: &JobContext, _: &AtomicBool| {
+            if rec.review.number == 1 {
+                Err("the agent gave no answer".into())
+            } else {
+                panic!("boom")
+            }
+        },
+    );
+    let rt = AiRuntime::new(store.clone(), true, ex, MAX_CONCURRENT);
+    let c = ctx(Settings::default(), FakeProvider::new(&[]));
+    rt.enqueue(ids[0], c.clone());
+    rt.enqueue(ids[1], c);
+    assert!(rt.wait_idle(Duration::from_secs(5)));
+    let a = rt.state(ids[0]).unwrap();
+    assert_eq!(a.status, AiRunStatus::Failed);
+    assert_eq!(a.error.as_deref(), Some("the agent gave no answer"));
+    assert_eq!(a.round, Some(1));
+    let b = rt.state(ids[1]).unwrap();
+    assert_eq!(b.error.as_deref(), Some("the AI run crashed"));
+    assert!(ai_store::findings(&store, ids[0]).unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------- Core API
+
+fn core_with_review() -> (Core, Arc<Probe>, ReviewRecord) {
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let provider: Arc<dyn ReviewProvider> = FakeProvider::new(&["src/a.rs"]);
+    let core = Core::with_providers(store, vec![provider]);
+    let probe = Arc::new(Probe::default());
+    probe.open();
+    core.ai.set_executor(probe.executor());
+    (core, probe, r)
+}
+
+fn report() -> RefreshReport {
+    RefreshReport {
+        changed: Vec::new(),
+        errors: Vec::new(),
+        refreshed_at: at(10, 12),
+    }
+}
+
+#[test]
+fn refresh_triggers_new_items_and_new_rounds_only() {
+    let (core, probe, r) = core_with_review();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let e2 = events.clone();
+    core.on_ai_state(move |s| e2.lock().unwrap().push(s.status));
+
+    assert_eq!(core.on_refresh_report(&report()), vec![r.id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(5)));
+    assert_eq!(core.ai_state(r.id).unwrap().status, AiRunStatus::Done);
+    assert_eq!(core.checklist(r.id).unwrap().len(), 1);
+    assert!(events.lock().unwrap().contains(&AiRunStatus::Done));
+
+    // Same round: no rerun.
+    assert!(core.on_refresh_report(&report()).is_empty());
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 1);
+
+    // New round: runs again.
+    let mut next = r.clone();
+    next.round = 2;
+    next.status = ReviewStatus::NeedsReReview;
+    core.store.upsert_review(&next).unwrap();
+    assert_eq!(core.on_refresh_report(&report()), vec![r.id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(5)));
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(core.ai_state(r.id).unwrap().last_done_round, Some(2));
+
+    // Manual run of the same round still runs.
+    let st = core.run_ai(r.id).unwrap();
+    assert!(st.queued || st.status == AiRunStatus::Running || st.status == AiRunStatus::Done);
+    assert!(core.ai.wait_idle(Duration::from_secs(5)));
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 3);
+    assert!(matches!(
+        core.run_ai(ReviewId::from_key("missing")),
+        Err(CoreError::NotFound)
+    ));
+}
+
+#[test]
+fn ai_disabled_runs_and_queues_nothing() {
+    let (core, probe, r) = core_with_review();
+    assert_eq!(core.on_refresh_report(&report()), vec![r.id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(5)));
+
+    let mut s = core.settings();
+    s.ai.enabled = false;
+    core.update_settings(s).unwrap();
+    let mut next = r.clone();
+    next.round = 2;
+    core.store.upsert_review(&next).unwrap();
+    assert!(core.on_refresh_report(&report()).is_empty());
+    assert!(matches!(core.run_ai(r.id), Err(CoreError::InvalidInput(_))));
+    assert!(core.findings(r.id).unwrap().is_empty());
+    assert!(core.checklist(r.id).unwrap().is_empty());
+    assert!(core.verdicts(r.id).unwrap().is_empty());
+    let st = core.ai_state(r.id).unwrap();
+    assert!(!st.enabled);
+    assert_eq!(st.status, AiRunStatus::NotStarted);
+    assert_eq!(probe.starts.load(Ordering::SeqCst), 1);
+    // The rest of the app still works.
+    assert_eq!(core.reviews().unwrap().len(), 1);
+}
+
+#[test]
+fn core_api_mutations_round_trip() {
+    let (core, _probe, r) = core_with_review();
+    core.store
+        .upsert_threads(
+            r.id,
+            &[thread("t1", ME, "h1", vec![note("n1", ME, at(1, 1))])],
+            ME,
+        )
+        .unwrap();
+    let t1 = ThreadId::from_key(r.id, "t1");
+    ai_store::mark_running(&core.store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    ai_store::save_done(
+        &core.store,
+        r.id,
+        1,
+        &RunOutput {
+            findings: vec![finding("src/a.rs", 2, Severity::Medium, "Leak")],
+            checklist: vec!["Intended?".into()],
+            verdicts: vec![(t1, VerdictLabel::Partly, "half".into())],
+            ..RunOutput::default()
+        },
+        at(10, 12),
+    )
+    .unwrap();
+    let f = &core.findings(r.id).unwrap()[0];
+    assert!(core.dismiss_finding(f.id, true).unwrap().dismissed);
+    assert!(!core.dismiss_finding(f.id, false).unwrap().dismissed);
+    let c = &core.checklist(r.id).unwrap()[0];
+    assert!(core.set_checklist_checked(c.id, true).unwrap().checked);
+    let v = core
+        .set_verdict_override(t1, Some(VerdictLabel::Addressed))
+        .unwrap();
+    assert_eq!(v.ai_label, Some(VerdictLabel::Partly));
+    assert_eq!(v.label, Some(VerdictLabel::Addressed));
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["userOverride"], "addressed");
+    assert_eq!(json["aiLabel"], "partly");
+    let json = serde_json::to_value(f).unwrap();
+    assert_eq!(json["side"], "new");
+    assert_eq!(json["severity"], "medium");
+}
+
+// ---------------------------------------------------------------- fake CLIs
+
+fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// A fake `claude`: records argv, cwd, stdin and the workspace listing per
+/// call, then prints `out<n>.jsonl` (or `out.jsonl`) as its stream.
+const FAKE_CLAUDE: &str = r#"#!/bin/sh
+dir="$(dirname "$0")"
+n=$(cat "$dir/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$dir/count"
+printf '%s\n' "$@" > "$dir/argv$n.txt"
+pwd -P > "$dir/cwd$n.txt"
+cat > "$dir/stdin$n.txt"
+find . -type f > "$dir/ls$n.txt" 2>/dev/null
+echo '{"type":"system","subtype":"init","session_id":"fake"}'
+echo 'profile noise that is not json'
+echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
+if [ -f "$dir/out$n.jsonl" ]; then cat "$dir/out$n.jsonl"; else cat "$dir/out.jsonl"; fi
+"#;
+
+fn result_line(answer: &str) -> String {
+    serde_json::json!({
+        "type": "result", "subtype": "success", "is_error": false, "result": answer
+    })
+    .to_string()
+        + "\n"
+}
+
+const GOOD_ANSWER: &str = r#"Here you go:
+```json
+{"findings":[
+  {"path":"src/a.rs","line":2,"side":"new","severity":"high","title":"TTL of 0 disables the cache","body":"Every lookup misses."},
+  {"path":"src/not-in-diff.rs","line":1,"side":"new","severity":"low","title":"x","body":"y"}
+ ],
+ "checklist":[{"text":"Is turning the cache off intended?"}],
+ "verdicts":[{"threadId":"00000000-0000-0000-0000-000000000000","label":"addressed","reason":"?"}]}
+```"#;
+
+fn fake_settings(binary: &Path, adapter_id: &str) -> Settings {
+    let mut s = Settings::default();
+    s.ai.adapter = adapter_id.into();
+    s.ai.binary = Some(binary.to_string_lossy().into_owned());
+    s
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn claude_run_in_a_snapshot_dir() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(bin.path().join("out.jsonl"), result_line(GOOD_ANSWER)).unwrap();
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    store
+        .upsert_threads(
+            r.id,
+            &[thread("t1", ME, "h1", vec![note("n1", ME, at(1, 1))])],
+            ME,
+        )
+        .unwrap();
+    let provider = FakeProvider::new(&["src/a.rs"]);
+    let c = ctx(fake_settings(&script, "claude"), provider.clone());
+
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert_eq!(out.findings.len(), 1);
+    assert_eq!(out.findings[0].title, "TTL of 0 disables the cache");
+    assert_eq!(out.dropped_findings, 1);
+    // Round 1 asks about no thread, so any verdict is dropped.
+    assert_eq!(out.dropped_verdicts, 1);
+    assert_eq!(out.checklist, vec!["Is turning the cache off intended?"]);
+    assert!(matches!(
+        provider.asked.lock().unwrap()[0],
+        DiffRange::Review { .. }
+    ));
+
+    let read = |name: &str| std::fs::read_to_string(bin.path().join(name)).unwrap();
+    let argv = read("argv1.txt");
+    for flag in [
+        "--print",
+        "stream-json",
+        "--verbose",
+        "Read,Grep,Glob",
+        "--strict-mcp-config",
+    ] {
+        assert!(argv.contains(flag), "missing {flag} in {argv}");
+    }
+    let stdin = read("stdin1.txt");
+    assert!(stdin.contains(prompt::FIRST_ROUND_TASK));
+    assert!(stdin.contains("+let ttl = 0;"));
+    assert!(!stdin.contains("Repository conventions"));
+    let ls = read("ls1.txt");
+    assert!(ls.contains("./threads.json"), "{ls}");
+    assert!(ls.contains("./diff/src/a.rs.diff"), "{ls}");
+    // The temp dir is gone after the run.
+    let cwd = read("cwd1.txt");
+    assert!(cwd.contains("argus-ai-"));
+    assert!(!Path::new(cwd.trim()).exists());
+    assert_eq!(read("count").trim(), "1");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn claude_runs_in_the_clone_with_its_conventions_in_a_later_round() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    let clone = tempfile::tempdir().unwrap();
+    std::fs::write(clone.path().join("CLAUDE.md"), "Fixture rule: no unwrap.").unwrap();
+    let store = Store::in_memory().unwrap();
+    let mut r = record(12);
+    r.round = 2;
+    r.last_reviewed_sha = Some("h0".into());
+    r.last_reviewed_at = Some(at(9, 9));
+    r.status = ReviewStatus::NeedsReReview;
+    store.upsert_review(&r).unwrap();
+    store
+        .upsert_threads(
+            r.id,
+            &[thread("t1", ME, "h0", vec![note("n1", ME, at(1, 1))])],
+            ME,
+        )
+        .unwrap();
+    let t1 = ThreadId::from_key(r.id, "t1");
+    let answer = format!(
+        r#"{{"findings":[],"checklist":[],"verdicts":[{{"threadId":"{t1}","label":"partly","reason":"Only one call site changed."}}]}}"#
+    );
+    std::fs::write(bin.path().join("out.jsonl"), result_line(&answer)).unwrap();
+    let mut settings = fake_settings(&script, "claude");
+    settings.clone_paths.insert(
+        "github.com/acme-fixture/widgets".into(),
+        clone.path().into(),
+    );
+    let provider = FakeProvider::new(&["src/a.rs"]);
+    let c = ctx(settings, provider.clone());
+
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert_eq!(
+        out.verdicts,
+        vec![(
+            t1,
+            VerdictLabel::Partly,
+            "Only one call site changed.".into()
+        )]
+    );
+    assert_eq!(out.dropped_verdicts, 0);
+    assert!(matches!(
+        &provider.asked.lock().unwrap()[0],
+        DiffRange::Compare { from, .. } if from == "h0"
+    ));
+    let read = |name: &str| std::fs::read_to_string(bin.path().join(name)).unwrap();
+    assert_eq!(
+        PathBuf::from(read("cwd1.txt").trim()),
+        clone.path().canonicalize().unwrap()
+    );
+    let stdin = read("stdin1.txt");
+    assert!(stdin.contains(prompt::LATER_ROUND_TASK));
+    assert!(stdin.contains("Fixture rule: no unwrap."));
+    assert!(stdin.contains(&format!("threadId: {t1}")));
+    // Nothing was written into the clone.
+    let entries: Vec<_> = std::fs::read_dir(clone.path()).unwrap().collect();
+    assert_eq!(entries.len(), 1);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn invalid_answer_is_retried_once_then_fails() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let c = ctx(
+        fake_settings(&script, "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+
+    // Bad, then good: one retry with the repair instruction.
+    std::fs::write(
+        bin.path().join("out1.jsonl"),
+        result_line("I found nothing wrong."),
+    )
+    .unwrap();
+    std::fs::write(
+        bin.path().join("out2.jsonl"),
+        result_line(r#"{"findings":[],"checklist":[],"verdicts":[]}"#),
+    )
+    .unwrap();
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert_eq!(out, RunOutput::default());
+    let stdin2 = std::fs::read_to_string(bin.path().join("stdin2.txt")).unwrap();
+    assert!(
+        stdin2.contains("Your previous answer could not be used: the answer holds no JSON object")
+    );
+
+    // Bad twice: failed, and nothing reaches the store through the runtime.
+    for f in ["count", "out1.jsonl", "out2.jsonl"] {
+        let _ = std::fs::remove_file(bin.path().join(f));
+    }
+    std::fs::write(
+        bin.path().join("out.jsonl"),
+        result_line(r#"{"findings":[{"path":"src/a.rs"}],"checklist":[],"verdicts":[]}"#),
+    )
+    .unwrap();
+    let err = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap_err();
+    assert!(
+        err.starts_with("the agent's answer was invalid after a retry"),
+        "{err}"
+    );
+    assert!(err.contains("findings[0]"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(bin.path().join("count"))
+            .unwrap()
+            .trim(),
+        "2"
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn auggie_takes_an_instruction_file_and_answers_in_text() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(
+        bin.path(),
+        "auggie",
+        r#"#!/bin/sh
+dir="$(dirname "$0")"
+printf '%s\n' "$@" > "$dir/argv.txt"
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--instruction-file" ]; then cp "$2" "$dir/prompt.txt"; fi
+  shift
+done
+printf 'Sure.\n```json\n{"findings":[],"checklist":[{"text":"Check the rollout"}],"verdicts":[]}\n```\n'
+"#,
+    );
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let c = ctx(
+        fake_settings(&script, "auggie"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert_eq!(out.checklist, vec!["Check the rollout"]);
+    let argv = std::fs::read_to_string(bin.path().join("argv.txt")).unwrap();
+    assert!(argv.starts_with("--print\n--quiet\n--ask\n--dont-save-session\n--instruction-file\n"));
+    let prompt = std::fs::read_to_string(bin.path().join("prompt.txt")).unwrap();
+    assert!(prompt.contains(prompt::OUTPUT_CONTRACT));
+}
+
+fn invocation(program: PathBuf, env: Vec<(std::ffi::OsString, std::ffi::OsString)>) -> Invocation {
+    Invocation {
+        program,
+        args: Vec::new(),
+        cwd: std::env::temp_dir(),
+        env,
+        stdin: Some("prompt".into()),
+        timeout: Duration::from_secs(20),
+        output: OutputKind::ClaudeStreamJson,
+    }
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_agent_env_has_no_tokens() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(
+        bin.path(),
+        "claude",
+        r#"#!/bin/sh
+env > "$(dirname "$0")/env.txt"
+echo '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+"#,
+    );
+    let parent = [
+        ("PATH", "/usr/bin:/bin"),
+        ("HOME", "/home/fixture"),
+        ("GH_TOKEN", "fixture-gh-token"),
+        ("GITLAB_TOKEN", "fixture-gl-token"),
+        ("GITHUB_TOKEN", "fixture-gh2-token"),
+    ]
+    .map(|(k, v)| (k.into(), v.into()));
+    let inv = invocation(script, adapter::sanitized_env(parent, None));
+    assert_eq!(adapter::run(&inv, &AtomicBool::new(false)).unwrap(), "ok");
+    let env = std::fs::read_to_string(bin.path().join("env.txt")).unwrap();
+    assert!(!env.contains("fixture-"), "{env}");
+    assert!(!env.contains("TOKEN="), "{env}");
+    assert!(env.contains("HOME=/home/fixture"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn hanging_agents_are_killed_on_timeout_and_cancel() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", "#!/bin/sh\nexec sleep 30\n");
+    let env = adapter::sanitized_env(std::env::vars_os(), None);
+    let mut inv = invocation(script, env);
+    inv.timeout = Duration::from_millis(300);
+    let start = Instant::now();
+    assert_eq!(
+        adapter::run(&inv, &AtomicBool::new(false)),
+        Err(AgentError::Timeout(Duration::from_millis(300)))
+    );
+    assert!(start.elapsed() < Duration::from_secs(5));
+
+    inv.timeout = Duration::from_secs(30);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let c2 = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        c2.store(true, Ordering::Relaxed);
+    });
+    let start = Instant::now();
+    assert_eq!(adapter::run(&inv, &cancel), Err(AgentError::Cancelled));
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn agent_failures_have_app_owned_messages() {
+    let bin = tempfile::tempdir().unwrap();
+    let env = adapter::sanitized_env(std::env::vars_os(), None);
+    let exit = write_script(
+        bin.path(),
+        "exit3",
+        "#!/bin/sh\necho secret-ish >&2\nexit 3\n",
+    );
+    assert_eq!(
+        adapter::run(&invocation(exit, env.clone()), &AtomicBool::new(false)),
+        Err(AgentError::Exit(Some(3)))
+    );
+    let failed = write_script(
+        bin.path(),
+        "failed",
+        "#!/bin/sh\necho '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true}'\n",
+    );
+    let e = adapter::run(&invocation(failed, env.clone()), &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(e.message(), "the agent reported an error (error_max_turns)");
+    let silent = write_script(bin.path(), "silent", "#!/bin/sh\nexit 0\n");
+    assert_eq!(
+        adapter::run(&invocation(silent, env), &AtomicBool::new(false)),
+        Err(AgentError::NoAnswer)
+    );
+
+    // A missing configured binary fails the run before anything spawns.
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let c = ctx(
+        fake_settings(&bin.path().join("missing"), "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+    let err = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap_err();
+    assert!(err.contains("`claude` was not found"), "{err}");
+}
+
+#[test]
+fn snapshot_paths_cannot_escape_the_temp_dir() {
+    let dir = job::TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+    let mut evil = changed("../../escape.rs");
+    evil.patch = Some("+x".into());
+    let diff = FileDiff {
+        base_sha: "b".into(),
+        head_sha: "h".into(),
+        files: vec![evil, changed("/abs/a.rs")],
+        truncated: false,
+    };
+    job::write_snapshot(&path, &diff, &[]).unwrap();
+    assert!(path.join("diff/escape.rs.diff").is_file());
+    assert!(path.join("diff/abs/a.rs.diff").is_file());
+    assert!(path.join("threads.json").is_file());
+    drop(dir);
+    assert!(!path.exists());
+}

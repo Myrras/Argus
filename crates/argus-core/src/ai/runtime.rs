@@ -82,6 +82,11 @@ impl AiRuntime {
         }
     }
 
+    #[cfg(test)]
+    pub fn set_executor(&self, executor: Executor) {
+        *self.inner.executor.lock().expect("executor lock poisoned") = executor;
+    }
+
     pub fn enabled(&self) -> bool {
         self.inner.enabled.load(Ordering::Relaxed)
     }
@@ -151,6 +156,27 @@ impl AiRuntime {
 
     pub fn state(&self, review: ReviewId) -> CoreResult<AiRunState> {
         self.inner.state(review)
+    }
+
+    /// Block until nothing is queued or running, or `timeout` passes;
+    /// whether it went idle.
+    #[cfg(test)]
+    pub fn wait_idle(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut s = self.inner.sched.lock().expect("sched lock poisoned");
+        while !(s.running.is_empty() && s.queue.is_empty()) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            s = self
+                .inner
+                .changed
+                .wait_timeout(s, left)
+                .expect("sched lock poisoned")
+                .0;
+        }
+        true
     }
 }
 
