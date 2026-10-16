@@ -33,16 +33,23 @@ pub async fn get_review(
     blocking(state, move |core| core.review(id)).await
 }
 
-/// Refresh every provider now (blocking, off the IPC thread) and emit the
-/// same events a poll does. Per-provider failures are in the report, not an
-/// error: one provider failing never fails the call.
+/// Refresh every provider now (blocking, off the IPC thread), emit the same
+/// events a poll does and let the AI pass queue its runs, as after a poll.
+/// Per-provider failures are in the report, not an error: one provider
+/// failing never fails the call.
 #[tauri::command]
 pub async fn refresh_reviews(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RefreshReport, IpcError> {
     let last = state.last_refresh.clone();
-    let report = blocking(state, |core| Ok(core.refresh())).await?;
+    let report = blocking(state, |core| {
+        let report = core.refresh();
+        // Quick (SQLite reads, queueing): it never waits on a run.
+        core.on_refresh_report(&report);
+        Ok(report)
+    })
+    .await?;
     AppState::record(&last, &report);
     events::emit_report(&app, &report);
     Ok(report)

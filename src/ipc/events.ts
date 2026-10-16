@@ -1,15 +1,16 @@
 /**
  * Typed wrappers over the global Tauri events: `src-tauri/src/events.rs`
- * emits the refresh ones after every refresh (poll or manual), the macOS
- * menu (`lib.rs`) the Settings one.
+ * emits the refresh ones after every refresh (poll or manual) and the AI
+ * pass' `ai:state`, the macOS menu (`lib.rs`) the Settings one.
  */
 
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-import type { RefreshReport, ReviewChangedEvent } from "./types";
+import type { AiRunState, RefreshReport, ReviewChangedEvent } from "./types";
 
 export const REVIEW_CHANGED = "review:changed";
 export const REVIEWS_REFRESHED = "reviews:refreshed";
+export const AI_STATE = "ai:state";
 
 /** One review's stored state changed (emitted per review, before the report). */
 export function onReviewChanged(
@@ -28,4 +29,16 @@ export function onReviewsRefreshed(
 /** The native macOS menu's Settings… item (⌘,) was activated (`lib.rs`). */
 export function onMenuOpenSettings(handler: () => void): Promise<UnlistenFn> {
   return listen("menu:open-settings", () => handler());
+}
+
+// --- AI pass (M5) ---
+
+/**
+ * An AI run's state changed (queued, running, done, failed, cancelled). A
+ * run that ended is followed by `review:changed` for its review.
+ */
+export function onAiState(
+  handler: (state: AiRunState) => void,
+): Promise<UnlistenFn> {
+  return listen<AiRunState>(AI_STATE, (e) => handler(e.payload));
 }

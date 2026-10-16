@@ -111,6 +111,11 @@ pub fn run() {
             // only exists once the app does — hence managing state here
             // rather than on the builder.
             let state = AppState::open(&app.path().app_data_dir()?)?;
+            // Before the first poll, so the runs it queues are reported.
+            let handle = app.handle().clone();
+            state
+                .core
+                .on_ai_state(move |ai| events::emit_ai_state(&handle, ai));
             start_polling(app.handle().clone(), &state);
             app.manage(state);
             Ok(())
@@ -136,6 +141,16 @@ pub fn run() {
             commands::provider::provider_status,
             commands::history::thread_history,
             commands::history::review_histories,
+            commands::ai::ai_state,
+            commands::ai::list_findings,
+            commands::ai::list_checklist,
+            commands::ai::list_verdicts,
+            commands::ai::run_ai,
+            commands::ai::cancel_ai,
+            commands::ai::dismiss_finding,
+            commands::ai::set_checklist_checked,
+            commands::ai::set_verdict_override,
+            commands::ai::post_findings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -143,11 +158,18 @@ pub fn run() {
 
 /// Start the core's background refresh loop. It refreshes at once, then at
 /// the settings' interval (a settings change restarts it with the same
-/// callback); every report is remembered for `last_refresh` and emitted.
+/// callback); every report is remembered for `last_refresh`, emitted, and
+/// handed to the AI pass, which queues the runs it calls for (it never
+/// waits on one).
 fn start_polling(app: tauri::AppHandle, state: &AppState) {
     let last = state.last_refresh.clone();
+    // Weak: the core owns this callback, a strong handle would be a cycle.
+    let core = std::sync::Arc::downgrade(&state.core);
     state.core.start_polling(move |report| {
         AppState::record(&last, report);
         events::emit_report(&app, report);
+        if let Some(core) = core.upgrade() {
+            core.on_refresh_report(report);
+        }
     });
 }

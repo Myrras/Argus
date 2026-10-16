@@ -9,7 +9,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  AiRunState,
+  ChecklistId,
+  ChecklistItem,
   CommentableLines,
+  Finding,
+  FindingId,
+  FindingPost,
+  FindingPostResult,
   IpcError,
   NewComment,
   PostedNote,
@@ -23,6 +30,8 @@ import type {
   StoredThread,
   ThreadHistory,
   ThreadId,
+  Verdict,
+  VerdictLabel,
 } from "./types";
 
 /** Narrow an unknown rejection to the structured `IpcError` shape. */
@@ -180,4 +189,73 @@ export function threadHistory(threadId: ThreadId): Promise<ThreadHistory> {
 /** The histories of every thread of a review. */
 export function reviewHistories(reviewId: ReviewId): Promise<ThreadHistory[]> {
   return invoke("review_histories", { reviewId });
+}
+
+// --- AI pass (M5) ---
+// Runs happen in the backend and report through `ai:state` (`onAiState`).
+// `postFindings` writes to a platform: call it from a button or shortcut
+// handler only, never from an effect or a timer.
+
+/** The review's latest run (`notStarted` when none, or the AI pass is off). */
+export function aiState(reviewId: ReviewId): Promise<AiRunState> {
+  return invoke("ai_state", { reviewId });
+}
+
+/** The review's findings, every round: high severity first. */
+export function listFindings(reviewId: ReviewId): Promise<Finding[]> {
+  return invoke("list_findings", { reviewId });
+}
+
+/** The review's "look here yourself" items, newest round first. */
+export function listChecklist(reviewId: ReviewId): Promise<ChecklistItem[]> {
+  return invoke("list_checklist", { reviewId });
+}
+
+/** The current verdict per thread of the review. */
+export function listVerdicts(reviewId: ReviewId): Promise<Verdict[]> {
+  return invoke("list_verdicts", { reviewId });
+}
+
+/** Queue a run now; rejects with `invalidInput` when the AI pass is off. */
+export function runAi(reviewId: ReviewId): Promise<AiRunState> {
+  return invoke("run_ai", { reviewId });
+}
+
+/** Drop the review's queued run or stop its running one. */
+export function cancelAi(reviewId: ReviewId): Promise<AiRunState> {
+  return invoke("cancel_ai", { reviewId });
+}
+
+/** Dismiss a finding, or bring it back. */
+export function dismissFinding(
+  findingId: FindingId,
+  dismissed: boolean,
+): Promise<Finding> {
+  return invoke("dismiss_finding", { findingId, dismissed });
+}
+
+export function setChecklistChecked(
+  checklistId: ChecklistId,
+  checked: boolean,
+): Promise<ChecklistItem> {
+  return invoke("set_checklist_checked", { checklistId, checked });
+}
+
+/** The user's own label on a thread; `null` clears it. Local only. */
+export function setVerdictOverride(
+  threadId: ThreadId,
+  label: VerdictLabel | null,
+): Promise<Verdict> {
+  return invoke("set_verdict_override", { threadId, label });
+}
+
+/**
+ * Post findings as line comments, one by one; one result per finding in the
+ * same order. Rejects only when nothing could be tried.
+ */
+export function postFindings(
+  reviewId: ReviewId,
+  posts: FindingPost[],
+): Promise<FindingPostResult[]> {
+  return invoke("post_findings", { reviewId, posts });
 }

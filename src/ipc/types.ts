@@ -272,6 +272,12 @@ export interface AiSettings {
   enabled: boolean;
   adapter: string;
   args: string[];
+  /**
+   * The agent binary's path; `null` (or blank) finds the adapter's CLI
+   * through the login shell. Always sent back by the core; optional here so
+   * a settings object without it still saves (serde `default`).
+   */
+  binary?: string | null;
 }
 
 /** `settings::Settings` (settings.json). Never holds a secret. */
@@ -441,6 +447,102 @@ export interface ThreadHistory {
   diffLines: DiffRow[];
   /** Oldest first. */
   timeline: TimelineEntry[];
+}
+
+// --- AI pass (M5) ---
+// `ai::model::*` (crates/argus-core/src/ai/model.rs).
+
+export type FindingId = string;
+export type ChecklistId = string;
+
+/** `ai::AiRunStatus`. */
+export type AiRunStatus = "notStarted" | "running" | "done" | "failed";
+
+/**
+ * `ai::AiRunState`: what `ai_state` returns and `ai:state` carries — the
+ * review's latest run plus whether another waits for a slot.
+ */
+export interface AiRunState {
+  reviewId: ReviewId;
+  /** The AI pass is on in settings; when off, `status` is `notStarted`. */
+  enabled: boolean;
+  status: AiRunStatus;
+  /** A run waits for a free slot (runtime only). */
+  queued: boolean;
+  /** The round the latest run was for. */
+  round: number | null;
+  /** The adapter id the latest run used (`claude`, `auggie`). */
+  adapter: string | null;
+  /** Why the latest run failed (app-owned; `interrupted`, `cancelled`). */
+  error: string | null;
+  startedAt: Timestamp | null;
+  finishedAt: Timestamp | null;
+  /** The round of the last run that succeeded. */
+  lastDoneRound: number | null;
+  /** Findings the latest successful run dropped (path not in the diff). */
+  droppedFindings: number;
+  /** Verdicts the latest successful run dropped (unknown thread ids). */
+  droppedVerdicts: number;
+}
+
+/** `ai::Severity`. */
+export type Severity = "high" | "medium" | "low";
+
+/** `ai::Finding`: one problem, anchored to a line of the diff. */
+export interface Finding {
+  id: FindingId;
+  reviewId: ReviewId;
+  round: number;
+  path: string;
+  line: number;
+  side: Side;
+  severity: Severity;
+  title: string;
+  body: string;
+  dismissed: boolean;
+  /** Set once the user posted it (`post_findings`). */
+  postedAt: Timestamp | null;
+  postedUrl: string | null;
+}
+
+/** `ai::ChecklistItem`: "look here yourself". */
+export interface ChecklistItem {
+  id: ChecklistId;
+  reviewId: ReviewId;
+  round: number;
+  text: string;
+  checked: boolean;
+}
+
+/** `ai::FindingPost`: a finding to post, with the user's edit of its text. */
+export interface FindingPost {
+  findingId: FindingId;
+  /** Left out or `null`: `**title**` and the finding's body. */
+  body?: string | null;
+}
+
+/** `ai::FindingPostResult`: one finding of a batch, in the batch's order. */
+export type FindingPostResult = { findingId: FindingId } & (
+  | { status: "posted"; postedUrl: string; postedAt: Timestamp }
+  | ({ status: "failed" } & PostError)
+);
+
+/** `ai::VerdictLabel`. */
+export type VerdictLabel = "addressed" | "partly" | "untouched";
+
+/**
+ * `ai::Verdict`: the AI's hint and the user's own call on one thread, kept
+ * apart. Never written to the platform.
+ */
+export interface Verdict {
+  threadId: ThreadId;
+  reviewId: ReviewId;
+  round: number;
+  aiLabel: VerdictLabel | null;
+  aiReason: string | null;
+  userOverride: VerdictLabel | null;
+  /** What to show: the override when set, else the AI's label. */
+  label: VerdictLabel | null;
 }
 
 /** Structured error every IPC command can reject with (`IpcError`). */

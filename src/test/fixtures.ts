@@ -115,7 +115,7 @@ export function settings(overrides: Partial<Settings> = {}): Settings {
     github: { enabled: true, host: "github.com", account: null },
     gitlab: { baseUrl: "" },
     pollIntervalSecs: 180,
-    ai: { enabled: true, adapter: "claude", args: [] },
+    ai: { enabled: true, adapter: "claude", args: [], binary: null },
     clonePaths: {},
     ...overrides,
   };

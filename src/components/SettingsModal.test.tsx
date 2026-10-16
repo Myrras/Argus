@@ -268,6 +268,21 @@ describe("SettingsModal — AI tab", () => {
     );
   });
 
+  it("keeps the agent binary when it turns AI analysis off", async () => {
+    const stored = settings({
+      ai: { ...settings().ai, binary: "/opt/fixture/bin/claude" },
+    });
+    backend(stored, false);
+    await renderTab("AI");
+    fireEvent.click(screen.getByRole("switch", { name: "AI analysis" }));
+    await waitFor(() =>
+      expect(updates()).toEqual([
+        { ...stored, ai: { ...stored.ai, enabled: false } },
+      ]),
+    );
+    expect(updates()[0].ai.binary).toBe("/opt/fixture/bin/claude");
+  });
+
   it("adds a clone picked with the dialog, keyed host/repo", async () => {
     await renderTab("AI");
     expect(screen.getByText("No clones set.")).toBeInTheDocument();
