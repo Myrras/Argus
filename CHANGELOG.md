@@ -72,7 +72,7 @@ when it merges.
   the suggested lines, or just the suggested lines when the original ones
   are unavailable. Argus never applies them.
 - Reviews refresh in the background every 3 minutes, or on demand with the
-  refresh button or `r`, with the time of the last refresh in the title bar.
+  refresh button or `⇧R`, with the time of the last refresh in the title bar.
   The sidebar's Providers section shows each provider's state and says when
   `gh` is missing or logged out or GitLab is not set up, and a provider that
   fails to refresh is reported there without blocking the other. Other
@@ -85,7 +85,7 @@ when it merges.
   just whether one is set, and it can be removed), AI (the AI analysis on
   or off, and a local clone folder per repository), and Shortcuts. Switches apply at once, text fields have their
   own Save.
-- Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` (or
+- Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `⇧R` (or
   `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in a review, `c` to
   comment on the line you last clicked, `⌘↩` to submit a comment and `Esc`
   to cancel it, `⌘,` for Settings. Every shortcut except `Esc` can be
@@ -131,6 +131,18 @@ when it merges.
 - Thread history and file contents now read from your local clone when one is
   set for the repository: faster and exact. Commits you haven't fetched still
   come from GitHub/GitLab, and Argus never changes or fetches the clone.
+- Review a merge request without the mouse: `n`/`p` move through threads and
+  AI findings in page order, `j`/`k` still move between files. The focused
+  item gets a focus ring. `Enter` or `t` opens or folds the focused thread,
+  `r` replies, `h` shows then/now, `c` comments on its line; on a finding `x`
+  selects it, `e` edits it and `d` dismisses it.
+- Command palette (⌘K / Ctrl+K): every action with its shortcut, plus Go to
+  review… and Go to file…. Approve… and Post all… still ask before anything
+  is sent.
+- `?` shows all keyboard shortcuts and where they work.
+- Refresh is now ⇧R (or ⌘R / Ctrl+R): plain `r` replies to the focused
+  thread. If you set your own Refresh key, it still works.
+- Dialogs now focus their contents when they open.
 
 ## [0.1.0] - 2026-10-16
 

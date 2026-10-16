@@ -117,7 +117,7 @@ sibling app Iris (`../Iris`).
     `Timeline` (notes, commits, resolves; long comments fold),
     `ThenNowEditor` (lazy CodeMirror column, plain rows until loaded),
     pure rules in `lib/threadHistory`. Your own threads open it by default;
-    key `toggleThenNow` (`h`, scope `files`) acts on the thread last clicked.
+    key `toggleThenNow` (`h`, scope `files`) acts on the focused thread (M6).
 - ✅ **Milestone 5 — The AI pass.** Core `ai/`: a local agent CLI (`claude`,
   `auggie`; read-only flags, token-free env) reviews the diff headless:
   findings, a checklist, and verdicts on the user's threads in later rounds.
@@ -164,6 +164,25 @@ sibling app Iris (`../Iris`).
   `RefreshError.rateLimitedUntil` (RFC 3339) next to the message; the
   Providers section shows "rate limited until HH:MM". Timeouts on every `gh`
   and GitLab call: a hung one fails that call, the other reviews still update.
+- ✅ **Milestone 6 — Keyboard flow.** Frontend only. One focused item on the
+  review page (`state/focusStore`; rules and page order in the pure
+  `lib/focusModel`): the Conversation, a file, a thread, a finding or a diff
+  line, replacing the per-kind "last clicked" (it keeps
+  `historyStore.focused`, `aiStore.focused` and `commentStore.focus` in
+  step). `usePageFocus` moves the DOM focus and scrolls; the item shows a
+  focus ring (`data-focused`). Actions in `lib/keyboardFlow` (nothing there
+  posts: a reply or comment only opens a composer). `CommandPalette` (fuzzy
+  `lib/fuzzy`, rows `lib/palette`: every action, review actions, Go to
+  review…, Go to file…; Approve… and Post all… confirm first) and
+  `ShortcutHelp`, one at a time via `overlayStore`. `Modal` takes
+  `initialFocus` and focuses on open.
+  - Keys (all rebindable): list `↑`/`↓`, `Enter`, `1`–`4`, refresh
+    `Shift+R` / `Mod+R` (was bare `r`; a saved override still wins),
+    `Mod+K` palette, `?` help; app `Mod+,` settings; files `j`/`k` files,
+    `n`/`p` threads and findings, `Enter`/`t` open or fold the thread, `r`
+    reply, `h` then/now, `c` comment, `v` viewed, `a` AI panel, `x` select,
+    `e` edit, `d` dismiss finding; composer `Mod+Enter` submit, `Esc`
+    (fixed) cancel.
 
 ## Architecture
 

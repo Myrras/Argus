@@ -1,7 +1,7 @@
 /**
  * The keyboard review flow's actions (M6), dispatched by `useAppShortcuts`
  * and the command palette: move the page focus (`n`/`p`), and act on the
- * focused item — open or fold a thread (`o`; Enter on the card), reply to it (`r`), edit or
+ * focused item — open or fold a thread (`t`; Enter on the card), reply to it (`r`), edit or
  * dismiss a finding (`e`/`d`), comment on its line (`c`) — plus opening the
  * palette and the shortcut help.
  *
