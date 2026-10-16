@@ -1,0 +1,12 @@
+[
+  {
+    "sha": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+    "commit": {
+      "author": { "name": "Alice Fixture", "email": "alice@example.test", "date": "2026-10-10T08:55:00Z" },
+      "committer": { "name": "Alice Fixture", "email": "alice@example.test", "date": "2026-10-10T08:55:00Z" },
+      "message": "Address review comments"
+    },
+    "author": null,
+    "parents": [{ "sha": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2" }]
+  }
+]

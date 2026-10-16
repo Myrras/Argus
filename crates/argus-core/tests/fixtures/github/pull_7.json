@@ -1,0 +1,15 @@
+{
+  "html_url": "https://github.com/acme-fixture/gadgets/pull/7",
+  "number": 7,
+  "state": "closed",
+  "title": "Rename gadget module",
+  "user": { "login": "bob-fixture", "id": 1003 },
+  "body": null,
+  "updated_at": "2026-10-12T15:30:00Z",
+  "merged_at": "2026-10-12T15:30:00Z",
+  "requested_reviewers": [],
+  "draft": false,
+  "head": { "ref": "rename", "sha": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2" },
+  "base": { "ref": "main", "sha": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0" },
+  "merged": true
+}

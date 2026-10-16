@@ -1,0 +1,9 @@
+{
+  "type": "file",
+  "encoding": "none",
+  "size": 2000000,
+  "name": "big.bin",
+  "path": "big.bin",
+  "content": "",
+  "sha": "beef"
+}

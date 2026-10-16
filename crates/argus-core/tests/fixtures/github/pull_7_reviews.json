@@ -1,0 +1,5 @@
+[
+  { "id": 7101, "user": { "login": "rev-fixture" }, "state": "CHANGES_REQUESTED", "commit_id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1", "submitted_at": "2026-10-11T10:00:00Z" },
+  { "id": 7102, "user": { "login": "rev-fixture" }, "state": "APPROVED", "commit_id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1", "submitted_at": "2026-10-11T16:00:00Z" },
+  { "id": 7103, "user": { "login": "rev-fixture" }, "state": "COMMENTED", "commit_id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2", "submitted_at": "2026-10-12T09:00:00Z" }
+]
