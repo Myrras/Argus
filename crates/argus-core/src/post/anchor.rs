@@ -320,15 +320,25 @@ pub fn resolve(
                             "{label} could not be followed to the current head"
                         )));
                     };
-                    let moved = |n| {
-                        map_forward(patch, n).ok_or_else(|| {
-                            not_in_diff(format!(
-                                "{label} is no longer in the diff: the line changed since"
-                            ))
-                        })
+                    let changed = || {
+                        not_in_diff(format!(
+                            "{label} is no longer in the diff: the line changed since"
+                        ))
                     };
-                    line = moved(line)?;
-                    start = start.map(moved).transpose()?;
+                    // Every line of a range must survive, and stay next to
+                    // its neighbour: checking only the ends would carry a
+                    // comment over a changed middle or an inserted line.
+                    let first = start.unwrap_or(line);
+                    let mut mapped = Vec::new();
+                    for n in first..=line {
+                        let m = map_forward(patch, n).ok_or_else(changed)?;
+                        if mapped.last().is_some_and(|prev: &u32| m != prev + 1) {
+                            return Err(changed());
+                        }
+                        mapped.push(m);
+                    }
+                    line = *mapped.last().expect("the range holds `line`");
+                    start = start.map(|_| mapped[0]);
                     path = f.path.clone();
                 }
             }

@@ -59,6 +59,19 @@ impl Core {
                 head: detail.head_sha.clone(),
             },
         )?;
+        // The diff must be the one of that head, and the head must not have
+        // moved while it was read: GitHub serves a pull's files at its head
+        // of the moment, and `commit_id` is the head read before, so a push
+        // in between would place lines of one head on another.
+        let moved = current.head_sha != detail.head_sha
+            || provider.fetch_review(&record.review)?.head_sha != detail.head_sha;
+        if moved {
+            self.refresh_after_head_moved(provider.as_ref(), &record);
+            return Err(PostError::new(
+                PostErrorKind::HeadMoved,
+                "The review got new commits while posting; nothing was posted. Check the new commits and post again.",
+            ));
+        }
         // Per head a comment was written at: the diff from it to now.
         let mut since: HashMap<String, Result<FileDiff, PostError>> = HashMap::new();
         let mut posted_any = false;
@@ -128,12 +141,16 @@ impl Core {
                 "The review got new commits since you looked; review them before approving.",
             )
         };
+        // Either way the stored review is refreshed, so the view the user
+        // retries from shows the head that is there now.
         if seen_head != record.head_sha {
+            self.refresh_after_head_moved(provider.as_ref(), &record);
             return Err(moved());
         }
         // The platform's head now: GitHub would approve an older commit
         // without complaint (GitLab refuses by itself, see its `approve`).
         if provider.fetch_review(&record.review)?.head_sha != seen_head {
+            self.refresh_after_head_moved(provider.as_ref(), &record);
             return Err(moved());
         }
         provider.approve(&record.review, seen_head)?;
@@ -210,6 +227,15 @@ impl Core {
             }
         }
         Err(CoreError::NotFound)
+    }
+
+    /// After a [`PostErrorKind::HeadMoved`] refusal: store the platform's
+    /// review as it is now, so a retry starts from the new head instead of
+    /// failing until the next poll. Logged only: the refusal is the answer.
+    fn refresh_after_head_moved(&self, provider: &dyn ReviewProvider, record: &ReviewRecord) {
+        if let Err(e) = self.refresh_review(provider, record.id, Utc::now()) {
+            tracing::debug!("refreshing after a moved head failed: {e}");
+        }
     }
 
     /// [`after_write`](Self::after_write) where a failure must not turn a
