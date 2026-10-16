@@ -12,6 +12,8 @@
  * commits and resolve events); until then, or when it fails, the plain
  * notes. "Reply" opens a reply composer at the foot of the thread
  * (`ReplyComposer`; posted only on its Reply button or ⌘↩).
+ * The keyboard (M6, `focusStore`): the focused thread has a ring and the
+ * DOM focus; Enter (or `o`) opens or folds it, `r` starts a reply.
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
@@ -28,6 +30,8 @@ import { age, fullTime } from "../lib/time";
 import { useCommentStore } from "../state/commentStore";
 import { thenNowOpen, useHistoryStore } from "../state/historyStore";
 import { useThreadHistory } from "../lib/useThreadHistory";
+import { threadDescription } from "../lib/focusModel";
+import { useThreadFocus } from "../state/focusStore";
 import { Badge } from "./Badge";
 import { ReplyComposer } from "./CommentBlocks";
 import { CaretIcon } from "./icons";
@@ -92,6 +96,7 @@ export function ThreadBlock({
     setOpen(true);
     resized();
   };
+  const { focused, onKeyDown } = useThreadFocus(t.threadId, { toggle, reply });
   // Opened from the key too; the height moves when the history lands.
   const resizeRef = useRef(onResize);
   resizeRef.current = onResize;
@@ -109,11 +114,18 @@ export function ThreadBlock({
       data-mine={t.mine}
       data-open={open}
       data-resolved={t.resolved}
+      data-focused={focused}
+      tabIndex={-1}
       aria-label={`Thread by ${t.author}`}
+      aria-describedby={`thread-desc-${t.threadId}`}
+      onKeyDown={onKeyDown}
       onPointerDown={() =>
         focus({ threadId: t.threadId, reviewId: t.reviewId, mine: t.mine })
       }
     >
+      <span id={`thread-desc-${t.threadId}`} className="visually-hidden">
+        {threadDescription(t)}
+      </span>
       <div className={styles.headRow}>
         <button
           type="button"

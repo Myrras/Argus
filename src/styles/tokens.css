@@ -34,6 +34,9 @@
     transparent
   ); /* selected rows, active pane */
   --selection-inactive: #2f3743; /* selected rows, inactive pane: neutral grey */
+  /* The keyboard focus ring on review items (threads, findings). */
+  --focus-ring: var(--accent);
+  --focus-ring-width: 2px;
 
   /* Semantic */
   --danger: #f85149;

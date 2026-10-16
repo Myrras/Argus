@@ -119,6 +119,17 @@ describe("matches", () => {
 });
 
 describe("formatBinding", () => {
+  it("shows Shift+/ as ?, and matches ? on any layout", () => {
+    expect(formatBinding("Shift+Slash", true)).toBe("?");
+    expect(formatBinding("Shift+Slash", false)).toBe("?");
+    expect(formatBinding("Mod+Shift+Slash", false)).toBe("Ctrl+Shift+/");
+    expect(matches(ev({ key: "?", shiftKey: true }), "Shift+Slash")).toBe(true);
+    // German: Shift+ß types "?".
+    expect(
+      matches(ev({ key: "?", code: "Minus", shiftKey: true }), "Shift+Slash"),
+    ).toBe(true);
+  });
+
   it("draws macOS glyphs: Option, Shift, Command, then the key", () => {
     expect(formatBinding("Mod+Shift+KeyG", true)).toBe("⇧⌘G");
     expect(formatBinding("Mod+Alt+KeyS", true)).toBe("⌥⌘S");
@@ -142,7 +153,7 @@ describe("formatBinding", () => {
   });
 
   it("returns a hint for the first binding, or nothing when unbound", () => {
-    expect(shortcutHint(DEFAULT_KEYMAP, "refresh", true)).toBe("R");
+    expect(shortcutHint(DEFAULT_KEYMAP, "refresh", true)).toBe("⇧R");
     expect(withHint("Settings", DEFAULT_KEYMAP, "openSettings", false)).toBe(
       "Settings (Ctrl+,)",
     );
@@ -169,11 +180,13 @@ describe("parse and serialize", () => {
 });
 
 describe("defaults", () => {
-  it("are the list keys Argus always had, plus Cmd/Ctrl+R", () => {
+  it("are the list keys Argus always had; refresh is ⇧R and Cmd/Ctrl+R", () => {
     expect(DEFAULT_KEYMAP.nextReview).toEqual(["ArrowDown"]);
     expect(DEFAULT_KEYMAP.prevReview).toEqual(["ArrowUp"]);
     expect(DEFAULT_KEYMAP.openReview).toEqual(["Enter"]);
-    expect(DEFAULT_KEYMAP.refresh).toEqual(["KeyR", "Mod+KeyR"]);
+    // Bare R replies to the focused thread since M6.
+    expect(DEFAULT_KEYMAP.refresh).toEqual(["Shift+KeyR", "Mod+KeyR"]);
+    expect(DEFAULT_KEYMAP.replyThread).toEqual(["KeyR"]);
     expect(DEFAULT_KEYMAP.showNeedsReview).toEqual(["Digit1"]);
     expect(DEFAULT_KEYMAP.showClosedWithoutApproval).toEqual(["Digit4"]);
     expect(DEFAULT_KEYMAP.openSettings).toEqual(["Mod+Comma"]);
@@ -270,9 +283,15 @@ describe("resolveKeymap", () => {
 
 describe("findAction", () => {
   it("finds the action of its scope", () => {
-    const r = ev({ key: "r" });
+    const r = ev({ key: "R", shiftKey: true });
     expect(findAction(r, DEFAULT_KEYMAP, "list", false)).toBe("refresh");
     expect(findAction(r, DEFAULT_KEYMAP, "app", false)).toBeNull();
+    expect(findAction(ev({ key: "r" }), DEFAULT_KEYMAP, "list", false)).toBe(
+      null,
+    );
+    expect(findAction(ev({ key: "r" }), DEFAULT_KEYMAP, "files", false)).toBe(
+      "replyThread",
+    );
     expect(findAction(ev({ key: "3" }), DEFAULT_KEYMAP, "list", false)).toBe(
       "showWaitingOnAuthor",
     );
@@ -366,6 +385,9 @@ describe("recording", () => {
     ).toBe("refresh");
     expect(
       findConflict(DEFAULT_KEYMAP, "refresh", parseBinding("Mod+KeyK")!, true),
+    ).toBe("openPalette");
+    expect(
+      findConflict(DEFAULT_KEYMAP, "refresh", parseBinding("Mod+KeyU")!, true),
     ).toBeNull();
   });
 });

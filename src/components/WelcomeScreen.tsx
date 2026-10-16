@@ -4,6 +4,8 @@
  * refresh button.
  */
 
+import { shortcutHint } from "../lib/keymap";
+import { useKeymap } from "../lib/useKeymap";
 import { LogoMark } from "./LogoMark";
 import { RefreshIcon } from "./icons";
 import styles from "./WelcomeScreen.module.css";
@@ -16,14 +18,17 @@ export function WelcomeScreen({
   onRefresh?: () => void;
   refreshing?: boolean;
 }) {
+  const keymap = useKeymap();
   return (
     <div className={styles.welcome}>
       <LogoMark size={48} className={styles.logo} aria-hidden />
       <h1 className={styles.title}>Welcome to Argus</h1>
       <p className={styles.subtitle}>Select a review to see its threads.</p>
       <p className={styles.keys}>
-        <kbd>↑</kbd> <kbd>↓</kbd> move · <kbd>Enter</kbd> open · <kbd>r</kbd>{" "}
-        refresh · <kbd>1</kbd>–<kbd>4</kbd> lists
+        <kbd>↑</kbd> <kbd>↓</kbd> move · <kbd>Enter</kbd> open ·{" "}
+        <kbd>{shortcutHint(keymap, "refresh")}</kbd> refresh · <kbd>1</kbd>–
+        <kbd>4</kbd> lists · <kbd>{shortcutHint(keymap, "openPalette")}</kbd>{" "}
+        commands · <kbd>{shortcutHint(keymap, "showShortcuts")}</kbd> all keys
       </p>
       <button
         type="button"

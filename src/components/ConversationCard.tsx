@@ -9,6 +9,8 @@
 import { useState } from "react";
 
 import type { IpcError, ProviderId, StoredThread } from "../ipc/types";
+import { CONVERSATION_CARD } from "../lib/focusModel";
+import { useRevealCard } from "../state/focusStore";
 import { threadCounts } from "../lib/diffThreads";
 import { ThreadCount } from "./FileStatusMark";
 import { CaretIcon, ThreadsIcon } from "./icons";
@@ -38,6 +40,8 @@ export function ConversationCard({
   cardRef: (el: HTMLElement | null) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
+  // A keyboard move to one of its threads opens it (M6).
+  useRevealCard(CONVERSATION_CARD, () => setCollapsed(false));
   const count = threadCounts([...conversation, ...elsewhere]);
   const empty = conversation.length === 0 && elsewhere.length === 0;
 
@@ -46,6 +50,7 @@ export function ConversationCard({
       ref={cardRef}
       className={styles.card}
       data-selected={selected}
+      data-file-card="conversation"
       aria-label="Conversation"
     >
       <header className={styles.header}>
@@ -71,6 +76,7 @@ export function ConversationCard({
         <button
           type="button"
           className={`ghost ${styles.title}`}
+          data-focus-target
           onClick={onSelect}
         >
           Conversation

@@ -99,7 +99,8 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Fixture B" }),
     ).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "r" });
+    // Refresh is ⇧R since M6 (bare R replies to the focused thread).
+    fireEvent.keyDown(window, { key: "R", shiftKey: true });
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("refresh_reviews"),
     );

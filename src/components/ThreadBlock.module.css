@@ -2,6 +2,8 @@
    the top of a file, or in the Conversation. Sans text in a mono editor, so
    the font is reset. */
 .thread {
+  /* Holds its visually hidden description (M6) inside the scroller. */
+  position: relative;
   margin: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
   max-width: 820px;
   font-family: var(--font-sans);
@@ -23,6 +25,17 @@
 .thread[data-mine="false"][data-open="false"] {
   background: transparent;
   border-style: dashed;
+}
+
+/* The keyboard focus (M6): one ring, inset so an editor widget's edge
+   cannot clip it. */
+.thread:focus {
+  outline: none;
+}
+
+.thread[data-focused="true"] {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: calc(-1 * var(--focus-ring-width));
 }
 
 .thread[data-resolved="true"][data-open="true"] {
