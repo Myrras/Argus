@@ -21,9 +21,13 @@ sibling app Iris (`../Iris`).
 
 ## Status
 
-- ✅ **Milestone 1 — Skeleton.** Renamed boilerplate, CI + release pipeline,
-  placeholder start screen. The boilerplate's greet + notes sample is kept in
-  core/IPC/stores so the wiring stays tested; it goes once real commands land.
+- ✅ **Milestone 1 — Skeleton.** Renamed boilerplate, CI + release pipeline.
+- ✅ **Milestone 2 — Providers and the review list.** GitHub (`gh`) and GitLab
+  (REST, keychain token) providers, SQLite store, settings, round detection,
+  background polling; IPC commands + events; the four-tab list, detail pane
+  with threads (mine first, outdated never hidden), settings dialog, provider
+  status bar. The boilerplate greet/notes sample is gone. Next: M3 (then/now
+  thread history; the thread card has a `data-slot="then-now"` placeholder).
 
 ## Architecture
 
@@ -36,19 +40,21 @@ crates/argus-core/   # ALL domain logic; zero Tauri dependency (plain cargo test
   src/ids.rs         # UUID newtypes via uuid_newtype!
   tests/             # integration tests over the public API
 src-tauri/           # thin IPC adapter: (de)serialize and forward, nothing else
-  src/state.rs       # AppState: Arc<Core>
+  src/state.rs       # AppState: Arc<Core> + last RefreshReport
   src/error.rs       # IpcError { kind, message } ← CoreError
-  src/commands/      # one shim per command
+  src/events.rs      # review:changed / reviews:refreshed emission
+  src/commands/      # review, thread, settings, provider shims
 src/                 # React (presentation only)
   ipc/types.ts       # hand-written wire types (mirror the serde derives)
   ipc/commands.ts    # typed invoke() wrappers
+  ipc/events.ts      # typed listen() wrappers
   state/             # Zustand stores (mirror the backend; don't guess)
   styles/            # tokens.css + global.css
 ```
 
-Planned `argus-core` modules (create them when their milestone starts, not
-before): `provider/` (GitLab/GitHub clients), `review/`, `history/`, `store/`,
-`settings/`, `ai/`, `poll/`.
+`argus-core` modules: `provider/` (GitLab/GitHub clients, provider status),
+`review/` (rounds), `store/` (SQLite), `settings/`, `poll/`. Planned (create
+them when their milestone starts): `history/`, `ai/`.
 
 ### IPC contract
 
@@ -61,9 +67,18 @@ Wire casing is **camelCase** (`#[serde(rename_all = "camelCase")]`; Tauri maps
 camelCase JS arg keys to snake_case params). Ids are plain UUID strings. Keep
 `src/ipc/types.ts` in lockstep with the Rust side.
 
+### Events
+
+After every refresh (poll or `refresh_reviews`) the shell emits
+`review:changed { reviewId }` per changed review, then one
+`reviews:refreshed` with the `RefreshReport` (time + per-provider errors).
+`last_refresh` returns the latest report for a webview that subscribed late.
+
 ### Frontend
 
-A store action calls a typed IPC wrapper, then **re-reads from the backend**.
+A store action calls a typed IPC wrapper, then **re-reads from the backend**;
+stores also re-read on the events above. The GitLab token only ever goes to
+`set_gitlab_token`, never into `Settings`.
 Components use design tokens (`src/styles/tokens.css`), never hard-coded
 colors/durations/easings.
 
