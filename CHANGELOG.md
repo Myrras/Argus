@@ -6,13 +6,13 @@ here. The format is based on
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Internal refactors, tooling, and chores are intentionally omitted. Every pull
-request adds its entry under `## [Unreleased]
+request adds its entry under `## [Unreleased]`; the version number is assigned
+when it merges.
 
-## [0.1.0] - 2026-10-16
+## [Unreleased]
 
 ### Added
 
-- Argus app icon and logo: a violet eye, shown in the title bar.
 - The review cockpit: one list of the GitHub pull requests and GitLab merge
   requests where you are a requested reviewer or have commented, read through
   the `gh` CLI and a GitLab token kept in the system keychain. Four tabs with
@@ -39,3 +39,13 @@ request adds its entry under `## [Unreleased]
   interval, and AI analysis on or off (saved now, used in a later release).
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `r` to
   refresh, `1`–`4` for the tabs, `⌘,` for Settings. Light and dark theme.
+
+## [0.1.0] - 2026-10-16
+
+### Added
+
+- First Argus build: a desktop window with a placeholder start screen and a
+  dark/light theme toggle. Reviewing merge requests and pull requests comes in
+  later releases.
+- Argus app icon and logo: a violet eye, shown in the title bar and on the
+  start screen.
