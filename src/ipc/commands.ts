@@ -9,7 +9,11 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  CommentableLines,
   IpcError,
+  NewComment,
+  PostedNote,
+  PostResult,
   ProviderStatus,
   RefreshReport,
   ReviewFiles,
@@ -17,6 +21,7 @@ import type {
   ReviewRecord,
   Settings,
   StoredThread,
+  ThreadId,
 } from "./types";
 
 /** Narrow an unknown rejection to the structured `IpcError` shape. */
@@ -93,6 +98,48 @@ export function lastRefresh(): Promise<RefreshReport | null> {
 /** The user finished this round: the watermark moves to the current head. */
 export function markReviewed(reviewId: ReviewId): Promise<ReviewRecord> {
   return invoke("mark_reviewed", { reviewId });
+}
+
+// --- Posting. The only writes to a platform: call these from a button or
+// shortcut handler only, never from an effect or a timer.
+
+/**
+ * Post line comments one by one; one result per comment in the same order.
+ * Rejects only when nothing could be tried.
+ */
+export function postComments(
+  reviewId: ReviewId,
+  comments: NewComment[],
+): Promise<PostResult[]> {
+  return invoke("post_comments", { reviewId, comments });
+}
+
+/** Reply to a stored thread of `reviewId`. */
+export function replyToThread(
+  reviewId: ReviewId,
+  threadId: ThreadId,
+  body: string,
+): Promise<PostedNote> {
+  return invoke("reply_to_thread", { reviewId, threadId, body });
+}
+
+/**
+ * Approve a review at `headSha` (the head the user confirmed); rejects with
+ * `headMoved` when it got new commits since. Never merges.
+ */
+export function approveReview(
+  reviewId: ReviewId,
+  headSha: string,
+): Promise<ReviewRecord> {
+  return invoke("approve_review", { reviewId, headSha });
+}
+
+/** The lines of `path` a new comment can go on (read only). */
+export function commentableLines(
+  reviewId: ReviewId,
+  path: string,
+): Promise<CommentableLines> {
+  return invoke("commentable_lines", { reviewId, path });
 }
 
 export function getSettings(): Promise<Settings> {

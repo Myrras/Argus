@@ -165,6 +165,95 @@ export interface ReviewFiles {
   files: FileEntry[];
 }
 
+/**
+ * `post::NewComment`: a new line comment as the user wrote it. The optional
+ * fields may be left out (serde `default`).
+ */
+export interface NewComment {
+  /** The file's path at head. */
+  path: string;
+  /** The (last) line, on `side`. */
+  line: number;
+  side: Side;
+  /** First line of a multi-line comment, same side and hunk. */
+  startLine?: number | null;
+  body: string;
+  /** The head the lines were read at; `null` = the stored head. */
+  headSha?: string | null;
+  /** The diff's left side the old-side lines were read at. */
+  baseSha?: string | null;
+}
+
+/** `post::PostedComment`: a comment the platform accepted. */
+export interface PostedComment {
+  url: string;
+  /** As in `StoredThread.id`. */
+  providerThreadId: string;
+  /** As in `Note.id`. */
+  providerNoteId: string;
+  /** Where it landed, after the move to the current head. */
+  path: string;
+  side: Side;
+  line: number;
+  startLine: number | null;
+  headSha: string;
+}
+
+/** `post::PostErrorKind`, plus the IPC-only kinds `IpcError` can carry. */
+export type PostErrorKind =
+  | "notFound"
+  | "invalidInput"
+  | "githubUnavailable"
+  | "gitlabNotConfigured"
+  | "gitlabAuth"
+  | "provider"
+  | "store"
+  | "io"
+  /** The platform refused the write; the message carries its reason. */
+  | "postRejected"
+  /** The line is not (any more) in the current diff. */
+  | "lineNotInDiff"
+  /** The review got new commits between reading and writing. */
+  | "headMoved";
+
+/** `post::PostError`: `{ kind, message }`, the shape of `IpcError`. */
+export interface PostError {
+  kind: PostErrorKind;
+  message: string;
+}
+
+/** `post::PostResult`: one comment of a batch, in the batch's order. */
+export type PostResult =
+  ({ status: "posted" } & PostedComment) | ({ status: "failed" } & PostError);
+
+/** `post::PostedNote`: a reply the platform accepted. */
+export interface PostedNote {
+  url: string;
+  providerThreadId: string;
+  providerNoteId: string;
+}
+
+/** `post::CommentableHunk`: one hunk's commentable lines, ascending. */
+export interface CommentableHunk {
+  /** Old-side lines (removed and context rows). */
+  old: number[];
+  /** New-side lines (added and context rows). */
+  new: number[];
+}
+
+/**
+ * `post::CommentableLines`: the lines of one file a new comment can go on.
+ * A range must stay inside one hunk.
+ */
+export interface CommentableLines {
+  reviewId: ReviewId;
+  path: string;
+  baseSha: string;
+  headSha: string;
+  /** Empty for a file without a text patch (binary, too large). */
+  hunks: CommentableHunk[];
+}
+
 /** `settings::GithubSettings`. */
 export interface GithubSettings {
   enabled: boolean;

@@ -2,6 +2,7 @@
 //! [`argus_core::Core`]; no domain logic lives here.
 
 pub mod files;
+pub mod post;
 pub mod provider;
 pub mod review;
 pub mod settings;
@@ -11,7 +12,7 @@ use std::sync::Arc;
 
 use tauri::State;
 
-use argus_core::{Core, CoreResult, ReviewId};
+use argus_core::{Core, CoreResult, PostError, ReviewId};
 
 use crate::error::IpcError;
 use crate::state::AppState;
@@ -23,6 +24,18 @@ use crate::state::AppState;
 pub(crate) async fn blocking<T: Send + 'static>(
     state: State<'_, AppState>,
     f: impl FnOnce(&Core) -> CoreResult<T> + Send + 'static,
+) -> Result<T, IpcError> {
+    let core = Arc::clone(&state.core);
+    tauri::async_runtime::spawn_blocking(move || f(&core))
+        .await
+        .map_err(|e| IpcError::new("io", format!("background task failed: {e}")))?
+        .map_err(IpcError::from)
+}
+
+/// [`blocking`] for the post API, whose calls fail with a [`PostError`].
+pub(crate) async fn blocking_post<T: Send + 'static>(
+    state: State<'_, AppState>,
+    f: impl FnOnce(&Core) -> Result<T, PostError> + Send + 'static,
 ) -> Result<T, IpcError> {
     let core = Arc::clone(&state.core);
     tauri::async_runtime::spawn_blocking(move || f(&core))

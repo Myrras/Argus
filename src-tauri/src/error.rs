@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use argus_core::CoreError;
+use argus_core::{CoreError, PostError};
 
 /// A flat, serializable error returned by every IPC command.
 ///
@@ -65,6 +65,60 @@ impl From<CoreError> for IpcError {
         Self {
             kind: kind.to_string(),
             message: err.to_string(),
+        }
+    }
+}
+
+impl From<PostError> for IpcError {
+    fn from(err: PostError) -> Self {
+        // `PostError`'s message is app-owned text, or the platform's own
+        // reason already run through the core's `sanitize` (token redacted,
+        // one line, capped) — safe to forward verbatim.
+        Self {
+            kind: err.kind.as_str().to_string(),
+            message: err.message,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argus_core::PostErrorKind;
+
+    #[test]
+    fn post_errors_keep_their_kind_and_message() {
+        for (kind, wire) in [
+            (PostErrorKind::PostRejected, "postRejected"),
+            (PostErrorKind::LineNotInDiff, "lineNotInDiff"),
+            (PostErrorKind::HeadMoved, "headMoved"),
+            (PostErrorKind::GitlabAuth, "gitlabAuth"),
+            (PostErrorKind::NotFound, "notFound"),
+        ] {
+            let err = IpcError::from(PostError::new(
+                kind,
+                "GitHub: line must be part of the diff",
+            ));
+            assert_eq!(err.kind, wire);
+            assert_eq!(err.message, "GitHub: line must be part of the diff");
+        }
+    }
+
+    #[test]
+    fn a_core_error_through_a_post_error_matches_the_direct_mapping() {
+        let errors: [fn() -> CoreError; 4] = [
+            || CoreError::NotFound,
+            || CoreError::GithubUnavailable,
+            || CoreError::GitlabNotConfigured,
+            || CoreError::Provider("could not reach GitLab".into()),
+        ];
+        for make in errors {
+            let direct = IpcError::from(make());
+            let via_post = IpcError::from(PostError::from(make()));
+            assert_eq!(
+                (direct.kind, direct.message),
+                (via_post.kind, via_post.message)
+            );
         }
     }
 }
