@@ -1,12 +1,15 @@
 /**
  * The detail island's Threads tab: the user's threads first (outdated ones
- * included, never hidden), the others behind a disclosure.
+ * included, never hidden), the others behind a disclosure. A thread named by
+ * `codeViewStore.focusThread` (the Files tab's "Then/now history" link) is
+ * scrolled to, with the others opened when it is one of them.
  */
 
 import { useEffect, useState } from "react";
 
 import type { ReviewRecord } from "../ipc/types";
 import { splitThreads } from "../lib/reviews";
+import { useCodeViewStore } from "../state/codeViewStore";
 import { useThreadStore } from "../state/threadStore";
 import { CaretIcon } from "./icons";
 import { ThreadCard } from "./ThreadCard";
@@ -28,6 +31,21 @@ export function ThreadsTab({
   }, [r.id, loadThreads]);
 
   const { mine, others } = splitThreads(entry?.threads ?? []);
+
+  const focus = useCodeViewStore((s) => s.focusThread);
+  const setFocus = useCodeViewStore((s) => s.setFocusThread);
+  const focusIsOther = !!focus && others.some((t) => t.threadId === focus);
+  useEffect(() => {
+    if (focusIsOther) setOthersOpen(true);
+  }, [focusIsOther]);
+  useEffect(() => {
+    if (!focus) return;
+    const el = document.getElementById(`thread-${focus}`);
+    if (!el) return;
+    el.scrollIntoView?.({ block: "center" });
+    el.setAttribute("data-focused", "true");
+    setFocus(null);
+  }, [focus, othersOpen, entry, setFocus]);
 
   return (
     <div className={styles.body}>

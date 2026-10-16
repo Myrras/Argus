@@ -251,6 +251,18 @@ describe("findAction", () => {
     ).toBeNull();
   });
 
+  it("keeps the file keys to the files scope", () => {
+    expect(findAction(ev({ key: "j" }), DEFAULT_KEYMAP, "files", false)).toBe(
+      "nextFile",
+    );
+    expect(findAction(ev({ key: "v" }), DEFAULT_KEYMAP, "files", false)).toBe(
+      "toggleViewed",
+    );
+    expect(
+      findAction(ev({ key: "j" }), DEFAULT_KEYMAP, "list", false),
+    ).toBeNull();
+  });
+
   it("leaves Settings to the native menu on macOS", () => {
     const e = ev({ key: ",", code: "Comma", metaKey: true });
     expect(findAction(e, DEFAULT_KEYMAP, "app", true)).toBeNull();

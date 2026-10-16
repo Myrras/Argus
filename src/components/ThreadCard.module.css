@@ -11,6 +11,11 @@
   border-left: 3px solid var(--accent);
 }
 
+/* Arrived at from the Files tab's "Then/now history". */
+.card[data-focused="true"] {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
 .card[data-resolved="true"] {
   opacity: 0.85;
 }

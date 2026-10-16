@@ -15,7 +15,8 @@
  *
  * Unlike Iris, a bare key may be bound: Argus has no type-to-select for it to
  * fight, and its list keys (`r`, `1`–`4`, the arrows) are bare by default.
- * `list` actions only fire outside fields and dialogs (`useAppShortcuts`).
+ * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
+ * `files` actions likewise, and only while the Files tab is shown.
  *
  * Pure rules, no React: `useAppShortcuts.ts` dispatches with `findAction`.
  */
@@ -31,12 +32,18 @@ export type ActionId =
   | "showNeedsReReview"
   | "showWaitingOnAuthor"
   | "showClosedWithoutApproval"
+  | "nextFile"
+  | "prevFile"
+  | "toggleViewed"
   | "openSettings";
 
-/** `list`: the review list, outside fields and dialogs; `app`: window-wide. */
-export type ActionScope = "list" | "app";
+/**
+ * `list`: the review list, outside fields and dialogs; `files`: the Files
+ * tab, likewise; `app`: window-wide.
+ */
+export type ActionScope = "list" | "files" | "app";
 
-export type ActionGroup = "Navigate" | "Lists" | "View";
+export type ActionGroup = "Navigate" | "Lists" | "Files" | "View";
 
 export interface ActionDef {
   id: ActionId;
@@ -109,6 +116,30 @@ export const ACTIONS: ActionDef[] = [
     defaults: ["Digit4"],
   },
   {
+    id: "nextFile",
+    label: "Next file",
+    group: "Files",
+    scope: "files",
+    defaults: ["KeyJ"],
+    note: "In the Files tab.",
+  },
+  {
+    id: "prevFile",
+    label: "Previous file",
+    group: "Files",
+    scope: "files",
+    defaults: ["KeyK"],
+    note: "In the Files tab.",
+  },
+  {
+    id: "toggleViewed",
+    label: "Mark file viewed",
+    group: "Files",
+    scope: "files",
+    defaults: ["KeyV"],
+    note: "Toggles the selected file's Viewed mark.",
+  },
+  {
     id: "openSettings",
     label: "Open Settings",
     group: "View",
@@ -118,7 +149,7 @@ export const ACTIONS: ActionDef[] = [
   },
 ];
 
-export const GROUPS: ActionGroup[] = ["Navigate", "Lists", "View"];
+export const GROUPS: ActionGroup[] = ["Navigate", "Lists", "Files", "View"];
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));
 

@@ -1,9 +1,10 @@
 /**
  * The window-wide shortcuts, from the keymap (`lib/keymap`; rebindable in
  * Settings → Shortcuts) — Iris's `useTabShortcuts` for Argus: Settings off
- * macOS (macOS has the native menu's ⌘,), and the review list keys (move,
- * open, refresh, switch lists), which are ignored while typing in a field or
- * inside a dialog.
+ * macOS (macOS has the native menu's ⌘,), the review list keys (move, open,
+ * refresh, switch lists) and, while the Files tab is shown, the file keys
+ * (next/previous file, toggle viewed). Those are ignored while typing in a
+ * field or inside a dialog.
  *
  * It also swallows the browser's own shortcuts (reload, print, find, save):
  * a desktop app must never reload its webview, wherever the focus is.
@@ -12,6 +13,8 @@
 import { useEffect } from "react";
 
 import { TABS } from "./reviews";
+import { useCodeViewStore } from "../state/codeViewStore";
+import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
 import {
   findAction,
@@ -62,6 +65,24 @@ function runListAction(action: ActionId, target: EventTarget | null): boolean {
   }
 }
 
+/** Run a Files tab action; false when the Files tab is not shown. */
+function runFilesAction(action: ActionId): boolean {
+  const review = useReviewStore.getState().selectedId;
+  if (!review || useLayoutStore.getState().detailTab !== "files") return false;
+  const code = useCodeViewStore.getState();
+  switch (action) {
+    case "nextFile":
+    case "prevFile":
+      code.move(review, action === "nextFile" ? 1 : -1);
+      return true;
+    case "toggleViewed":
+      void code.toggleSelectedViewed(review);
+      return true;
+    default:
+      return false;
+  }
+}
+
 export function useAppShortcuts(options?: { onOpenSettings?: () => void }) {
   const onOpenSettings = options?.onOpenSettings;
   useEffect(() => {
@@ -75,6 +96,11 @@ export function useAppShortcuts(options?: { onOpenSettings?: () => void }) {
           return;
         }
         if (!isEditableTarget(e.target) && !inDialog(e.target)) {
+          const fileAction = findAction(e, keymap, "files");
+          if (fileAction && runFilesAction(fileAction)) {
+            e.preventDefault();
+            return;
+          }
           const action = findAction(e, keymap, "list");
           if (action && runListAction(action, e.target)) {
             e.preventDefault();

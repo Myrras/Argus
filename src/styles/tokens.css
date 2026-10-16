@@ -42,6 +42,12 @@
   --warning-bg: #3a2d12;
   --success: #3fb950;
   --info: #4493f8;
+  /* Code view diff tints, from the semantic colours (so every theme follows
+     its own --success / --danger). */
+  --diff-add-bg: color-mix(in srgb, var(--success) 12%, transparent);
+  --diff-add-strong: color-mix(in srgb, var(--success) 30%, transparent);
+  --diff-del-bg: color-mix(in srgb, var(--danger) 12%, transparent);
+  --diff-del-strong: color-mix(in srgb, var(--danger) 30%, transparent);
 
   /* Typography */
   --font-sans:

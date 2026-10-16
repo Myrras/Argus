@@ -57,25 +57,121 @@
   color: var(--text-muted);
 }
 
+.count {
+  margin-left: var(--sp-1);
+  font-weight: 500;
+}
+
+.modeToggle {
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text-muted);
+}
+
+.filter {
+  padding: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.filter input {
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.treeBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The diff column scrolls as a whole; each file's header sticks. */
 .diff {
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: auto;
   display: flex;
+  flex-direction: column;
+}
+
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
   align-items: center;
-  justify-content: center;
+  gap: var(--sp-2);
+  height: var(--tabbar-h);
+  padding: 0 var(--sp-3);
+  flex-shrink: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+
+.progress {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.since[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.segmented {
+  display: inline-flex;
+  margin-left: auto;
+}
+
+.segmented button {
+  border-radius: 0;
+}
+
+.segmented button:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.segmented button:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  border-left: none;
+}
+
+.segmented button[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.keys {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+.error {
+  margin: var(--sp-2) var(--sp-3) 0;
+  font-size: var(--fs-sm);
+  color: var(--danger);
+}
+
+.notice {
+  margin: var(--sp-2) var(--sp-3) 0;
+  font-size: var(--fs-sm);
+  color: var(--warning);
+}
+
+.stack {
+  padding-top: var(--sp-3);
 }
 
 .placeholder {
   margin: 0;
   padding: var(--sp-3);
-  max-width: 360px;
   font-size: var(--fs-sm);
   color: var(--text-faint);
-  text-align: center;
-}
-
-.tree .placeholder {
-  text-align: left;
 }

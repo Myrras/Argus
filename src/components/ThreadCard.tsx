@@ -22,6 +22,7 @@ export function ThreadCard({
   const location = threadLocation(t, provider);
   return (
     <article
+      id={`thread-${t.threadId}`}
       className={styles.card}
       data-mine={t.mine}
       data-resolved={t.resolved}

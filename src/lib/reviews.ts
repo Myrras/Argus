@@ -115,3 +115,13 @@ export function splitThreads(threads: readonly StoredThread[]): {
     others: byTime.filter((t) => !t.mine),
   };
 }
+
+/**
+ * Whether "since my last review" applies: a round was marked reviewed and
+ * the head moved on since.
+ */
+export function canDiffSinceLastReview(
+  r: Pick<ReviewRecord, "lastReviewedSha" | "headSha">,
+): boolean {
+  return !!r.lastReviewedSha && r.lastReviewedSha !== r.headSha;
+}

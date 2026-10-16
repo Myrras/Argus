@@ -1,13 +1,19 @@
 /**
  * Persistent shell layout (Iris's `layoutStore`): sidebar width, the
- * Providers section's collapse, the detail island's tab and whether the
- * Files tab's file tree is open.
+ * Providers section's collapse, the detail island's tab, and the Files tab's
+ * file tree (open, tree or flat) and diff layout (unified or side by side).
  */
 
 import { create } from "zustand";
 
 /** The detail island's tabs: the threads, and the changed files (diff). */
 export type DetailTab = "threads" | "files";
+
+/** The code view's diff: one column, or base and head side by side. */
+export type DiffLayout = "unified" | "split";
+
+/** The file tree as folders, or a flat list of paths. */
+export type FileListMode = "tree" | "flat";
 
 interface LayoutPersisted {
   sidebarWidth: number;
@@ -16,6 +22,8 @@ interface LayoutPersisted {
   detailTab: DetailTab;
   /** Whether the Files tab's file tree is expanded. */
   fileTreeOpen: boolean;
+  diffLayout: DiffLayout;
+  fileListMode: FileListMode;
 }
 
 export const SIDEBAR_MIN_WIDTH = 240;
@@ -28,6 +36,8 @@ const DEFAULTS: LayoutPersisted = {
   providersCollapsed: false,
   detailTab: "threads",
   fileTreeOpen: true,
+  diffLayout: "unified",
+  fileListMode: "tree",
 };
 
 function clampWidth(width: number): number {
@@ -47,6 +57,8 @@ function load(): LayoutPersisted {
       providersCollapsed: saved.providersCollapsed === true,
       detailTab: saved.detailTab === "files" ? "files" : "threads",
       fileTreeOpen: saved.fileTreeOpen !== false,
+      diffLayout: saved.diffLayout === "split" ? "split" : "unified",
+      fileListMode: saved.fileListMode === "flat" ? "flat" : "tree",
     };
   } catch {
     return { ...DEFAULTS };
@@ -62,6 +74,8 @@ function persist(state: LayoutPersisted) {
         providersCollapsed: state.providersCollapsed,
         detailTab: state.detailTab,
         fileTreeOpen: state.fileTreeOpen,
+        diffLayout: state.diffLayout,
+        fileListMode: state.fileListMode,
       }),
     );
   } catch {
@@ -74,6 +88,8 @@ interface LayoutState extends LayoutPersisted {
   setProvidersCollapsed: (collapsed: boolean) => void;
   setDetailTab: (tab: DetailTab) => void;
   toggleFileTree: () => void;
+  setDiffLayout: (layout: DiffLayout) => void;
+  setFileListMode: (mode: FileListMode) => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set, get) => {
@@ -88,5 +104,7 @@ export const useLayoutStore = create<LayoutState>((set, get) => {
       update({ providersCollapsed: collapsed }),
     setDetailTab: (tab) => update({ detailTab: tab }),
     toggleFileTree: () => update({ fileTreeOpen: !get().fileTreeOpen }),
+    setDiffLayout: (layout) => update({ diffLayout: layout }),
+    setFileListMode: (mode) => update({ fileListMode: mode }),
   };
 });

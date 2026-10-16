@@ -37,14 +37,30 @@ describe("layoutStore", () => {
     expect(reloaded.getState().fileTreeOpen).toBe(false);
   });
 
+  it("remembers the diff layout and the file list mode", async () => {
+    const store = await freshStore();
+    expect(store.getState().diffLayout).toBe("unified");
+    expect(store.getState().fileListMode).toBe("tree");
+    store.getState().setDiffLayout("split");
+    store.getState().setFileListMode("flat");
+    const reloaded = await freshStore();
+    expect(reloaded.getState().diffLayout).toBe("split");
+    expect(reloaded.getState().fileListMode).toBe("flat");
+  });
+
   it("falls back to the defaults for unknown or missing values", async () => {
     localStorage.setItem(
       "argus.layout",
-      JSON.stringify({ detailTab: "diff", sidebarWidth: "wide" }),
+      JSON.stringify({
+        detailTab: "diff",
+        sidebarWidth: "wide",
+        diffLayout: "3d",
+      }),
     );
     const store = await freshStore();
     expect(store.getState().detailTab).toBe("threads");
     expect(store.getState().sidebarWidth).toBe(340);
     expect(store.getState().fileTreeOpen).toBe(true);
+    expect(store.getState().diffLayout).toBe("unified");
   });
 });

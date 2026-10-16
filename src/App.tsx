@@ -29,6 +29,7 @@ import { useLayoutStore } from "./state/layoutStore";
 import { subscribeReviewEvents, useReviewStore } from "./state/reviewStore";
 import { useSettingsRequestStore } from "./state/settingsRequestStore";
 import { subscribeThreadEvents } from "./state/threadStore";
+import { subscribeCodeViewEvents } from "./state/codeViewStore";
 import { LogoMark } from "./components/LogoMark";
 import { ReviewDetail } from "./components/ReviewDetail";
 import { SettingsModal } from "./components/SettingsModal";
@@ -66,6 +67,7 @@ export default function App() {
       const subs = await Promise.all([
         subscribeReviewEvents(),
         subscribeThreadEvents(),
+        subscribeCodeViewEvents(),
         subscribeBackendSettingsEvents(),
       ]).catch(() => [] as (() => void)[]);
       if (cancelled) {

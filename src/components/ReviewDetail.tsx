@@ -71,7 +71,7 @@ function Detail({ review: r, now }: { review: ReviewRecord; now: number }) {
         {tab === "threads" ? (
           <ThreadsTab review={r} now={now} />
         ) : (
-          <FilesTab review={r} />
+          <FilesTab review={r} now={now} />
         )}
       </section>
     </div>

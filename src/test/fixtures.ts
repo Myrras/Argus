@@ -1,7 +1,9 @@
 /** Fictitious wire objects for tests. */
 
 import type {
+  FileEntry,
   ProviderStatus,
+  ReviewFiles,
   ReviewRecord,
   Settings,
   StoredThread,
@@ -76,6 +78,34 @@ export function thread(overrides: Partial<StoredThread> = {}): StoredThread {
         system: false,
       },
     ],
+    ...overrides,
+  };
+}
+
+export function file(overrides: Partial<FileEntry> = {}): FileEntry {
+  return {
+    path: "src/cache.rs",
+    oldPath: null,
+    status: "modified",
+    additions: 2,
+    deletions: 1,
+    patch: "@@ -1 +1,2 @@\n-old\n+new\n+more",
+    contentSha: `sha-${overrides.path ?? "src/cache.rs"}`,
+    binary: false,
+    tooLarge: false,
+    viewed: false,
+    ...overrides,
+  };
+}
+
+export function reviewFiles(overrides: Partial<ReviewFiles> = {}): ReviewFiles {
+  return {
+    reviewId: uuid(1),
+    baseSha: "b".repeat(40),
+    headSha: "a".repeat(40),
+    sinceLastReview: false,
+    truncated: false,
+    files: [file()],
     ...overrides,
   };
 }
