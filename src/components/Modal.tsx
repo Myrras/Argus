@@ -1,7 +1,7 @@
 /** A small, accessible modal dialog (overlay + centered card). */
 
 import { useEffect, useRef } from "react";
-import type { ReactNode } from "react";
+import type { ReactNode, RefObject } from "react";
 import { createPortal } from "react-dom";
 
 import { MOTION, usePresence } from "../lib/motion";
@@ -19,6 +19,8 @@ interface ModalProps {
   tone?: "default" | "danger" | "warning";
   /** Card width — a px number or any CSS width (e.g. `"min(960px, 94vw)"`). */
   width?: number | string;
+  /** What takes the focus on open (a field); the card by default. */
+  initialFocus?: RefObject<HTMLElement | null>;
 }
 
 export function Modal({
@@ -29,6 +31,7 @@ export function Modal({
   footer,
   tone = "default",
   width = 460,
+  initialFocus,
 }: ModalProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   // Keep the dialog mounted while it animates closed (see `usePresence`).
@@ -43,12 +46,20 @@ export function Modal({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
-  // Focus the card only when the dialog *opens* — keyed on `open` alone so an
-  // unstable `onClose` (a fresh closure each render of the parent) can't re-fire
-  // this and steal focus from an input mid-typing.
+  // Focus the card only when the dialog *opens* — keyed on `open` (and its
+  // mount), not `onClose`, so an unstable `onClose` (a fresh closure each
+  // render of the parent) can't re-fire this and steal focus mid-typing.
   useEffect(() => {
-    if (open) cardRef.current?.focus({ preventScroll: true });
-  }, [open]);
+    // `mounted` lags `open` by a render on the first open (`usePresence`):
+    // the card is only there once both are set.
+    if (open && mounted) {
+      (initialFocus?.current ?? cardRef.current)?.focus({
+        preventScroll: true,
+      });
+    }
+    // `initialFocus` is a ref: read when the dialog opens.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mounted]);
 
   if (!mounted) return null;
 

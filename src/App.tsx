@@ -33,6 +33,8 @@ import { subscribeHistoryEvents } from "./state/historyStore";
 import { subscribeCodeViewEvents } from "./state/codeViewStore";
 import { subscribeAiEvents } from "./state/aiStore";
 import { AiPanel } from "./components/AiPanel";
+import { CommandPalette } from "./components/CommandPalette";
+import { ShortcutHelp } from "./components/ShortcutHelp";
 import { LogoMark } from "./components/LogoMark";
 import { ReviewDetail } from "./components/ReviewDetail";
 import { SettingsModal } from "./components/SettingsModal";
@@ -215,6 +217,9 @@ export default function App() {
       </div>
 
       <Toasts />
+      {/* ⌘K and ? (M6): open state in `overlayStore`. */}
+      <CommandPalette />
+      <ShortcutHelp />
       <SettingsModal
         open={settingsOpen}
         onClose={() => {
