@@ -63,3 +63,20 @@ fn settings_persist_through_the_core() {
         Err(CoreError::NotFound)
     ));
 }
+
+#[test]
+fn provider_status_reflects_settings() {
+    let core = Core::new();
+    let mut s = core.settings();
+    s.github.enabled = false;
+    core.update_settings(s).unwrap();
+    let status = core.provider_status();
+    // Disabled: `gh` is not even probed.
+    assert!(!status.github.enabled);
+    assert!(!status.github.installed);
+    assert!(!status.gitlab.configured);
+    assert!(!status.gitlab.token_present);
+    let json = serde_json::to_value(&status).unwrap();
+    assert_eq!(json["github"]["loggedIn"], false);
+    assert_eq!(json["gitlab"]["tokenPresent"], false);
+}

@@ -8,7 +8,7 @@ pub mod github;
 pub mod gitlab;
 pub mod model;
 
-pub use github::GithubProvider;
+pub use github::{GhAuth, GithubProvider};
 pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
 pub use model::{
     Anchor, CommitInfo, DiffVersion, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState,
@@ -16,6 +16,8 @@ pub use model::{
 };
 
 use std::sync::Arc;
+
+use serde::Serialize;
 
 use crate::error::CoreResult;
 use crate::settings::Settings;
@@ -67,6 +69,64 @@ pub fn from_settings(settings: &Settings) -> Vec<Arc<dyn ReviewProvider>> {
         }
     }
     out
+}
+
+/// Whether each provider can be used right now, for the status bar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStatus {
+    pub github: GithubStatus,
+    pub gitlab: GitlabStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubStatus {
+    /// Turned on in settings; when off, the other flags are `false`.
+    pub enabled: bool,
+    pub host: String,
+    /// The `gh` CLI could be started.
+    pub installed: bool,
+    /// `gh` has a token for the host (and the configured account).
+    pub logged_in: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitlabStatus {
+    /// A base URL is set.
+    pub configured: bool,
+    pub base_url: String,
+    /// A token for that instance is in the keychain (never the token itself).
+    pub token_present: bool,
+}
+
+/// The [`ProviderStatus`] for `settings`. Blocking: runs `gh auth token`
+/// (local, no network) and reads the keychain.
+pub fn status(settings: &Settings) -> ProviderStatus {
+    let gh = &settings.github;
+    let auth = if gh.enabled {
+        GithubProvider::new(gh.host.clone(), gh.account.clone()).auth_status()
+    } else {
+        GhAuth {
+            installed: false,
+            logged_in: false,
+        }
+    };
+    let url = settings.gitlab.base_url.trim().to_string();
+    ProviderStatus {
+        github: GithubStatus {
+            enabled: gh.enabled,
+            host: gh.host.clone(),
+            installed: auth.installed,
+            logged_in: auth.logged_in,
+        },
+        gitlab: GitlabStatus {
+            configured: !url.is_empty(),
+            token_present: !url.is_empty() && gitlab::gitlab_token_present(&url),
+            base_url: url,
+        },
+    }
 }
 
 /// Percent-encode one URL path segment (RFC 3986 unreserved kept).

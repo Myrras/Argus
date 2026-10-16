@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 pub use error::{CoreError, CoreResult};
 pub use ids::{NoteId, ReviewId, ThreadId};
 pub use poll::{RefreshError, RefreshReport};
+pub use provider::{GithubStatus, GitlabStatus, ProviderStatus};
 pub use review::{ReviewStatus, RoundReason};
 pub use settings::Settings;
 pub use store::{ReviewRecord, StoredThread};
@@ -176,6 +177,13 @@ impl Core {
     pub fn gitlab_token_present(&self) -> bool {
         let url = self.settings().gitlab.base_url;
         !url.is_empty() && provider::gitlab::gitlab_token_present(&url)
+    }
+
+    /// Whether each provider can be used right now: `gh` installed and
+    /// logged in for the configured host (a local check, no network), and
+    /// GitLab configured with a token. Blocking (runs `gh`).
+    pub fn provider_status(&self) -> ProviderStatus {
+        provider::status(&self.settings())
     }
 
     /// Every tracked review, most recently updated first. Filter on

@@ -31,6 +31,15 @@ use crate::error::{CoreError, CoreResult};
 const SEARCH_LIMIT: &str = "100";
 const SEARCH_FIELDS: &str = "number,title,url,repository,author,updatedAt";
 
+/// What [`GithubProvider::auth_status`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GhAuth {
+    /// The `gh` program could be started.
+    pub installed: bool,
+    /// `gh` has a token for the host (and account).
+    pub logged_in: bool,
+}
+
 /// GitHub through the `gh` binary.
 pub struct GithubProvider {
     /// Program to run; `gh` normally, a fake script in tests (the same
@@ -113,6 +122,29 @@ impl GithubProvider {
         }
         *cached = Some(token.clone());
         Ok(Some(token))
+    }
+
+    /// Whether `gh` runs at all, and whether it holds a token for the host
+    /// (and the configured account). `gh auth token` is a local lookup, so
+    /// this never touches the network; its output (the token) is discarded
+    /// unread.
+    pub fn auth_status(&self) -> GhAuth {
+        let mut cmd = self.command();
+        cmd.args(["auth", "token", "--hostname", &self.host]);
+        if let Some(account) = &self.account {
+            cmd.args(["--user", account]);
+        }
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        match cmd.status() {
+            Ok(status) => GhAuth {
+                installed: true,
+                logged_in: status.success(),
+            },
+            Err(_) => GhAuth {
+                installed: false,
+                logged_in: false,
+            },
+        }
     }
 
     /// Run one `gh` call and return its stdout.
