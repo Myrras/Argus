@@ -76,6 +76,7 @@ export function ProvidersSection({
                   key={item.key}
                   className={styles.item}
                   data-tone={item.tone}
+                  title={item.detail}
                 >
                   <span className={styles.text}>{item.text}</span>
                   {item.settings && (

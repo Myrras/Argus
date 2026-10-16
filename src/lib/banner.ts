@@ -6,6 +6,7 @@
 
 import type { ProviderId, ProviderStatus, RefreshError } from "../ipc/types";
 import { PROVIDER_LABEL } from "./reviews";
+import { clockTime } from "./time";
 
 export interface BannerItem {
   key: string;
@@ -15,6 +16,8 @@ export interface BannerItem {
   text: string;
   /** Offer the Settings button. */
   settings?: boolean;
+  /** The core's full message, for a tooltip, when the text is reworded. */
+  detail?: string;
 }
 
 /** The problems, derived from the status and the last refresh. */
@@ -74,6 +77,17 @@ export function bannerItems(
     const key = `${e.provider}:${e.message}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const until = clockTime(e.rateLimitedUntil);
+    if (until) {
+      items.push({
+        key,
+        provider: e.provider,
+        tone: "info",
+        text: `${PROVIDER_LABEL[e.provider]}: rate limited until ${until}`,
+        detail: e.message,
+      });
+      continue;
+    }
     items.push({
       key,
       provider: e.provider,

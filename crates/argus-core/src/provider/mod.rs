@@ -2,11 +2,19 @@
 //! the canonical [`model`].
 //!
 //! Every call is blocking (as in Podium): run them on a poll thread or a
-//! `spawn_blocking` task, never on the UI thread.
+//! `spawn_blocking` task, never on the UI thread. Every call is bounded by a
+//! timeout (`gh` is killed, an HTTP request gives up), so a hung call never
+//! blocks the poll loop for good.
+//!
+//! Reads are conditional where the platform allows it (see [`conditional`]):
+//! a poll that finds nothing new costs a 304 per call. A rate-limited
+//! provider stops calling until the platform's reset (see [`rate_limit`]).
 
+mod conditional;
 pub mod github;
 pub mod gitlab;
 pub mod model;
+mod rate_limit;
 
 pub use github::{GhAuth, GithubProvider};
 pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
@@ -17,6 +25,7 @@ pub use model::{
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::error::CoreResult;
@@ -106,15 +115,28 @@ pub trait ReviewProvider: Send + Sync {
 
     /// The resolve events of the review's threads, as far as the platform
     /// reports them: GitLab the current resolution of each resolved
-    /// discussion (`resolved_by`, `resolved_at`); GitHub's REST API has
-    /// none, so the default (nothing) stands there.
+    /// discussion (`resolved_by`, `resolved_at`). GitHub's GraphQL gives a
+    /// thread's resolved state (see [`Thread::resolved`]) but no time it was
+    /// resolved, so there is no event to report and the default (nothing)
+    /// stands there.
     fn thread_resolutions(
         &self,
         _r: &ReviewRef,
     ) -> CoreResult<Vec<crate::history::ThreadResolution>> {
         Ok(Vec::new())
     }
+
+    // --- M6: polling politeness ---
+
+    /// While the platform has rate-limited this provider: when the limit
+    /// lifts. Every call fails fast until then, and the poll loop skips the
+    /// provider with a "rate limited until HH:MM" error.
+    fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
+        None
+    }
 }
+
+pub(crate) use rate_limit::{is_rate_limited, rate_limited};
 
 /// The result of a provider write.
 pub type PostResultOf<T> = Result<T, PostError>;

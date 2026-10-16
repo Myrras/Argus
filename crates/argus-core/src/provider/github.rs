@@ -9,21 +9,31 @@
 //! honour.
 //!
 //! `gh`'s stderr is only inspected to classify a failure, never forwarded.
+//!
+//! REST reads go through `gh api -i` (status line and headers on stdout) one
+//! page at a time, so each page is a conditional request: its last `ETag` is
+//! sent as `If-None-Match` and a 304 replays the cached body (and next-page
+//! link). Searches (`gh search prs`) stay unconditional. Every `gh` call is
+//! killed after a timeout. Thread resolved state comes from one GraphQL query
+//! per PR (REST has none).
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::Write as _;
-use std::process::Stdio;
+use std::io::{Read, Write as _};
+use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
+use super::conditional::{Cached, ConditionalCache};
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
     ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
+use super::rate_limit::{default_reset, reset_at, Backoff};
 use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
 use crate::post::{sanitize, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
@@ -37,6 +47,26 @@ const SEARCH_FIELDS: &str = "number,title,url,repository,author,updatedAt";
 /// most 300. Reaching one means the list is cut off.
 const PULL_FILES_LIMIT: usize = 3000;
 const COMPARE_FILES_LIMIT: usize = 300;
+
+/// Pages followed at most per list (100 each: past the 3000-file cap).
+const MAX_PAGES: usize = 40;
+
+/// How long one `gh` call may run before it is killed. Generous: a large
+/// PR's file page can take a while on a slow link, but a hung call must not
+/// hold the poll loop.
+const GH_TIMEOUT: Duration = Duration::from_secs(60);
+/// `gh auth token` is a local lookup; it only hangs on a stuck keychain.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The resolved and outdated state of every review thread of one PR, a page
+/// at a time. Threads are matched to the REST ones by their first comment's
+/// URL (`…#discussion_r<id>`, the REST root comment id): `databaseId` is a
+/// 32-bit `Int` that review comment ids have outgrown.
+const THREADS_QUERY: &str =
+    "query($owner: String!, $name: String!, $number: Int!, $after: String) { \
+repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
+reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } \
+nodes { isResolved isOutdated comments(first: 1) { nodes { url } } } } } } }";
 
 /// What [`GithubProvider::auth_status`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +87,10 @@ pub struct GithubProvider {
     /// The picked account's token, held in memory only.
     token: Mutex<Option<String>>,
     me: Mutex<Option<String>>,
+    timeout: Duration,
+    /// Conditional-request cache of REST reads, keyed by `gh api` path.
+    cache: ConditionalCache,
+    limit: Backoff,
 }
 
 impl GithubProvider {
@@ -87,7 +121,16 @@ impl GithubProvider {
             account: account.filter(|a| !a.trim().is_empty()),
             token: Mutex::new(None),
             me: Mutex::new(None),
+            timeout: GH_TIMEOUT,
+            cache: ConditionalCache::default(),
+            limit: Backoff::default(),
         }
+    }
+
+    /// Kill a `gh` call after `timeout` instead of the default minute.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     fn command(&self) -> std::process::Command {
@@ -122,9 +165,7 @@ impl GithubProvider {
         let mut cmd = self.command();
         cmd.args(["auth", "token", "--hostname", &self.host, "--user", account])
             .stderr(Stdio::null());
-        let output = cmd
-            .spawn()
-            .and_then(|c| c.wait_with_output())
+        let output = run_with_timeout(&mut cmd, None, self.timeout.min(AUTH_TIMEOUT))
             .map_err(|_| CoreError::GithubUnavailable)?;
         let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !output.status.success() || token.is_empty() {
@@ -145,10 +186,15 @@ impl GithubProvider {
             cmd.args(["--user", account]);
         }
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        match cmd.status() {
-            Ok(status) => GhAuth {
+        match run_with_timeout(&mut cmd, None, self.timeout.min(AUTH_TIMEOUT)) {
+            Ok(output) => GhAuth {
                 installed: true,
-                logged_in: status.success(),
+                logged_in: output.status.success(),
+            },
+            // It ran but never answered: there, but not usable.
+            Err(ExecError::TimedOut) => GhAuth {
+                installed: true,
+                logged_in: false,
             },
             Err(_) => GhAuth {
                 installed: false,
@@ -157,12 +203,17 @@ impl GithubProvider {
         }
     }
 
-    /// Run one `gh` call and return its stdout.
-    fn run(&self, args: &[&str]) -> CoreResult<String> {
-        let token = self.account_token()?;
+    /// Run `gh` with `args` (and `input` on stdin), the account's token in
+    /// its env, killed after the timeout.
+    fn exec(
+        &self,
+        token: Option<&str>,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+    ) -> Result<Output, ExecError> {
         let mut cmd = self.command();
         cmd.args(args);
-        if let Some(token) = &token {
+        if let Some(token) = token {
             let var = if self.host == "github.com" {
                 "GH_TOKEN"
             } else {
@@ -170,48 +221,217 @@ impl GithubProvider {
             };
             cmd.env(var, token);
         }
-        let output = cmd
-            .spawn()
-            .and_then(|c| c.wait_with_output())
-            .map_err(|e| match e.kind() {
-                std::io::ErrorKind::NotFound => CoreError::GithubUnavailable,
-                _ => CoreError::Provider("could not run gh".into()),
-            })?;
+        run_with_timeout(&mut cmd, input, self.timeout)
+    }
+
+    /// Classify a failed `gh` call from its stderr (never forwarded).
+    fn failure(&self, stderr: &[u8]) -> CoreError {
+        let stderr = String::from_utf8_lossy(stderr).to_lowercase();
+        if stderr.contains("auth login")
+            || stderr.contains("not logged")
+            || stderr.contains("http 401")
+        {
+            // A stale picked-account token: fetch it afresh next time.
+            *self.token.lock().expect("token lock poisoned") = None;
+            CoreError::GithubUnavailable
+        } else if stderr.contains("http 404") || stderr.contains("not found") {
+            CoreError::NotFound
+        } else if stderr.contains("rate limit") {
+            // No headers to read the reset from (`gh search`): the default.
+            self.limit
+                .hit(ProviderId::Github, default_reset(Utc::now()))
+        } else {
+            CoreError::Provider("gh could not fetch from GitHub".into())
+        }
+    }
+
+    /// Run one unconditional `gh` call (searches) and return its stdout.
+    fn run(&self, args: &[&str]) -> CoreResult<String> {
+        self.limit.check(ProviderId::Github)?;
+        let token = self.account_token()?;
+        let output = self.exec(token.as_deref(), args, None)?;
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
         tracing::debug!("gh {} failed", args.first().unwrap_or(&""));
-        Err(
-            if stderr.contains("auth login")
-                || stderr.contains("not logged")
-                || stderr.contains("http 401")
-            {
-                // A stale picked-account token: fetch it afresh next time.
+        Err(self.failure(&output.stderr))
+    }
+
+    /// One conditional REST GET of `path` (optionally through `--jq`): the
+    /// body, from the cache on a 304, and the next page's query.
+    fn get(&self, path: &str, jq: Option<&str>) -> CoreResult<Page> {
+        self.limit.check(ProviderId::Github)?;
+        let token = self.account_token()?;
+        let key = match jq {
+            Some(filter) => format!("{path} --jq {filter}"),
+            None => path.to_string(),
+        };
+        let cached = self.cache.get(&key);
+        let header = cached
+            .as_deref()
+            .and_then(Cached::validator)
+            .map(|(name, value)| format!("{name}: {value}"));
+        let mut args = vec!["api", "-i"];
+        if let Some(h) = &header {
+            args.extend(["-H", h]);
+        }
+        args.push(path);
+        if let Some(filter) = jq {
+            args.extend(["--jq", filter]);
+        }
+        let output = self.exec(token.as_deref(), &args, None)?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(reply) = HttpReply::parse(&stdout) else {
+            // gh failed before any response (logged out, offline), or a gh
+            // that prints no headers: classify as before.
+            if output.status.success() {
+                return Ok(Page {
+                    body: stdout.into_owned(),
+                    next: None,
+                });
+            }
+            tracing::debug!("gh api failed");
+            return Err(self.failure(&output.stderr));
+        };
+        match reply.status {
+            200..=299 => {
+                let next = reply.header("link").and_then(|l| next_query(&l));
+                self.cache.put(
+                    &key,
+                    Cached {
+                        etag: reply.header("etag"),
+                        last_modified: reply.header("last-modified"),
+                        body: reply.body.clone(),
+                        next: next.clone(),
+                    },
+                );
+                Ok(Page {
+                    body: reply.body,
+                    next,
+                })
+            }
+            // Unchanged: the cached response stands (and cost no rate limit).
+            304 => cached
+                .map(|c| Page {
+                    body: c.body.clone(),
+                    next: c.next.clone(),
+                })
+                .ok_or_else(unexpected),
+            401 => {
                 *self.token.lock().expect("token lock poisoned") = None;
-                CoreError::GithubUnavailable
-            } else if stderr.contains("http 404") || stderr.contains("not found") {
-                CoreError::NotFound
-            } else if stderr.contains("rate limit") {
-                CoreError::Provider("GitHub rate limit reached, try again later".into())
-            } else {
-                CoreError::Provider("gh could not fetch from GitHub".into())
-            },
-        )
+                Err(CoreError::GithubUnavailable)
+            }
+            403 | 429 if reply.is_rate_limited() => Err(self.limit.hit(
+                ProviderId::Github,
+                reset_at(|h| reply.header(h), Utc::now()),
+            )),
+            404 => Err(CoreError::NotFound),
+            status => {
+                tracing::debug!("gh api answered HTTP {status}");
+                Err(CoreError::Provider("gh could not fetch from GitHub".into()))
+            }
+        }
     }
 
     fn api<T: DeserializeOwned>(&self, path: &str) -> CoreResult<T> {
-        let out = self.run(&["api", path])?;
-        serde_json::from_str(&out).map_err(|_| unexpected())
+        let page = self.get(path, None)?;
+        serde_json::from_str(&page.body).map_err(|_| unexpected())
     }
 
-    /// A paginated list endpoint. `gh api --paginate` prints one JSON array
-    /// per page back to back (`[..][..]`), so this reads a stream of arrays
-    /// and flattens it — which also covers a single array.
+    /// Every page of a list endpoint, one conditional request each, following
+    /// the `Link` header's `rel="next"` (its query only: the host stays the
+    /// one `gh` is set up for).
+    fn pages(&self, path: &str) -> CoreResult<Vec<String>> {
+        let (base, query) = path.split_once('?').unwrap_or((path, ""));
+        let mut url = if query.is_empty() {
+            format!("{base}?per_page=100")
+        } else {
+            format!("{base}?{query}&per_page=100")
+        };
+        let mut bodies = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let page = self.get(&url, None)?;
+            bodies.push(page.body);
+            match page.next {
+                Some(q) if format!("{base}?{q}") != url => url = format!("{base}?{q}"),
+                _ => break,
+            }
+        }
+        Ok(bodies)
+    }
+
+    /// A paginated list endpoint, flattened.
     fn api_list<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
-        let sep = if path.contains('?') { '&' } else { '?' };
-        let out = self.run(&["api", "--paginate", &format!("{path}{sep}per_page=100")])?;
-        parse_pages(&out)
+        let mut all = Vec::new();
+        for body in self.pages(path)? {
+            all.extend(parse_pages::<T>(&body)?);
+        }
+        Ok(all)
+    }
+
+    /// The resolved / outdated state of the PR's review threads by REST root
+    /// comment id. `None` when the query fails (GraphQL off on a GHE, a
+    /// token without the scope, a GraphQL rate limit): the threads then stay
+    /// unresolved, as before, and the refresh goes on.
+    fn thread_states(&self, r: &ReviewRef) -> Option<HashMap<String, ThreadState>> {
+        // GraphQL has its own budget, but when REST is limited the poll is
+        // backing off anyway.
+        if self.limit.active().is_some() {
+            return None;
+        }
+        let (owner, name) = r.repo.split_once('/')?;
+        let token = self.account_token().ok()?;
+        let query = format!("query={THREADS_QUERY}");
+        let owner = format!("owner={owner}");
+        let name = format!("name={name}");
+        let number = format!("number={}", r.number);
+        let mut states = HashMap::new();
+        let mut after: Option<String> = None;
+        for _ in 0..MAX_PAGES {
+            let after_field = after.as_ref().map(|c| format!("after={c}"));
+            // `-f` passes owner and name as raw strings; `-F` types the
+            // number as an Int.
+            let mut args = vec![
+                "api", "graphql", "-f", &query, "-f", &owner, "-f", &name, "-F", &number,
+            ];
+            if let Some(a) = &after_field {
+                args.extend(["-f", a]);
+            }
+            let output = match self.exec(token.as_deref(), &args, None) {
+                Ok(o) if o.status.success() => o,
+                _ => {
+                    tracing::debug!("GitHub thread states unavailable");
+                    return None;
+                }
+            };
+            let page: GqlResponse = serde_json::from_slice(&output.stdout).ok()?;
+            let threads = page.data?.repository?.pull_request?.review_threads;
+            for t in threads.nodes {
+                let Some(id) = t
+                    .comments
+                    .nodes
+                    .first()
+                    .and_then(|c| root_comment_id(&c.url))
+                else {
+                    continue;
+                };
+                states.insert(
+                    id,
+                    ThreadState {
+                        resolved: t.is_resolved,
+                        outdated: t.is_outdated,
+                    },
+                );
+            }
+            match threads.page_info {
+                GqlPageInfo {
+                    has_next_page: true,
+                    end_cursor: Some(c),
+                } => after = Some(c),
+                _ => break,
+            }
+        }
+        Some(states)
     }
 
     fn search(&self, qualifier: &str) -> CoreResult<Vec<GhSearchItem>> {
@@ -241,6 +461,187 @@ impl GithubProvider {
 
 fn unexpected() -> CoreError {
     CoreError::Provider("unexpected response from gh".into())
+}
+
+/// Why a `gh` process gave no output.
+#[derive(Debug)]
+enum ExecError {
+    /// The program is not there.
+    Missing,
+    /// It could not be started (or waited on).
+    Failed,
+    /// Killed after the timeout.
+    TimedOut,
+}
+
+impl From<ExecError> for CoreError {
+    fn from(e: ExecError) -> Self {
+        match e {
+            ExecError::Missing => CoreError::GithubUnavailable,
+            ExecError::Failed => CoreError::Provider("could not run gh".into()),
+            ExecError::TimedOut => CoreError::Provider("gh did not answer in time".into()),
+        }
+    }
+}
+
+/// Run `cmd` to completion with `input` on stdin, or kill it once `timeout`
+/// has passed. Both pipes are drained on their own threads so a large output
+/// never stalls the child; on a timeout those threads are left to end when
+/// the pipes close.
+fn run_with_timeout(
+    cmd: &mut Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Output, ExecError> {
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => ExecError::Missing,
+        _ => ExecError::Failed,
+    })?;
+    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
+        // gh reads all of stdin before it sends anything. A write error means
+        // gh exited early; its status says why.
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&data);
+        });
+    }
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + timeout;
+    let mut pause = Duration::from_millis(1);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                tracing::debug!("gh timed out after {timeout:?}");
+                return Err(ExecError::TimedOut);
+            }
+            Ok(None) => {
+                std::thread::sleep(pause);
+                pause = (pause * 2).min(Duration::from_millis(25));
+            }
+            Err(_) => return Err(ExecError::Failed),
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
+}
+
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+/// One REST page: its body and the query of the next page, if any.
+struct Page {
+    body: String,
+    next: Option<String>,
+}
+
+/// A response as `gh api -i` prints it: `HTTP/2.0 200 OK`, the headers,
+/// a blank line, the body.
+struct HttpReply {
+    status: u16,
+    /// Lowercased names.
+    headers: Vec<(String, String)>,
+    body: String,
+}
+
+impl HttpReply {
+    fn parse(out: &str) -> Option<Self> {
+        let (first, mut rest) = out.split_once('\n')?;
+        let first = first.trim_end_matches('\r');
+        if !first.starts_with("HTTP/") {
+            return None;
+        }
+        let status = first.split_whitespace().nth(1)?.parse().ok()?;
+        let mut headers = Vec::new();
+        while !rest.is_empty() {
+            let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+            rest = after;
+            let line = line.trim_end_matches('\r');
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
+            }
+        }
+        Some(Self {
+            status,
+            headers,
+            body: rest.to_string(),
+        })
+    }
+
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    }
+
+    /// GitHub's primary limit (403/429 with no requests left), or a
+    /// secondary one (a `Retry-After`, or the message says so).
+    fn is_rate_limited(&self) -> bool {
+        self.status == 429
+            || self.header("x-ratelimit-remaining").as_deref() == Some("0")
+            || self.header("retry-after").is_some()
+            || self.body.to_lowercase().contains("rate limit")
+    }
+}
+
+/// The query of the `rel="next"` URL in a `Link` header, when it is plain
+/// enough to pass on to `gh` (`per_page=100&page=2`).
+fn next_query(link: &str) -> Option<String> {
+    let part = link.split(',').find(|p| p.contains("rel=\"next\""))?;
+    let url = part.split_once('<')?.1.split_once('>')?.0;
+    let query = url.split_once('?')?.1;
+    query
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"=&_-.%+,:".contains(&b))
+        .then(|| query.to_string())
+}
+
+/// The REST id in a review comment URL (`…/pull/12#discussion_r501`).
+fn root_comment_id(url: &str) -> Option<String> {
+    let id = url.rsplit_once("#discussion_r")?.1;
+    (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())).then(|| id.to_string())
+}
+
+/// A review thread's state from GraphQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ThreadState {
+    resolved: bool,
+    outdated: bool,
+}
+
+/// Lay GraphQL's thread states over the REST threads. Outdated only ever
+/// turns on (REST's `position == null` already marks most), and then the
+/// thread has no current line.
+fn apply_thread_states(threads: &mut [Thread], states: &HashMap<String, ThreadState>) {
+    for t in threads {
+        let Some(s) = states.get(&t.id) else { continue };
+        t.resolved = s.resolved;
+        if s.outdated && !t.outdated {
+            t.outdated = true;
+            if let Some(a) = t.anchor.as_mut() {
+                a.current_line = None;
+            }
+        }
+    }
 }
 
 pub(crate) fn parse_pages<T: DeserializeOwned>(out: &str) -> CoreResult<Vec<T>> {
@@ -316,10 +717,22 @@ impl ReviewProvider for GithubProvider {
         Ok(assemble_detail(r, &me, pull?, commits?, reviews?))
     }
 
+    /// The REST review comments, regrouped into threads, with GraphQL's
+    /// resolved state laid over them (fetched in parallel; on failure the
+    /// threads just stay unresolved).
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
-        let comments: Vec<GhComment> =
-            self.api_list(&format!("repos/{}/pulls/{}/comments", r.repo, r.number))?;
-        Ok(group_threads(comments))
+        let (comments, states) = std::thread::scope(|s| {
+            let a = s.spawn(|| {
+                self.api_list::<GhComment>(&format!("repos/{}/pulls/{}/comments", r.repo, r.number))
+            });
+            let b = s.spawn(|| self.thread_states(r));
+            (join(a), b.join().ok().flatten())
+        });
+        let mut threads = group_threads(comments?);
+        if let Some(states) = states {
+            apply_thread_states(&mut threads, &states);
+        }
+        Ok(threads)
     }
 
     fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String> {
@@ -348,17 +761,15 @@ impl ReviewProvider for GithubProvider {
                         ))
                     });
                     let b = s.spawn(|| {
-                        self.run(&[
-                            "api",
+                        self.get(
                             &format!("repos/{}/compare/{base}...{head}", r.repo),
-                            "--jq",
-                            ".merge_base_commit.sha",
-                        ])
+                            Some(".merge_base_commit.sha"),
+                        )
                     });
                     (join(a), join(b))
                 });
                 let files = files?;
-                let merge_base = merge_base?.trim().to_string();
+                let merge_base = merge_base?.body.trim().to_string();
                 check_sha(&merge_base).map_err(|_| unexpected())?;
                 Ok(FileDiff {
                     base_sha: merge_base,
@@ -430,19 +841,15 @@ impl ReviewProvider for GithubProvider {
     }
     // --- M3: thread history ---
 
-    /// `commits/{sha}` pages its `files` (`--paginate` prints one object per
-    /// page); the first parent comes with the first page.
+    /// `commits/{sha}` pages its `files` (one object per page); the first
+    /// parent comes with the first page.
     fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
         check_sha(sha)?;
-        let out = self.run(&[
-            "api",
-            "--paginate",
-            &format!("repos/{}/commits/{sha}?per_page=100", r.repo),
-        ])?;
+        let pages = self.pages(&format!("repos/{}/commits/{sha}", r.repo))?;
         let mut parent: Option<String> = None;
         let mut files = Vec::new();
-        for page in serde_json::Deserializer::from_str(&out).into_iter::<GhCommitDiff>() {
-            let page = page.map_err(|_| unexpected())?;
+        for page in &pages {
+            let page: GhCommitDiff = serde_json::from_str(page).map_err(|_| unexpected())?;
             if parent.is_none() {
                 parent = Some(
                     page.parents
@@ -460,6 +867,10 @@ impl ReviewProvider for GithubProvider {
             truncated: files.len() >= PULL_FILES_LIMIT,
             files: files.into_iter().map(changed_file).collect(),
         })
+    }
+
+    fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
+        self.limit.active()
     }
 }
 
@@ -864,29 +1275,21 @@ impl GithubProvider {
         body: &serde_json::Value,
     ) -> PostResultOf<T> {
         let token = self.account_token()?;
-        let mut cmd = self.command();
-        cmd.args(["api", "--method", "POST", path, "--input", "-"])
-            .stdin(Stdio::piped());
-        if let Some(token) = &token {
-            let var = if self.host == "github.com" {
-                "GH_TOKEN"
-            } else {
-                "GH_ENTERPRISE_TOKEN"
-            };
-            cmd.env(var, token);
-        }
-        let mut child = cmd.spawn().map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => CoreError::GithubUnavailable,
-            _ => CoreError::Provider("could not run gh".into()),
-        })?;
-        if let Some(mut stdin) = child.stdin.take() {
-            // gh reads all of stdin before it sends anything. A write error
-            // means gh exited early; its status says why.
-            let _ = stdin.write_all(body.to_string().as_bytes());
-        }
-        let output = child
-            .wait_with_output()
-            .map_err(|_| CoreError::Provider("could not run gh".into()))?;
+        let output = match self.exec(
+            token.as_deref(),
+            &["api", "--method", "POST", path, "--input", "-"],
+            Some(body.to_string().into_bytes()),
+        ) {
+            Ok(o) => o,
+            // It may have reached GitHub before it hung.
+            Err(ExecError::TimedOut) => {
+                return Err(PostError::new(
+                    PostErrorKind::Provider,
+                    "GitHub did not answer in time; refresh to see whether it went through",
+                ))
+            }
+            Err(e) => return Err(CoreError::from(e).into()),
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
         if output.status.success() {
             return serde_json::from_str(&stdout).map_err(|_| unexpected().into());
@@ -979,6 +1382,67 @@ struct GhPosted {
     html_url: Option<String>,
 }
 
+// GraphQL review thread states (M6).
+
+#[derive(Deserialize)]
+struct GqlResponse {
+    data: Option<GqlData>,
+}
+
+#[derive(Deserialize)]
+struct GqlData {
+    repository: Option<GqlRepository>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlRepository {
+    pull_request: Option<GqlPull>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPull {
+    review_threads: GqlThreads,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlThreads {
+    page_info: GqlPageInfo,
+    #[serde(default)]
+    nodes: Vec<GqlThread>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlPageInfo {
+    #[serde(default)]
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GqlThread {
+    #[serde(default)]
+    is_resolved: bool,
+    #[serde(default)]
+    is_outdated: bool,
+    comments: GqlComments,
+}
+
+#[derive(Deserialize)]
+struct GqlComments {
+    #[serde(default)]
+    nodes: Vec<GqlComment>,
+}
+
+#[derive(Deserialize)]
+struct GqlComment {
+    url: String,
+}
+
 /// One page of `commits/{sha}` (M3).
 #[derive(Deserialize)]
 struct GhCommitDiff {
@@ -999,6 +1463,80 @@ mod tests {
         let v: Vec<u32> = parse_pages("[]").unwrap();
         assert!(v.is_empty());
         assert!(parse_pages::<u32>("{oops").is_err());
+    }
+
+    #[test]
+    fn parses_gh_included_output() {
+        let out = "HTTP/2.0 200 OK\nContent-Type: application/json\r\nEtag: W/\"abc\"\r\n\
+                   Link: <https://api.github.com/repositories/1/pulls/12/comments?per_page=100&page=2>; rel=\"next\", \
+                   <https://api.github.com/repositories/1/pulls/12/comments?per_page=100&page=3>; rel=\"last\"\r\n\r\n[1,2]";
+        let r = HttpReply::parse(out).unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.header("ETag").as_deref(), Some("W/\"abc\""));
+        assert_eq!(r.body, "[1,2]");
+        assert_eq!(
+            next_query(&r.header("link").unwrap()).as_deref(),
+            Some("per_page=100&page=2")
+        );
+        let not_modified = HttpReply::parse("HTTP/2.0 304 Not Modified\nEtag: x\r\n\r\n").unwrap();
+        assert_eq!((not_modified.status, not_modified.body.as_str()), (304, ""));
+        assert!(HttpReply::parse("[1,2]").is_none());
+        assert!(HttpReply::parse("").is_none());
+        assert_eq!(next_query("<https://x/y?a=1>; rel=\"last\""), None);
+        assert_eq!(next_query("<https://x/y?a=$(rm)>; rel=\"next\""), None);
+    }
+
+    #[test]
+    fn spots_rate_limits() {
+        let reply = |status, headers: &[(&str, &str)], body: &str| HttpReply {
+            status,
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: body.into(),
+        };
+        assert!(reply(403, &[("x-ratelimit-remaining", "0")], "").is_rate_limited());
+        assert!(reply(403, &[("retry-after", "30")], "").is_rate_limited());
+        assert!(reply(429, &[], "").is_rate_limited());
+        assert!(reply(
+            403,
+            &[],
+            "{\"message\":\"You have exceeded a secondary rate limit\"}"
+        )
+        .is_rate_limited());
+        assert!(!reply(
+            403,
+            &[("x-ratelimit-remaining", "4999")],
+            "{\"message\":\"Forbidden\"}"
+        )
+        .is_rate_limited());
+    }
+
+    #[test]
+    fn maps_review_comment_urls_to_root_ids() {
+        assert_eq!(
+            root_comment_id("https://github.com/o/r/pull/12#discussion_r2200000001").as_deref(),
+            Some("2200000001")
+        );
+        assert_eq!(root_comment_id("https://github.com/o/r/pull/12"), None);
+        assert_eq!(
+            root_comment_id("https://github.com/o/r/pull/12#discussion_rx"),
+            None
+        );
+    }
+
+    #[test]
+    fn times_out_a_hung_process() {
+        #[cfg(unix)]
+        {
+            let start = Instant::now();
+            let mut cmd = Command::new("sleep");
+            cmd.arg("5").stdout(Stdio::piped()).stderr(Stdio::piped());
+            let r = run_with_timeout(&mut cmd, None, Duration::from_millis(100));
+            assert!(matches!(r, Err(ExecError::TimedOut)));
+            assert!(start.elapsed() < Duration::from_secs(3));
+        }
     }
 
     #[test]
