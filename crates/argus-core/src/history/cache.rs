@@ -114,7 +114,9 @@ impl Store {
         Ok(parsed)
     }
 
-    /// Cache `history` for `thread` at `head`, replacing what it had.
+    /// Cache `history` for `thread` at `head`, replacing what it had. A
+    /// thread no longer stored (a refresh dropped it while the history was
+    /// computed) gets nothing cached: there is nothing to hang it off.
     pub(crate) fn put_history(
         &self,
         thread: ThreadId,
@@ -131,6 +133,14 @@ impl Store {
         };
         let mut conn = self.conn();
         let tx = conn.transaction()?;
+        let stored: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM threads WHERE id = ?1)",
+            [&id],
+            |r| r.get(0),
+        )?;
+        if !stored {
+            return Ok(());
+        }
         tx.execute("DELETE FROM snapshots WHERE thread_id = ?1", [&id])?;
         tx.execute("DELETE FROM timeline WHERE thread_id = ?1", [&id])?;
         tx.execute(

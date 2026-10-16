@@ -121,8 +121,13 @@ pub(crate) fn compute_histories(
         let wanted: Vec<&Thread> = misses.iter().map(|&i| &threads[i].thread).collect();
         let computed = compute(provider, record, clone, &wanted);
         for (&i, (history, cacheable)) in misses.iter().zip(computed) {
+            // A failed cache write only means not cached: the history
+            // itself stands, and the next call computes it again.
             if cacheable {
-                store.put_history(threads[i].thread_id, &record.head_sha, &history)?;
+                if let Err(e) = store.put_history(threads[i].thread_id, &record.head_sha, &history)
+                {
+                    tracing::debug!("caching a thread history failed: {e}");
+                }
             }
             cached[i] = Some(history);
         }

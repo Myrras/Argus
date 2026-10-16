@@ -1190,3 +1190,73 @@ fn a_history_call_over_a_stale_record_keeps_the_round_and_the_watermark() {
     super::api::compute_histories(&core.store, &old, &provider, None, None).unwrap();
     assert_eq!(core.review(rec.id).unwrap().untouched_threads, 0);
 }
+
+/// [`Repo`], but the review's threads vanish from the store when the
+/// computation fetches the review: a poll that dropped them meanwhile.
+struct Vanishing {
+    repo: Arc<Repo>,
+    store: Arc<Store>,
+    review: crate::ids::ReviewId,
+}
+
+impl ReviewProvider for Vanishing {
+    fn id(&self) -> ProviderId {
+        self.repo.id()
+    }
+    fn host(&self) -> &str {
+        "github.com"
+    }
+    fn current_user(&self) -> CoreResult<String> {
+        self.repo.current_user()
+    }
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        self.repo.list_reviews()
+    }
+    fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+        self.store.upsert_threads(self.review, &[], ME).unwrap();
+        self.repo.fetch_review(r)
+    }
+    fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        self.repo.fetch_threads(r)
+    }
+    fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String> {
+        self.repo.file_at(r, sha, path)
+    }
+    fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+        self.repo.fetch_files(r, range)
+    }
+    fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
+        self.repo.commit_diff(r, sha)
+    }
+    fn thread_resolutions(&self, r: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
+        self.repo.thread_resolutions(r)
+    }
+}
+
+#[test]
+fn a_thread_dropped_while_computing_is_answered_not_cached() {
+    let repo = repo();
+    let core = core_over(&repo);
+    let record = core.reviews().unwrap()[0].clone();
+    let provider: CoreResult<Arc<dyn ReviewProvider>> = Ok(Arc::new(Vanishing {
+        repo: repo.clone(),
+        store: core.store.clone(),
+        review: record.id,
+    }));
+    let histories =
+        super::api::compute_histories(&core.store, &record, &provider, None, None).unwrap();
+    assert_eq!(histories.len(), 2);
+    assert!(matches!(histories[0].status, LineStatus::Located { .. }));
+    for h in &histories {
+        assert_eq!(core.store.cached_history(h.thread_id, "c3").unwrap(), None);
+    }
+}
+
+#[test]
+fn caching_for_a_thread_that_is_gone_stores_nothing() {
+    let store = Store::in_memory().unwrap();
+    let gone = crate::ids::ThreadId::new();
+    let h = cached(LineStatus::unlocated("x"), Vec::new());
+    store.put_history(gone, "h1", &h).unwrap();
+    assert_eq!(store.cached_history(gone, "h1").unwrap(), None);
+}
