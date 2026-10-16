@@ -10,7 +10,8 @@
  * `postSelected` writes to a platform, and only from the "Post selected"
  * button: selecting, editing, dismissing, ticking the checklist and
  * overriding a verdict are local (the last three stored by Argus, never on
- * GitHub/GitLab).
+ * GitHub/GitLab). It posts what each finding shows: an open editor's text,
+ * else the saved edit, else its own text.
  *
  * With the AI pass off (`AiRunState.enabled` false) the core returns no
  * output and the UI shows none of it.
@@ -54,7 +55,12 @@ import {
 import { openExternal } from "../lib/links";
 import { useBackendSettingsStore } from "./backendSettingsStore";
 import { useReviewStore } from "./reviewStore";
-import { toastError, toastSuccess, useToastStore } from "./toastStore";
+import {
+  toastError,
+  toastInfo,
+  toastSuccess,
+  useToastStore,
+} from "./toastStore";
 
 export interface ReviewAi {
   findings: Finding[];
@@ -318,20 +324,31 @@ export const useAiStore = create<AiStoreState>((set, get) => {
     postSelected: async (reviewId) => {
       if (get().posting[reviewId]) return;
       const { ui } = get();
-      const chosen = sortFindings(
+      const selected = sortFindings(
         (get().byReview[reviewId]?.findings ?? []).filter(
           (f) => postable(f) && ui[f.id]?.selected,
         ),
       );
+      // What posts is what the user sees: an open editor's text, else the
+      // saved edit. An emptied editor shows nothing to post: left out.
+      const chosen = selected.filter((f) => ui[f.id]?.editor?.trim() !== "");
+      const emptied = selected.length - chosen.length;
+      if (emptied > 0) {
+        toastInfo(
+          `${findingCount(emptied)} with empty text not posted`,
+          "Write something in the editor or close it.",
+        );
+      }
       if (chosen.length === 0) return;
+      const bodyOf = (f: Finding): string | null => {
+        const text = ui[f.id]?.editor ?? ui[f.id]?.edit ?? null;
+        return text === null || text === defaultBody(f) ? null : text;
+      };
       set((s) => ({ posting: { ...s.posting, [reviewId]: true } }));
       try {
         const results = await postFindings(
           reviewId,
-          chosen.map((f) => ({
-            findingId: f.id,
-            body: ui[f.id]?.edit ?? null,
-          })),
+          chosen.map((f) => ({ findingId: f.id, body: bodyOf(f) })),
         );
         let posted = 0;
         let lastUrl: string | null = null;
@@ -340,7 +357,14 @@ export const useAiStore = create<AiStoreState>((set, get) => {
           if (r.status === "posted") {
             posted += 1;
             lastUrl = r.postedUrl;
-            patchUi(r.findingId, NO_UI);
+            // An editor opened (or changed) while it posted is not what was
+            // posted: it stays.
+            const sent = ui[r.findingId]?.editor ?? null;
+            const now = get().ui[r.findingId]?.editor ?? null;
+            patchUi(r.findingId, {
+              ...NO_UI,
+              editor: now === sent ? null : now,
+            });
           } else {
             failed += 1;
             patchUi(r.findingId, {

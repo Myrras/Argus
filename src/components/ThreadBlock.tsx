@@ -19,7 +19,7 @@
  * everything as props and reports size changes through `onResize`.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import type { ProviderId, StoredThread } from "../ipc/types";
 import { previewText } from "../lib/commentText";
@@ -28,7 +28,11 @@ import { parseSuggestionInfo } from "../lib/suggestions";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
 import { useCommentStore } from "../state/commentStore";
-import { thenNowOpen, useHistoryStore } from "../state/historyStore";
+import {
+  thenNowOpen,
+  threadOpen,
+  useHistoryStore,
+} from "../state/historyStore";
 import { useThreadHistory } from "../lib/useThreadHistory";
 import { threadDescription } from "../lib/focusModel";
 import { useThreadFocus } from "../state/focusStore";
@@ -57,7 +61,10 @@ export function ThreadBlock({
   now: number;
   onResize?: () => void;
 }) {
-  const [open, setOpen] = useState(t.mine);
+  // In the store, not local state: the card may be rebuilt with its widget.
+  const open = useHistoryStore((s) => threadOpen(s.open, t));
+  const storeOpen = useHistoryStore((s) => s.setOpen);
+  const setOpen = (o: boolean) => storeOpen(t.threadId, o);
   const history = useHistoryStore(
     (s) => !isConversationThread(t) && thenNowOpen(s.expanded, t),
   );
@@ -71,7 +78,7 @@ export function ThreadBlock({
   // After React commits the new height.
   const resized = () => requestAnimationFrame(() => onResize?.());
   const toggle = () => {
-    setOpen((o) => !o);
+    setOpen(!open);
     resized();
   };
   const renderFence: RenderFence = (info, code) => {
@@ -101,8 +108,8 @@ export function ThreadBlock({
   const resizeRef = useRef(onResize);
   resizeRef.current = onResize;
   useEffect(() => {
-    if (history) setOpen(true);
-  }, [history]);
+    if (history) storeOpen(t.threadId, true);
+  }, [history, storeOpen, t.threadId]);
   useEffect(() => {
     requestAnimationFrame(() => resizeRef.current?.());
   }, [history, past.history, past.loading, past.error]);

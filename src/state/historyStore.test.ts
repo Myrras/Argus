@@ -49,7 +49,7 @@ describe("historyStore", () => {
     mockInvoke.mockReset();
     clearHistoryReads();
     useHistoryStore.setState(
-      { ...initial, byReview: {}, byThread: {}, expanded: {}, focused: null },
+      { ...initial, byReview: {}, byThread: {}, expanded: {}, open: {}, focused: null },
       true,
     );
     seedThreads([a, b]);

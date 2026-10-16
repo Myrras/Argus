@@ -287,4 +287,64 @@ describe("aiStore", () => {
     s.saveEditor(low);
     expect(useAiStore.getState().ui[low.id]?.edit).toBeNull();
   });
+  it("Post selected posts what an open editor shows", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    const s = useAiStore.getState();
+    s.setSelected(low.id, true);
+    s.openEditor(low);
+    s.setEditorText(low.id, "My careful rewrite");
+    postResults = [
+      {
+        findingId: low.id,
+        status: "posted",
+        postedUrl: "https://github.com/acme-fixture/widgets/pull/1#c2",
+        postedAt: "2026-10-16T12:00:00Z",
+      },
+    ];
+    await useAiStore.getState().postSelected(ID);
+    expect(mockInvoke).toHaveBeenCalledWith("post_findings", {
+      reviewId: ID,
+      posts: [{ findingId: low.id, body: "My careful rewrite" }],
+    });
+    expect(useAiStore.getState().ui[low.id]?.editor).toBeNull();
+  });
+
+  it("Post selected leaves out an emptied editor and keeps one opened meanwhile", async () => {
+    await useAiStore.getState().load(ID);
+    const [low, high] = findings;
+    const s = useAiStore.getState();
+    s.setSelected(low.id, true);
+    s.setSelected(high.id, true);
+    s.openEditor(low);
+    s.setEditorText(low.id, "  ");
+    let finish: (v: FindingPostResult[]) => void = () => {};
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "post_findings"
+        ? new Promise((r) => (finish = r as typeof finish))
+        : backend(cmd, args)) as typeof invoke);
+    const p = useAiStore.getState().postSelected(ID);
+    expect(mockInvoke).toHaveBeenCalledWith("post_findings", {
+      reviewId: ID,
+      posts: [{ findingId: high.id, body: null }],
+    });
+    // Opened while the post runs: not what was posted, so it stays.
+    useAiStore.getState().openEditor(high);
+    useAiStore.getState().setEditorText(high.id, "Second thoughts");
+    finish([
+      {
+        findingId: high.id,
+        status: "posted",
+        postedUrl: "https://github.com/acme-fixture/widgets/pull/1#c3",
+        postedAt: "2026-10-16T12:00:00Z",
+      },
+    ]);
+    await p;
+    const ui = useAiStore.getState().ui;
+    expect(ui[high.id]).toMatchObject({
+      selected: false,
+      editor: "Second thoughts",
+    });
+    expect(ui[low.id]).toMatchObject({ selected: true, editor: "  " });
+  });
 });

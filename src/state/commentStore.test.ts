@@ -266,3 +266,110 @@ describe("replies", () => {
     expect(useCommentStore.getState().replies[THREAD]).toBeUndefined();
   });
 });
+
+describe("never posts text the user is not seeing", () => {
+  it("Post all with a draft's edit open posts the edited text", async () => {
+    addDraft(3, "old text");
+    const id = drafts()[0].id;
+    useCommentStore.getState().editDraft(REVIEW, id);
+    useCommentStore.getState().setComposerBody("new text");
+    mockInvoke.mockResolvedValueOnce([posted(3)]);
+    await useCommentStore.getState().postAll(REVIEW);
+    const [, args] = mockInvoke.mock.calls[0];
+    const sent = (args as { comments: { body: string }[] }).comments;
+    expect(sent.map((c) => c.body)).toEqual(["new text"]);
+    // Posted: the edit is done with, nothing left behind.
+    expect(useCommentStore.getState().composer).toBeNull();
+    expect(drafts()).toEqual([]);
+  });
+
+  it("Post all skips a draft whose open edit was emptied", async () => {
+    addDraft(3, "keep me");
+    addDraft(4, "post me");
+    const id = drafts()[0].id;
+    useCommentStore.getState().editDraft(REVIEW, id);
+    useCommentStore.getState().setComposerBody("   ");
+    mockInvoke.mockResolvedValueOnce([posted(4)]);
+    await useCommentStore.getState().postAll(REVIEW);
+    const [, args] = mockInvoke.mock.calls[0];
+    const sent = (args as { comments: { body: string }[] }).comments;
+    expect(sent.map((c) => c.body)).toEqual(["post me"]);
+    expect(drafts().map((d) => d.body)).toEqual(["keep me"]);
+  });
+
+  it("text typed into the edit during the post is saved as a new draft", async () => {
+    addDraft(3, "first");
+    const id = drafts()[0].id;
+    useCommentStore.getState().editDraft(REVIEW, id);
+    let finish: (v: PostResult[]) => void = () => {};
+    mockInvoke.mockImplementationOnce(
+      () => new Promise((r) => (finish = r as (v: PostResult[]) => void)),
+    );
+    const p = useCommentStore.getState().postAll(REVIEW);
+    useCommentStore.getState().setComposerBody("first, and more");
+    finish([posted(3)]);
+    await p;
+    // The composer stays with the newer text; saving keeps it.
+    expect(useCommentStore.getState().composer?.body).toBe("first, and more");
+    useCommentStore.getState().saveComposer();
+    expect(useCommentStore.getState().composer).toBeNull();
+    expect(drafts().map((d) => d.body)).toEqual(["first, and more"]);
+    expect(drafts()[0].id).not.toBe(id);
+    expect(
+      useToastStore
+        .getState()
+        .toasts.some((t) => t.message.includes("new pending comment")),
+    ).toBe(true);
+  });
+
+  it("Cancel keeps a written comment recoverable", () => {
+    useCommentStore.getState().openComposer(target(5));
+    useCommentStore.getState().setComposerBody("half a thought");
+    useCommentStore.getState().closeComposer();
+    expect(useCommentStore.getState().composer).toBeNull();
+    const toast = useToastStore
+      .getState()
+      .toasts.find((t) => t.message === "Comment discarded");
+    expect(toast?.action?.label).toBe("Undo");
+    void toast?.action?.onClick();
+    expect(useCommentStore.getState().composer).toMatchObject({
+      line: 5,
+      body: "half a thought",
+    });
+  });
+
+  it("Cancel on an empty composer just closes it", () => {
+    useCommentStore.getState().openComposer(target(5));
+    useCommentStore.getState().closeComposer();
+    expect(useCommentStore.getState().composer).toBeNull();
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
+  it("Restore never replaces a composer with text", () => {
+    useCommentStore.getState().openComposer(target(5));
+    useCommentStore.getState().setComposerBody("discarded");
+    useCommentStore.getState().closeComposer();
+    const restore = useToastStore.getState().toasts[0].action!;
+    useCommentStore.getState().openComposer(target(8));
+    useCommentStore.getState().setComposerBody("newer");
+    void restore.onClick();
+    expect(useCommentStore.getState().composer?.body).toBe("newer");
+  });
+});
+
+describe("a cancelled reply", () => {
+  it("can be brought back", () => {
+    const s = useCommentStore.getState();
+    s.openReply(THREAD);
+    s.setReplyBody(THREAD, "Not sure yet");
+    useCommentStore.getState().closeReply(THREAD);
+    expect(useCommentStore.getState().replies[THREAD]).toBeUndefined();
+    const toast = useToastStore
+      .getState()
+      .toasts.find((t) => t.message === "Reply discarded");
+    void toast?.action?.onClick();
+    expect(useCommentStore.getState().replies[THREAD]?.body).toBe(
+      "Not sure yet",
+    );
+  });
+});

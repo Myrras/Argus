@@ -89,6 +89,7 @@ beforeEach(() => {
       byReview: {},
       byThread: {},
       expanded: {},
+      open: {},
       focused: null,
     },
     true,

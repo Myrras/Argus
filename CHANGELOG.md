@@ -88,7 +88,8 @@ when it merges.
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `⇧R` (or
   `⌘R`) to refresh, `1`–`4` for the tabs, `j`/`k`/`v` in a review, `c` to
   comment on the line you last clicked, `⌘↩` to submit a comment and `Esc`
-  to cancel it, `⌘,` for Settings. Every shortcut except `Esc` can be
+  to cancel it (Undo in the notification brings the text back), `⌘,` for
+  Settings. Every shortcut except `Esc` can be
   rebound in Settings → Shortcuts.
 - Thread history: every thread on code shows the code it was left on and
   that same code now, side by side (stacked in a narrow card), highlighted,

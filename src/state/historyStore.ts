@@ -11,10 +11,11 @@
  * - One thread on demand (`loadThread`): a retry, or a thread the review's
  *   last read did not have yet.
  *
- * Also the then/now UI state, here because a thread card inside a diff is
- * rebuilt with its CodeMirror widget: which threads have then/now open
- * (`expanded`; unset = the default, open for the user's own threads) and the
- * thread last clicked (`focused`, for the `toggleThenNow` key).
+ * Also the thread cards' UI state, here because a thread card inside a diff
+ * may be rebuilt with its CodeMirror widget: which threads are unfolded
+ * (`open`) and have then/now open (`expanded`; unset = the default, open for
+ * the user's own threads), and the thread last clicked (`focused`, for the
+ * `toggleThenNow` key).
  */
 
 import { create } from "zustand";
@@ -55,6 +56,8 @@ interface HistoryStoreState {
   byReview: Record<ReviewId, ReviewHistories>;
   byThread: Record<ThreadId, HistoryEntry>;
   expanded: Record<ThreadId, boolean>;
+  /** Unfolded threads; unset = the default (open when mine). */
+  open: Record<ThreadId, boolean>;
   focused: FocusedThread | null;
   /** On open: read unless already read for `headSha`. */
   loadReview: (id: ReviewId, headSha?: string | null) => Promise<void>;
@@ -62,6 +65,7 @@ interface HistoryStoreState {
   reloadReview: (id: ReviewId) => Promise<void>;
   loadThread: (threadId: ThreadId) => Promise<void>;
   setExpanded: (threadId: ThreadId, open: boolean) => void;
+  setOpen: (threadId: ThreadId, open: boolean) => void;
   focus: (thread: FocusedThread) => void;
   /** The `toggleThenNow` key: false when no thread of `reviewId` was clicked. */
   toggleFocused: (reviewId: ReviewId) => boolean;
@@ -186,6 +190,7 @@ export const useHistoryStore = create<HistoryStoreState>((set, get) => {
     byReview: {},
     byThread: {},
     expanded: {},
+    open: {},
     focused: null,
 
     loadReview: async (id, headSha = null) => {
@@ -235,6 +240,13 @@ export const useHistoryStore = create<HistoryStoreState>((set, get) => {
     setExpanded: (threadId, open) =>
       set((s) => ({ expanded: { ...s.expanded, [threadId]: open } })),
 
+    setOpen: (threadId, open) =>
+      set((s) =>
+        s.open[threadId] === open
+          ? {}
+          : { open: { ...s.open, [threadId]: open } },
+      ),
+
     focus: (thread) => {
       const f = get().focused;
       if (f?.threadId !== thread.threadId || f.mine !== thread.mine) {
@@ -251,6 +263,14 @@ export const useHistoryStore = create<HistoryStoreState>((set, get) => {
     },
   };
 });
+
+/** Whether a thread is unfolded (the toggle, else open when mine). */
+export function threadOpen(
+  open: Record<ThreadId, boolean>,
+  t: Pick<StoredThread, "threadId" | "mine">,
+): boolean {
+  return open[t.threadId] ?? t.mine;
+}
 
 /** Whether a thread's then/now is open (the toggle, else open when mine). */
 export function thenNowOpen(

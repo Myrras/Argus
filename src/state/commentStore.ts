@@ -10,6 +10,11 @@
  * keep their text and the platform's reason. A posted comment comes back as a
  * real thread through `review:changed` (the shell emits it after a write).
  *
+ * What posts is what the user sees: "Post all" with a draft's edit open
+ * posts the edit's text (an emptied edit is left out). Cancel (or Esc) on a
+ * composer or reply with text keeps it recoverable: the toast's Undo brings
+ * it back.
+ *
  * Also caches each file's commentable lines (`commentable_lines`) per
  * (review, head, path), like the file contents.
  */
@@ -31,7 +36,13 @@ import type {
   ThreadId,
 } from "../ipc/types";
 import { clampRange, type LineRange } from "../lib/commentRanges";
-import { toastError, toastInfo, toastSuccess } from "./toastStore";
+import { useHistoryStore } from "./historyStore";
+import {
+  toastError,
+  toastInfo,
+  toastSuccess,
+  useToastStore,
+} from "./toastStore";
 
 /** A pending comment: queued with "Add to review", sent with "Post all". */
 export interface Draft {
@@ -338,14 +349,46 @@ export const useCommentStore = create<CommentState>((set, get) => {
     setComposerBody: (body) => patchComposer({ body, error: null }),
 
     closeComposer: () => {
-      if (!get().composer?.busy) set({ composer: null });
+      const c = get().composer;
+      if (!c || c.busy) return;
+      set({ composer: null });
+      const kept = c.draftId
+        ? draftsOf(c.reviewId).find((d) => d.id === c.draftId)?.body
+        : undefined;
+      if (c.body.trim() === "" || c.body === kept) return;
+      // Cancel is one key away from typing: keep the text one Undo away.
+      useToastStore.getState().push({
+        kind: "info",
+        message: "Comment discarded",
+        action: {
+          label: "Undo",
+          onClick: () => {
+            const cur = get().composer;
+            if (cur && (cur.busy || cur.body.trim() !== "")) {
+              toastInfo("Finish or cancel the open comment first");
+              return;
+            }
+            // A draft posted or deleted since comes back as a new comment.
+            const still =
+              c.draftId && draftsOf(c.reviewId).some((d) => d.id === c.draftId);
+            set({
+              composer: {
+                ...c,
+                draftId: still ? c.draftId : null,
+                busy: false,
+                error: null,
+              },
+            });
+          },
+        },
+      });
     },
 
     saveComposer: () => {
       const c = get().composer;
       if (!c || c.busy || c.body.trim() === "") return;
       const list = draftsOf(c.reviewId);
-      if (c.draftId) {
+      if (c.draftId && list.some((d) => d.id === c.draftId)) {
         setDrafts(
           c.reviewId,
           list.map((d) =>
@@ -353,6 +396,14 @@ export const useCommentStore = create<CommentState>((set, get) => {
           ),
         );
       } else {
+        if (c.draftId) {
+          // Its draft was posted while the edit stayed open: keep the newer
+          // text rather than drop it.
+          toastInfo(
+            "Saved as a new pending comment",
+            "The one you were editing was already posted.",
+          );
+        }
         setDrafts(c.reviewId, [
           ...list,
           {
@@ -431,9 +482,38 @@ export const useCommentStore = create<CommentState>((set, get) => {
     },
 
     postAll: async (reviewId) => {
-      const drafts = draftsOf(reviewId);
-      if (drafts.length === 0 || get().posting[reviewId]) return;
+      if (get().posting[reviewId]) return;
+      // A draft's open edit is what the user sees of it: post that text, or
+      // leave the draft out when the edit was emptied.
+      const c = get().composer;
+      const editing =
+        c && c.reviewId === reviewId && c.draftId && !c.busy ? c : null;
+      if (editing && editing.body.trim() !== "") {
+        setDrafts(
+          reviewId,
+          draftsOf(reviewId).map((d) =>
+            d.id === editing.draftId
+              ? { ...d, body: editing.body, error: null }
+              : d,
+          ),
+        );
+      }
+      const drafts = draftsOf(reviewId).filter(
+        (d) => !(editing?.draftId === d.id && editing.body.trim() === ""),
+      );
+      if (drafts.length === 0) return;
       const r = await post(reviewId, drafts);
+      // The edit it posted is done with; text typed into it meanwhile stays
+      // open (Save keeps it as a new draft).
+      const after = get().composer;
+      if (
+        editing &&
+        after?.draftId === editing.draftId &&
+        !draftsOf(reviewId).some((d) => d.id === editing.draftId) &&
+        after.body === editing.body
+      ) {
+        set({ composer: null });
+      }
       if (r.error) {
         toastError("Could not post the comments", r.error.message);
       } else if (r.failed === 0) {
@@ -483,13 +563,35 @@ export const useCommentStore = create<CommentState>((set, get) => {
     setReplyBody: (threadId, body) =>
       patchReply(threadId, { body, error: null }),
 
-    closeReply: (threadId) =>
+    closeReply: (threadId) => {
+      const r = get().replies[threadId];
+      if (!r || r.busy) return;
       set((s) => {
-        if (s.replies[threadId]?.busy) return {};
         const next = { ...s.replies };
         delete next[threadId];
         return { replies: next };
-      }),
+      });
+      if (r.body.trim() === "") return;
+      useToastStore.getState().push({
+        kind: "info",
+        message: "Reply discarded",
+        action: {
+          label: "Undo",
+          onClick: () => {
+            const cur = get().replies[threadId];
+            if (cur && (cur.busy || cur.body.trim() !== "")) return;
+            set((s) => ({
+              replies: {
+                ...s.replies,
+                [threadId]: { body: r.body, busy: false, error: null },
+              },
+            }));
+            // Its thread unfolds so the reply shows.
+            useHistoryStore.getState().setOpen(threadId, true);
+          },
+        },
+      });
+    },
 
     sendReply: async (reviewId, threadId) => {
       const r = get().replies[threadId];

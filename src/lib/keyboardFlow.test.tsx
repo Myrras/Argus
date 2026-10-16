@@ -133,7 +133,7 @@ beforeEach(() => {
   });
   useSettingsStore.getState().resetShortcuts();
   useCommentStore.setState({ composer: null, focus: null, replies: {} });
-  useHistoryStore.setState({ focused: null, expanded: {} });
+  useHistoryStore.setState({ focused: null, expanded: {}, open: {} });
   useOverlayStore.setState({ open: null, confirm: null });
   useLayoutStore.setState({ diffLayout: "unified" });
   seed();

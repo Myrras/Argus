@@ -23,6 +23,7 @@ import { usePageFocus } from "../lib/usePageFocus";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
+import { useHistoryStore } from "../state/historyStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
@@ -116,6 +117,7 @@ beforeEach(() => {
     byReview: { [r.id]: { threads: [t], loading: false, error: null } },
   });
   useFocusStore.setState({ reviewId: r.id, item: null, zone: "page" });
+  useHistoryStore.setState({ open: {} });
 });
 
 describe("ThreadBlock and the focus", () => {
