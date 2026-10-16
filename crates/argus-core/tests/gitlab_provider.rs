@@ -131,6 +131,13 @@ fn fixture_routes(path: &str) -> Reply {
 /// A local server answering every request through `route`; returns the base
 /// URL and the log of `"<path> token=<yes|no>"` lines it saw.
 fn serve(route: fn(&str) -> Reply) -> (String, Arc<Mutex<Vec<String>>>) {
+    serve_raw(move |path, _| route(path))
+}
+
+/// Like [`serve`], with the whole request head (lowercased) for the route.
+fn serve_raw(
+    route: impl Fn(&str, &str) -> Reply + Send + 'static,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -154,7 +161,7 @@ fn serve(route: fn(&str) -> Reply) -> (String, Arc<Mutex<Vec<String>>>) {
             log.lock()
                 .unwrap()
                 .push(format!("{path} token={}", if token { "yes" } else { "no" }));
-            let reply = route(&path);
+            let reply = route(&path, &req.to_lowercase());
             let out = format!(
                 "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
                 reply.status,
@@ -547,4 +554,133 @@ fn commit_diff_and_resolve_events() {
     assert!(e.thread_id.starts_with("d2") && e.resolved);
     assert_eq!(e.by, "alice-fixture");
     assert_eq!(e.at.to_rfc3339(), "2026-10-09T15:00:00+00:00");
+}
+
+// --- M6: conditional requests, rate limits, timeouts ---
+
+/// The fixture instance with an ETag per path, answering 304 to a request
+/// that names it; `not_modified` logs each 304's path.
+fn conditional_routes(not_modified: Arc<Mutex<Vec<String>>>) -> impl Fn(&str, &str) -> Reply {
+    move |path, req| {
+        let tag = format!("w/\"fx-{}\"", path.len());
+        let reply = fixture_routes(path);
+        if !reply.status.starts_with("200") {
+            return reply;
+        }
+        if req.contains(&format!("if-none-match: {tag}")) {
+            not_modified.lock().unwrap().push(path.to_string());
+            return Reply {
+                status: "304 Not Modified",
+                // GitLab repeats the pagination headers on a 304; Argus
+                // must not need them.
+                headers: format!("ETag: W/\"fx-{}\"\r\n", path.len()),
+                body: String::new(),
+            };
+        }
+        Reply {
+            headers: format!("{}ETag: W/\"fx-{}\"\r\n", reply.headers, path.len()),
+            ..reply
+        }
+    }
+}
+
+#[test]
+fn a_second_poll_sends_if_none_match_and_replays_the_304s() {
+    let not_modified = Arc::new(Mutex::new(Vec::new()));
+    let (base, _) = serve_raw(conditional_routes(not_modified.clone()));
+    let gl = provider(&base);
+    let r = mr_ref(&base, 21);
+    let poll = || {
+        (
+            gl.fetch_review(&r).unwrap(),
+            gl.fetch_threads(&r).unwrap(),
+            gl.fetch_files(&r, &review_range()).unwrap(),
+        )
+    };
+    let first = poll();
+    // Within one poll the MR itself is read twice (detail and threads): the
+    // second read is already a 304.
+    let after_first = not_modified.lock().unwrap().len();
+    let second = poll();
+    assert_eq!(first, second);
+    let seen = not_modified.lock().unwrap();
+    let seen = &seen[after_first..];
+    // Page 2 was still followed (its number came from the cached page 1).
+    assert!(seen
+        .iter()
+        .any(|p| p.ends_with("/discussions?per_page=100&page=2")));
+    assert!(seen
+        .iter()
+        .any(|p| p.ends_with("/diffs?per_page=100&page=2")));
+    assert!(seen
+        .iter()
+        .any(|p| p == "/api/v4/projects/grp%2Fapp/merge_requests/21"));
+}
+
+#[test]
+fn a_429_backs_off_until_retry_after() {
+    let (base, seen) = serve(|_| Reply {
+        status: "429 Too Many Requests",
+        headers: "Retry-After: 120\r\nRateLimit-Remaining: 0\r\n".into(),
+        body: "Retry later".into(),
+    });
+    let gl = provider(&base);
+    let start = chrono::Utc::now();
+    let err = gl.current_user().unwrap_err();
+    let until = gl.rate_limited_until().unwrap();
+    assert!((118..=122).contains(&(until - start).num_seconds()));
+    let hhmm = until
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "Could not fetch reviews: GitLab is rate limited until {hhmm}; Argus tries again then"
+        )
+    );
+    assert!(!err.is_unavailable());
+    // Nothing more is sent until then.
+    assert!(gl.list_reviews().is_err());
+    assert!(gl.fetch_threads(&mr_ref(&base, 21)).is_err());
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_429_without_retry_after_reads_the_reset_epoch() {
+    static RESET: Mutex<i64> = Mutex::new(0);
+    let reset = chrono::Utc::now().timestamp() + 300;
+    *RESET.lock().unwrap() = reset;
+    let (base, _) = serve(|_| Reply {
+        status: "429 Too Many Requests",
+        headers: format!("RateLimit-Reset: {}\r\n", *RESET.lock().unwrap()),
+        body: String::new(),
+    });
+    let gl = provider(&base);
+    assert!(gl.current_user().is_err());
+    assert_eq!(gl.rate_limited_until().unwrap().timestamp(), reset);
+}
+
+#[test]
+fn a_hung_instance_times_out_without_retrying() {
+    // Accepts, reads, never answers.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(Mutex::new(0));
+    let count = accepted.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for sock in listener.incoming().flatten() {
+            *count.lock().unwrap() += 1;
+            held.push(sock);
+        }
+    });
+    let gl = provider(&base).with_timeout(std::time::Duration::from_millis(300));
+    let start = std::time::Instant::now();
+    let err = gl.current_user().unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("could not reach GitLab (timed out)"));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(*accepted.lock().unwrap(), 1);
 }
