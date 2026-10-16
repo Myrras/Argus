@@ -106,6 +106,7 @@
   --sidebar-w: 280px;
   --tabbar-h: 38px;
   --file-tree-w: 240px; /* the review view's file tree, while expanded */
+  --ai-panel-w: 340px; /* the AI island right of the review, while open */
 
   /* Repeating animations that are not state transitions (spinner, pulsing
      status dots) — kept off the --dur-* scale on purpose. */
