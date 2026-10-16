@@ -246,7 +246,14 @@ pub(crate) fn execute(
                 .map_err(|e| format!("the agent's answer was invalid after a retry: {e}"))?
         }
     };
-    Ok(output::filter(parsed, &paths, &known))
+    Ok(RunOutput {
+        // The shas of the diff actually returned (the provider's contract),
+        // which for a run since the last review has the watermark as its
+        // left side.
+        head_sha: Some(diff.head_sha.clone()),
+        base_sha: Some(diff.base_sha.clone()),
+        ..output::filter(parsed, &paths, &known)
+    })
 }
 
 fn invocation(

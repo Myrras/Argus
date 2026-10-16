@@ -1,5 +1,6 @@
 //! AI state in SQLite: the v1 `findings`, `checklist` and `verdicts`
-//! tables, plus `ai_runs` (migration 5, [`MIGRATION`]).
+//! tables, plus `ai_runs` (migration 5, [`MIGRATION`]) and the diff a
+//! finding was read at (migration 6, [`MIGRATION_6`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -36,6 +37,16 @@ pub(crate) const MIGRATION: &str = r#"
     ALTER TABLE findings ADD COLUMN side TEXT NOT NULL DEFAULT 'new';
     CREATE INDEX findings_by_review ON findings(review_id, round);
     CREATE INDEX checklist_by_review ON checklist(review_id, round);
+"#;
+
+/// Migration 6: the diff a finding was read at. `head_sha` is the right side
+/// its new-side lines are numbered at (the post API moves them from there);
+/// `base_sha` the left side its old-side lines are numbered at, which for a
+/// run over the commits since the last review is the watermark, not the
+/// review's base. Rows from before stay NULL.
+pub(crate) const MIGRATION_6: &str = r#"
+    ALTER TABLE findings ADD COLUMN head_sha TEXT;
+    ALTER TABLE findings ADD COLUMN base_sha TEXT;
 "#;
 
 /// Error text of a run that was running when Argus stopped.
@@ -173,8 +184,11 @@ pub(crate) fn interrupt_running(store: &Store, now: DateTime<Utc>) -> CoreResult
 /// Store a successful run's output for `round` and mark the run done, in
 /// one transaction. A rerun of the same round replaces that round's
 /// unposted findings and its checklist (keeping dismissed/checked marks on
-/// identical items) and the AI half of its verdicts (keeping overrides).
-/// Other rounds' findings stay.
+/// identical items) and the AI half of its verdicts (keeping overrides; a
+/// thread the rerun says nothing about loses its stale AI half). A finding
+/// identical to one of the round already posted is not stored again, so it
+/// cannot be posted twice. Other rounds' findings stay. A verdict in a new
+/// round takes the user's override along from the thread's previous one.
 pub(crate) fn save_done(
     store: &Store,
     review: ReviewId,
@@ -196,27 +210,44 @@ pub(crate) fn save_done(
         })?;
         rows.collect::<Result<_, _>>()?
     };
+    let posted: HashSet<(String, u32, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT path, line, side, title FROM findings
+             WHERE review_id = ?1 AND round = ?2 AND posted_at IS NOT NULL",
+        )?;
+        let rows = stmt.query_map(params![rid, round], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
     tx.execute(
         "DELETE FROM findings WHERE review_id = ?1 AND round = ?2 AND posted_at IS NULL",
         params![rid, round],
     )?;
     for f in &out.findings {
+        let side = side_str(f.side);
+        let key = (f.path.clone(), f.line, side.to_string(), f.title.clone());
+        if posted.contains(&key) {
+            continue;
+        }
         let was_dismissed = dismissed.contains(&(f.path.clone(), f.line, f.title.clone()));
         tx.execute(
             "INSERT INTO findings (id, review_id, round, path, line, side, severity, title, body,
-                dismissed)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                dismissed, head_sha, base_sha)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 FindingId::new().to_string(),
                 rid,
                 round,
                 f.path,
                 f.line,
-                side_str(f.side),
+                side,
                 f.severity.as_str(),
                 f.title,
                 f.body,
                 was_dismissed,
+                out.head_sha,
+                out.base_sha,
             ],
         )?;
     }
@@ -246,15 +277,33 @@ pub(crate) fn save_done(
         )?;
     }
 
+    // This round's AI half is replaced as a whole: a thread the rerun left
+    // out must not keep the verdict of the earlier run.
+    tx.execute(
+        "UPDATE verdicts SET ai_label = NULL, ai_reason = NULL
+         WHERE round = ?2 AND thread_id IN (SELECT id FROM threads WHERE review_id = ?1)",
+        params![rid, round],
+    )?;
     for (thread, label, reason) in &out.verdicts {
+        // A new row carries the user's override of the thread's latest
+        // earlier verdict: the newest round is the one shown, and the
+        // user's own call must not vanish behind it.
         tx.execute(
-            "INSERT INTO verdicts (thread_id, round, ai_label, ai_reason)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO verdicts (thread_id, round, ai_label, ai_reason, user_override)
+             VALUES (?1, ?2, ?3, ?4,
+                (SELECT user_override FROM verdicts
+                 WHERE thread_id = ?1 AND round < ?2 ORDER BY round DESC LIMIT 1))
              ON CONFLICT(thread_id, round) DO UPDATE SET
                 ai_label = excluded.ai_label, ai_reason = excluded.ai_reason",
             params![thread.to_string(), round, label.as_str(), reason],
         )?;
     }
+    tx.execute(
+        "DELETE FROM verdicts
+         WHERE round = ?2 AND ai_label IS NULL AND user_override IS NULL
+            AND thread_id IN (SELECT id FROM threads WHERE review_id = ?1)",
+        params![rid, round],
+    )?;
 
     let n = tx.execute(
         "UPDATE ai_runs SET status = 'done', error = NULL, interrupted = 0, round = ?2,
@@ -341,6 +390,19 @@ pub(crate) fn finding(store: &Store, id: FindingId) -> CoreResult<Option<Finding
             finding_row,
         )
         .optional()?)
+}
+
+/// The head and left side of the diff `id` was read at (`None` for a
+/// finding stored before migration 6).
+pub(crate) fn finding_shas(
+    store: &Store,
+    id: FindingId,
+) -> CoreResult<(Option<String>, Option<String>)> {
+    Ok(store.conn().query_row(
+        "SELECT head_sha, base_sha FROM findings WHERE id = ?1",
+        [id.to_string()],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
 }
 
 /// Record that the user posted the finding as a comment at `url`.

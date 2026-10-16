@@ -185,7 +185,7 @@ fn trigger_rule() {
 #[test]
 fn migration_5_adds_ai_runs_and_finding_side() {
     let store = Store::in_memory().unwrap();
-    assert_eq!(store.schema_version().unwrap(), 5);
+    assert!(store.schema_version().unwrap() >= 5);
     let conn = store.conn();
     let n: i64 = conn
         .query_row(
@@ -228,6 +228,7 @@ fn store_round_trips_findings_checklist_verdicts_and_overrides() {
         verdicts: vec![(t1, VerdictLabel::Untouched, "nothing changed".into())],
         dropped_findings: 2,
         dropped_verdicts: 1,
+        ..RunOutput::default()
     };
     ai_store::save_done(&store, r.id, 1, &out1, at(10, 12)).unwrap();
     let run = ai_store::run(&store, r.id).unwrap().unwrap();
@@ -314,6 +315,145 @@ fn store_round_trips_findings_checklist_verdicts_and_overrides() {
         ai_store::set_dismissed(&store, FindingId::new(), true),
         Err(CoreError::NotFound)
     ));
+}
+
+#[test]
+fn migration_6_stores_the_diff_a_finding_was_read_at() {
+    let store = Store::in_memory().unwrap();
+    assert!(store.schema_version().unwrap() >= 6);
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    let out = RunOutput {
+        findings: vec![finding("src/a.rs", 3, Severity::High, "Off by one")],
+        head_sha: Some("h1".into()),
+        base_sha: Some("b0".into()),
+        ..RunOutput::default()
+    };
+    ai_store::save_done(&store, r.id, 1, &out, at(10, 12)).unwrap();
+    let f = &ai_store::findings(&store, r.id).unwrap()[0];
+    assert_eq!(
+        ai_store::finding_shas(&store, f.id).unwrap(),
+        (Some("h1".to_string()), Some("b0".to_string()))
+    );
+    // A row from before the migration has neither.
+    store
+        .conn()
+        .execute(
+            "INSERT INTO findings (id, review_id, round, path, line, severity, title, body)
+             VALUES (?1, ?2, 1, 'src/a.rs', 1, 'low', 'Old', '')",
+            rusqlite::params![FindingId::new().to_string(), r.id.to_string()],
+        )
+        .unwrap();
+    let old = ai_store::findings(&store, r.id)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.title == "Old")
+        .unwrap();
+    assert_eq!(
+        ai_store::finding_shas(&store, old.id).unwrap(),
+        (None, None)
+    );
+}
+
+#[test]
+fn an_override_survives_a_newer_round() {
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    store
+        .upsert_threads(
+            r.id,
+            &[thread("t1", ME, "h1", vec![note("n1", ME, at(1, 1))])],
+            ME,
+        )
+        .unwrap();
+    let t1 = ThreadId::from_key(r.id, "t1");
+    let verdict = |label| RunOutput {
+        verdicts: vec![(t1, label, "seen".into())],
+        ..RunOutput::default()
+    };
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 1)).unwrap();
+    ai_store::save_done(
+        &store,
+        r.id,
+        1,
+        &verdict(VerdictLabel::Untouched),
+        at(10, 2),
+    )
+    .unwrap();
+    ai_store::set_override(&store, t1, Some(VerdictLabel::Addressed)).unwrap();
+
+    ai_store::mark_running(&store, r.id, 2, "h2", "claude", at(11, 1)).unwrap();
+    ai_store::save_done(&store, r.id, 2, &verdict(VerdictLabel::Partly), at(11, 2)).unwrap();
+    let vs = ai_store::verdicts(&store, r.id).unwrap();
+    assert_eq!(vs.len(), 1);
+    assert_eq!(vs[0].round, 2);
+    assert_eq!(vs[0].ai_label, Some(VerdictLabel::Partly));
+    assert_eq!(vs[0].user_override, Some(VerdictLabel::Addressed));
+    assert_eq!(vs[0].label, Some(VerdictLabel::Addressed));
+}
+
+#[test]
+fn a_rerun_drops_stale_verdicts_and_never_repeats_a_posted_finding() {
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let t = |id: &str| thread(id, ME, "h1", vec![note(id, ME, at(1, 1))]);
+    store.upsert_threads(r.id, &[t("t1"), t("t2")], ME).unwrap();
+    let (t1, t2) = (
+        ThreadId::from_key(r.id, "t1"),
+        ThreadId::from_key(r.id, "t2"),
+    );
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 1)).unwrap();
+    let first = RunOutput {
+        findings: vec![finding("src/a.rs", 3, Severity::High, "Off by one")],
+        verdicts: vec![
+            (t1, VerdictLabel::Untouched, "a".into()),
+            (t2, VerdictLabel::Partly, "b".into()),
+        ],
+        ..RunOutput::default()
+    };
+    ai_store::save_done(&store, r.id, 1, &first, at(10, 2)).unwrap();
+    let posted = ai_store::findings(&store, r.id).unwrap()[0].id;
+    ai_store::mark_posted(&store, posted, "u#1", at(10, 3)).unwrap();
+
+    // The same round again: the posted finding comes back, t2 is left out.
+    let rerun = RunOutput {
+        findings: vec![
+            finding("src/a.rs", 3, Severity::High, "Off by one"),
+            finding("src/a.rs", 1, Severity::Low, "New one"),
+        ],
+        verdicts: vec![(t1, VerdictLabel::Addressed, "c".into())],
+        ..RunOutput::default()
+    };
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 4)).unwrap();
+    ai_store::save_done(&store, r.id, 1, &rerun, at(10, 5)).unwrap();
+    let fs = ai_store::findings(&store, r.id).unwrap();
+    assert_eq!(fs.len(), 2, "{fs:?}");
+    assert_eq!(fs.iter().filter(|f| f.title == "Off by one").count(), 1);
+    assert!(fs
+        .iter()
+        .find(|f| f.title == "Off by one")
+        .unwrap()
+        .posted_at
+        .is_some());
+    let vs = ai_store::verdicts(&store, r.id).unwrap();
+    assert_eq!(vs.len(), 1, "{vs:?}");
+    assert_eq!(
+        (vs[0].thread_id, vs[0].ai_label),
+        (t1, Some(VerdictLabel::Addressed))
+    );
+
+    // A stale AI half goes, a user's override on it stays.
+    ai_store::set_override(&store, t1, Some(VerdictLabel::Partly)).unwrap();
+    ai_store::save_done(&store, r.id, 1, &RunOutput::default(), at(10, 6)).unwrap();
+    let vs = ai_store::verdicts(&store, r.id).unwrap();
+    assert_eq!(vs.len(), 1);
+    assert_eq!(
+        (vs[0].ai_label, vs[0].user_override),
+        (None, Some(VerdictLabel::Partly))
+    );
 }
 
 #[test]
@@ -722,6 +862,8 @@ fn core_with_findings(findings: Vec<RawFinding>) -> (Core, Arc<Poster>, ReviewId
         1,
         &RunOutput {
             findings,
+            head_sha: Some("h1".into()),
+            base_sha: Some("base".into()),
             ..RunOutput::default()
         },
         at(10, 12),
@@ -867,6 +1009,74 @@ fn posting_findings_marks_the_posted_ones_and_reports_the_rest() {
     let edit: FindingPost =
         serde_json::from_str(&format!(r#"{{"findingId":"{}"}}"#, a.id)).unwrap();
     assert_eq!(edit.body, None);
+}
+
+#[test]
+fn a_finding_is_posted_from_the_diff_it_was_read_at() {
+    let (core, poster, id) = core_with_findings(vec![
+        raw("src/a.rs", 1, Side::New, "At h1"),
+        raw("src/a.rs", 1, Side::Old, "Old side"),
+    ]);
+    let find = |t: &str| {
+        core.findings(id)
+            .unwrap()
+            .into_iter()
+            .find(|f| f.title == t)
+            .unwrap()
+            .id
+    };
+    let post = |fid| {
+        core.post_findings(
+            id,
+            vec![FindingPost {
+                finding_id: fid,
+                body: None,
+            }],
+        )
+        .unwrap()
+        .remove(0)
+        .outcome
+    };
+    let failed = |o: FindingPostOutcome| match o {
+        FindingPostOutcome::Failed(e) => e,
+        o => panic!("{o:?}"),
+    };
+    let set = |fid: FindingId, head: Option<&str>, base: Option<&str>| {
+        core.store
+            .conn()
+            .execute(
+                "UPDATE findings SET head_sha = ?2, base_sha = ?3 WHERE id = ?1",
+                rusqlite::params![fid.to_string(), head, base],
+            )
+            .unwrap();
+    };
+
+    // Read at an older head that the platform's history no longer leads
+    // from: the stored head is what the post API maps from, so it fails
+    // instead of landing on today's line 1.
+    let at_h1 = find("At h1");
+    set(at_h1, Some("h0"), Some("base"));
+    let e = failed(post(at_h1));
+    assert_eq!(e.kind, PostErrorKind::LineNotInDiff);
+
+    // An old-side finding read against another left side (the diff since
+    // the last review) is refused, never placed on the base's old side.
+    let old = find("Old side");
+    set(old, Some("h1"), Some("h0"));
+    assert_eq!(failed(post(old)).kind, PostErrorKind::LineNotInDiff);
+    // One stored before the shas were (migration 6): run the pass again.
+    set(old, None, None);
+    let e = failed(post(old));
+    assert_eq!(e.kind, PostErrorKind::LineNotInDiff);
+    assert!(e.message.contains("re-run the AI pass"), "{}", e.message);
+    assert!(poster.posted.lock().unwrap().is_empty());
+
+    // With the left side it was read at, it goes out.
+    set(old, Some("h1"), Some("base"));
+    assert!(matches!(post(old), FindingPostOutcome::Posted { .. }));
+    // A new-side finding without shas keeps the stored head.
+    set(at_h1, None, None);
+    assert!(matches!(post(at_h1), FindingPostOutcome::Posted { .. }));
 }
 
 #[test]
@@ -1266,7 +1476,14 @@ fn invalid_answer_is_retried_once_then_fails() {
     )
     .unwrap();
     let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
-    assert_eq!(out, RunOutput::default());
+    assert_eq!(
+        out,
+        RunOutput {
+            head_sha: Some("h1".into()),
+            base_sha: Some("base".into()),
+            ..RunOutput::default()
+        }
+    );
     let stdin2 = std::fs::read_to_string(bin.path().join("stdin2.txt")).unwrap();
     assert!(
         stdin2.contains("Your previous answer could not be used: the answer holds no JSON object")
