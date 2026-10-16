@@ -713,10 +713,16 @@ fn a_secondary_rate_limit_waits_for_retry_after() {
     let gh = fake.provider("github.com", None);
     let start = chrono::Utc::now();
     let err = gh.current_user().unwrap_err();
+    let end = chrono::Utc::now();
     assert!(err.to_string().contains("GitHub is rate limited until"));
     let until = gh.rate_limited_until().unwrap();
-    let wait = (until - start).num_seconds();
-    assert!((88..=92).contains(&wait), "{wait}");
+    // 90 s from the reply, which came somewhere in the call (a slow
+    // machine can take seconds to run the fake).
+    let (from_start, from_end) = ((until - start).num_seconds(), (until - end).num_seconds());
+    assert!(
+        from_start >= 89 && from_end <= 91,
+        "{from_start} {from_end}"
+    );
 }
 
 #[test]

@@ -630,8 +630,10 @@ fn a_429_backs_off_until_retry_after() {
     let gl = provider(&base);
     let start = chrono::Utc::now();
     let err = gl.current_user().unwrap_err();
+    let end = chrono::Utc::now();
     let until = gl.rate_limited_until().unwrap();
-    assert!((118..=122).contains(&(until - start).num_seconds()));
+    // 120 s from the reply, which came somewhere in the call.
+    assert!((until - start).num_seconds() >= 119 && (until - end).num_seconds() <= 121);
     let hhmm = until
         .with_timezone(&chrono::Local)
         .format("%H:%M")
