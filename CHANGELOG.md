@@ -11,6 +11,8 @@ when it merges.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-16
+
 ### Added
 
 - First Argus build: a desktop window with a placeholder start screen and a
