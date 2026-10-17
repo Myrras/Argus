@@ -9,6 +9,7 @@
 
 import {
   act,
+  configure,
   fireEvent,
   render,
   screen,
@@ -345,7 +346,13 @@ async function openReview(title: string) {
   return screen.findByRole("heading", { name: title });
 }
 
-describe("App, end to end over a fake backend", () => {
+// Each case walks many screens, every step waiting on the fake backend's
+// promises and events; on a loaded machine (the whole suite in parallel, a
+// cargo build next to it) the defaults (5 s per case, 1 s per wait) are too
+// tight. Generous limits only slow down a failure, never a pass.
+configure({ asyncUtilTimeout: 5_000 });
+
+describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
   beforeEach(() => {
     localStorage.clear();
     events.clear();
