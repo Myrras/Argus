@@ -7,10 +7,11 @@
 //! A rate-limited provider is skipped until its limit lifts.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -312,6 +313,8 @@ enum Command {
 /// for an in-flight refresh to finish).
 pub struct Poller {
     tx: Sender<Command>,
+    /// Set on stop: a refresh still under way then ends without reporting.
+    stopped: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
@@ -329,10 +332,15 @@ impl Poller {
         F: Fn(&RefreshReport) + Send + 'static,
     {
         let (tx, rx) = mpsc::channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
         let handle = std::thread::Builder::new()
             .name("argus-poll".into())
             .spawn(move || loop {
                 let report = refresh_all(&providers, &store, Utc::now());
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
                 on_refresh(&report);
                 match rx.recv_timeout(interval) {
                     Ok(Command::Now) | Err(RecvTimeoutError::Timeout) => {}
@@ -350,6 +358,7 @@ impl Poller {
             .expect("spawn the poll thread");
         Self {
             tx,
+            stopped,
             handle: Some(handle),
         }
     }
@@ -364,8 +373,36 @@ impl Poller {
         self.shutdown();
     }
 
-    fn shutdown(&mut self) {
+    /// Tell the loop to stop, without waiting: a refresh under way ends
+    /// on its own and reports nothing.
+    pub fn request_stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
         let _ = self.tx.send(Command::Stop);
+    }
+
+    /// Stop the loop, waiting at most `deadline` for a refresh under way
+    /// (for quitting: one `gh` or GitLab call can take up to a minute).
+    /// Past it the thread is left to end on its own; every store write is
+    /// a transaction, so the process exiting under it loses at most that
+    /// refresh. Whether the loop ended in time.
+    pub fn stop_within(mut self, deadline: Duration) -> bool {
+        self.request_stop();
+        let Some(h) = self.handle.take() else {
+            return true;
+        };
+        let until = Instant::now() + deadline;
+        while !h.is_finished() {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = h.join();
+        true
+    }
+
+    fn shutdown(&mut self) {
+        self.request_stop();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }

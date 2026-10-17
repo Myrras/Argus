@@ -70,6 +70,10 @@ pub use store::{ReviewRecord, StoredThread};
 use provider::ReviewProvider;
 use store::Store;
 
+/// How long [`Core::shutdown`] waits for a refresh under way before leaving
+/// it behind: short enough that quitting feels immediate.
+pub const POLL_STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// What [`Core::start_polling`] calls after every refresh.
 pub type RefreshCallback = Arc<dyn Fn(&RefreshReport) + Send + Sync>;
 
@@ -373,15 +377,25 @@ impl Core {
         }
     }
 
-    /// Stop everything that runs in the background, for quitting: AI runs
-    /// are cancelled and their agents killed (waiting up to
-    /// [`ai::SHUTDOWN_GRACE`] for the runs to remove their temp dirs), then
-    /// the poll loop stops. Nothing starts afterwards. Blocking.
+    /// Stop everything that runs in the background, for quitting: the poll
+    /// loop is told to stop, AI runs are cancelled and their agents killed
+    /// (waiting up to [`ai::SHUTDOWN_GRACE`] for the runs to remove their
+    /// temp dirs), then a refresh still under way gets at most
+    /// [`POLL_STOP_GRACE`] before it is left behind: quitting never waits
+    /// on the network. Nothing starts afterwards. Blocking.
     pub fn shutdown(&self) {
+        let poller = self.poller.lock().expect("poller lock poisoned").take();
+        if let Some((p, _)) = &poller {
+            p.request_stop();
+        }
         if !self.ai.shutdown(ai::SHUTDOWN_GRACE) {
             tracing::warn!("AI runs were still ending when Argus quit");
         }
-        self.stop_polling();
+        if let Some((p, _)) = poller {
+            if !p.stop_within(POLL_STOP_GRACE) {
+                tracing::debug!("a refresh was still under way when Argus quit");
+            }
+        }
     }
 
     /// Ask a running loop to refresh now; a no-op when not polling.

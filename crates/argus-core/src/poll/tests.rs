@@ -545,3 +545,38 @@ fn a_review_off_the_list_is_fetched_once_then_daily() {
     assert_eq!(gh.fetched(2), 5);
     assert!(store.review(review_ref(2).id()).unwrap().unwrap().listed);
 }
+
+#[test]
+fn quitting_does_not_wait_for_a_refresh_under_way() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    );
+    let reports = Arc::new(AtomicUsize::new(0));
+    let seen = reports.clone();
+    let (started, go) = gh.hold_next_fetch();
+    core.start_polling(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+    });
+    // A refresh is on the network (a hung `gh` or a slow instance).
+    started.recv().unwrap();
+    let quit = std::time::Instant::now();
+    core.shutdown();
+    assert!(
+        quit.elapsed() < Duration::from_secs(2),
+        "quit waited {:?}",
+        quit.elapsed()
+    );
+    // The refresh still ends on its own, and reports nothing after the
+    // quit.
+    go.send(()).unwrap();
+    let id = review_ref(12).id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while core.store.review(id).unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(reports.load(Ordering::SeqCst), 0);
+}
