@@ -84,6 +84,9 @@ fn fixture_routes(path: &str) -> Reply {
         {
             ok("commit_a2_diff.json")
         }
+        "/api/v4/projects/grp%2Fapp/repository/commits/a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2" => {
+            ok("commit_a2.json")
+        }
         "/api/v4/projects/grp%2Fapp/repository/compare"
             if query
                 == "from=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\
@@ -523,10 +526,10 @@ fn commit_diff_and_resolve_events() {
     let gl = provider(&base);
     let r = mr_ref(&base, 21);
     let diff = gl.commit_diff(&r, HEAD_SHA).unwrap();
-    // The diff endpoint names no parent.
+    // The diff endpoint names no parent; the commit does.
     assert_eq!(
         (diff.base_sha.as_str(), diff.head_sha.as_str()),
-        ("", HEAD_SHA)
+        ("a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1", HEAD_SHA)
     );
     let files: Vec<(&str, FileStatus)> = diff
         .files
@@ -627,8 +630,10 @@ fn a_429_backs_off_until_retry_after() {
     let gl = provider(&base);
     let start = chrono::Utc::now();
     let err = gl.current_user().unwrap_err();
+    let end = chrono::Utc::now();
     let until = gl.rate_limited_until().unwrap();
-    assert!((118..=122).contains(&(until - start).num_seconds()));
+    // 120 s from the reply, which came somewhere in the call.
+    assert!((until - start).num_seconds() >= 119 && (until - end).num_seconds() <= 121);
     let hhmm = until
         .with_timezone(&chrono::Local)
         .format("%H:%M")
@@ -683,4 +688,240 @@ fn a_hung_instance_times_out_without_retrying() {
         .contains("could not reach GitLab (timed out)"));
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
     assert_eq!(*accepted.lock().unwrap(), 1);
+}
+
+/// `n` discussions with one note each, ids `d<from>`…, as JSON.
+fn discussions(from: usize, n: usize) -> String {
+    let items: Vec<String> = (from..from + n)
+        .map(|i| {
+            format!(
+                r#"{{"id":"d{i}","notes":[{{"id":{i},"body":"note {i}","author":{{"username":"alice-fixture"}},"created_at":"2026-10-10T08:00:00Z"}}]}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+#[test]
+fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Exactly 100 discussions, then a 101st. Page 1 does not change, so the
+    // second poll gets a 304 for it, with page 1's old "no next page".
+    let grown = Arc::new(AtomicBool::new(false));
+    let flag = grown.clone();
+    let (base, _) = serve_raw(move |path, req| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        let mr21 = "/api/v4/projects/grp%2Fapp/merge_requests/21";
+        if route != format!("{mr21}/discussions") {
+            return fixture_routes(path);
+        }
+        let (tag, body) = if query.ends_with("page=1") {
+            ("p1", discussions(0, 100))
+        } else if query.ends_with("page=2") && flag.load(Ordering::SeqCst) {
+            ("p2b", discussions(100, 1))
+        } else {
+            ("p2a", "[]".to_string())
+        };
+        if req.contains(&format!("if-none-match: \"{tag}\"")) {
+            return Reply {
+                status: "304 Not Modified",
+                headers: format!("ETag: \"{tag}\"\r\n"),
+                body: String::new(),
+            };
+        }
+        Reply {
+            status: "200 OK",
+            headers: format!("ETag: \"{tag}\"\r\nX-Next-Page: \r\n"),
+            body,
+        }
+    });
+    let gl = provider(&base);
+    let r = mr_ref(&base, 21);
+    assert_eq!(gl.fetch_threads(&r).unwrap().len(), 100);
+    grown.store(true, Ordering::SeqCst);
+    let threads = gl.fetch_threads(&r).unwrap();
+    assert_eq!(threads.len(), 101);
+    assert_eq!(threads[100].id, "d100");
+}
+
+/// MR 21 with `/reviewers` and `/approvals` answered by `reviewers` and
+/// `approvals` (status, body); everything else from the fixtures.
+fn mr21_with(
+    reviewers: (&'static str, &'static str),
+    approvals: (&'static str, &'static str),
+) -> impl Fn(&str, &str) -> Reply {
+    move |path, _| {
+        let mr21 = "/api/v4/projects/grp%2Fapp/merge_requests/21";
+        let reply = |(status, body): (&'static str, &'static str)| Reply {
+            status,
+            headers: String::new(),
+            body: body.into(),
+        };
+        match path.split_once('?').map_or(path, |(r, _)| r) {
+            r if r == format!("{mr21}/reviewers") => reply(reviewers),
+            r if r == format!("{mr21}/approvals") => reply(approvals),
+            _ => fixture_routes(path),
+        }
+    }
+}
+
+const NO_APPROVALS: (&str, &str) = ("200 OK", r#"{"approved_by":[]}"#);
+
+#[test]
+fn a_failing_reviewers_call_fails_the_fetch_instead_of_guessing() {
+    // A 500 from /reviewers must not read as "requested" (the MR's plain
+    // reviewer list): that would start a false re-request round.
+    let (base, _) = serve_raw(mr21_with(("500 Internal Server Error", "{}"), NO_APPROVALS));
+    let err = provider(&base)
+        .fetch_review(&mr_ref(&base, 21))
+        .unwrap_err();
+    assert!(matches!(err, CoreError::Provider(_)), "{err:?}");
+
+    // An instance without the endpoint (404): the plain list stands in.
+    let (base, _) = serve_raw(mr21_with(("404 Not Found", "{}"), NO_APPROVALS));
+    let d = provider(&base).fetch_review(&mr_ref(&base, 21)).unwrap();
+    assert!(d.reviewers.iter().any(|r| r.is_me));
+}
+
+#[test]
+fn a_failing_approvals_call_fails_the_fetch_or_falls_back_to_reviewer_state() {
+    const I_APPROVED: (&str, &str) = (
+        "200 OK",
+        r#"[{"user":{"id":42,"username":"rev-fixture"},"state":"approved"}]"#,
+    );
+    // A 500 must not read as "approved by nobody" (clearing the approval).
+    let (base, _) = serve_raw(mr21_with(I_APPROVED, ("500 Internal Server Error", "{}")));
+    let err = provider(&base)
+        .fetch_review(&mr_ref(&base, 21))
+        .unwrap_err();
+    assert!(matches!(err, CoreError::Provider(_)), "{err:?}");
+
+    // No approvals API here (404, or 403 on a tier without it): the user's
+    // own reviewer state says it.
+    for status in ["404 Not Found", "403 Forbidden"] {
+        let (base, _) = serve_raw(mr21_with(I_APPROVED, (status, "{}")));
+        let d = provider(&base).fetch_review(&mr_ref(&base, 21)).unwrap();
+        assert!(d.approved_by_me, "{status}");
+        assert!(!d.requested_from_me);
+    }
+}
+
+#[test]
+fn the_review_diff_names_the_version_it_was_taken_at() {
+    // Asked for an older head (a1): `/diffs` is the latest version's (a2),
+    // and the diff is labelled with that version's shas.
+    let (base, _) = serve(fixture_routes);
+    let stale = DiffRange::Review {
+        base: "a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9".into(),
+        head: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1".into(),
+    };
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &stale)
+        .unwrap();
+    assert_eq!(
+        (diff.base_sha.as_str(), diff.head_sha.as_str()),
+        (BASE_SHA, HEAD_SHA)
+    );
+    assert_eq!(diff.files.len(), 6);
+}
+
+#[test]
+fn a_version_pushed_while_the_diff_loads_is_read_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    // The first versions read says a1 is the latest, the next ones a2: the
+    // diff read in between may be either, so it is read again.
+    let reads = Arc::new(AtomicUsize::new(0));
+    let count = reads.clone();
+    let (base, seen) = serve_raw(move |path, _| {
+        let versions = "/api/v4/projects/grp%2Fapp/merge_requests/21/versions";
+        if path.starts_with(versions) && count.fetch_add(1, Ordering::SeqCst) == 0 {
+            let all: Vec<serde_json::Value> =
+                serde_json::from_str(&fixture("mr_21_versions.json")).unwrap();
+            return Reply {
+                status: "200 OK",
+                headers: String::new(),
+                body: serde_json::to_string(&all[1..]).unwrap(),
+            };
+        }
+        fixture_routes(path)
+    });
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    assert_eq!(diff.head_sha, HEAD_SHA);
+    let diffs_reads = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains("/diffs?per_page=100&page=1 "))
+        .count();
+    assert_eq!(diffs_reads, 2);
+}
+
+#[test]
+fn discussions_are_read_past_twenty_pages() {
+    // 30 pages of one discussion each (the old cap was 20 pages).
+    let (base, _) = serve_raw(|path, _| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
+            return fixture_routes(path);
+        }
+        let page: usize = query
+            .rsplit_once("page=")
+            .and_then(|(_, n)| n.parse().ok())
+            .unwrap_or(1);
+        let next = if page < 30 {
+            (page + 1).to_string()
+        } else {
+            String::new()
+        };
+        Reply {
+            status: "200 OK",
+            headers: format!("X-Next-Page: {next}\r\n"),
+            body: discussions(page, 1),
+        }
+    });
+    let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
+    assert_eq!(threads.len(), 30);
+}
+
+#[test]
+fn a_failing_commented_mr_is_skipped_not_the_whole_list() {
+    let (base, _) = serve(|path| match path {
+        "/api/v4/projects/200/merge_requests/5" => status("500 Internal Server Error"),
+        _ => fixture_routes(path),
+    });
+    let list = provider(&base).list_reviews().unwrap();
+    let keys: Vec<(&str, u64)> = list.iter().map(|r| (r.repo.as_str(), r.number)).collect();
+    assert_eq!(keys, [("grp/app", 21)]);
+
+    // A rate limit still stops the listing.
+    let (base, _) = serve(|path| match path {
+        "/api/v4/projects/200/merge_requests/5" => Reply {
+            status: "429 Too Many Requests",
+            headers: "Retry-After: 60\r\n".into(),
+            body: String::new(),
+        },
+        _ => fixture_routes(path),
+    });
+    let err = provider(&base).list_reviews().unwrap_err();
+    assert!(err.to_string().contains("rate limited"), "{err}");
+}
+
+#[test]
+fn a_merged_commented_mr_is_not_fetched_again() {
+    let (base, seen) = serve(fixture_routes);
+    let gl = provider(&base);
+    gl.list_reviews().unwrap();
+    gl.list_reviews().unwrap();
+    let count = |p: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.starts_with(&format!("{p} ")))
+            .count()
+    };
+    // !8 is merged: final, read once. !5 is open: read each time.
+    assert_eq!(count("/api/v4/projects/300/merge_requests/8"), 1);
+    assert_eq!(count("/api/v4/projects/200/merge_requests/5"), 2);
 }

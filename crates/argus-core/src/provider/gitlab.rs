@@ -13,7 +13,7 @@
 //! cached body and `X-Next-Page`. A 429 stops all calls until GitLab's
 //! `Retry-After` / `RateLimit-Reset`. Requests time out (connect and total).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -43,6 +43,13 @@ const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
 /// Page size for every list call, and how many pages are followed at most.
 const PER_PAGE: u32 = 100;
 const MAX_PAGES: u32 = 20;
+/// Pages of discussions followed at most: every thread counts for rounds
+/// and the untouched count, so far past any real MR (10 000) rather than a
+/// silent cut at 2000.
+const DISCUSSION_PAGES: u32 = 100;
+
+/// How many commented-on MRs the list fetches at the same time.
+const LIST_PARALLELISM: usize = 4;
 
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
@@ -118,12 +125,26 @@ pub fn url_host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-/// Trim and drop a trailing slash; `None` when not an http(s) URL.
+/// Trim and drop a trailing slash; `None` when not an https URL, or a
+/// plain http one off this machine: every request carries the token in a
+/// header, which plain http sends in cleartext. Local http (`localhost`,
+/// `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own machine.
 pub fn normalize_base_url(url: &str) -> Option<String> {
     let url = url.trim().trim_end_matches('/');
-    let ok =
-        (url.starts_with("https://") || url.starts_with("http://")) && !url_host(url).is_empty();
+    let host = url_host(url);
+    let ok = !host.is_empty()
+        && (url.starts_with("https://") || (url.starts_with("http://") && is_local(host)));
     ok.then(|| url.to_string())
+}
+
+/// `host[:port]` names this machine.
+fn is_local(host: &str) -> bool {
+    let name = match host.strip_prefix('[') {
+        // `[::1]:8080`
+        Some(rest) => rest.split_once(']').map_or(rest, |(h, _)| h),
+        None => host.split_once(':').map_or(host, |(h, _)| h),
+    };
+    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
 }
 
 /// The longest one request may take, start to end of body.
@@ -152,6 +173,9 @@ pub struct GitlabProvider {
     /// Conditional-request cache of GETs, keyed by path under `/api/v4`.
     cache: ConditionalCache,
     limit: Backoff,
+    /// Commented-on MRs (project id, iid) seen merged or closed: final, so
+    /// the list never fetches them again. Memory only.
+    done: Mutex<HashSet<(u64, u64)>>,
 }
 
 impl GitlabProvider {
@@ -167,6 +191,7 @@ impl GitlabProvider {
             client: build_client(REQUEST_TIMEOUT),
             cache: ConditionalCache::default(),
             limit: Backoff::default(),
+            done: Mutex::new(HashSet::new()),
         })
     }
 
@@ -280,19 +305,33 @@ impl GitlabProvider {
     }
 
     /// Every page of a list endpoint, following `X-Next-Page`.
+    ///
+    /// A full page without a next one is followed anyway: a 304 replays the
+    /// header as it was when the page was cached, and a page that was the
+    /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
+    /// more items arrive after it. An empty next page ends it.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
+        self.get_pages(path, MAX_PAGES)
+    }
+
+    /// [`get_all`](Self::get_all) with its own page cap; reaching it is
+    /// logged.
+    fn get_pages<T: DeserializeOwned>(&self, path: &str, max_pages: u32) -> CoreResult<Vec<T>> {
         let sep = if path.contains('?') { '&' } else { '?' };
         let mut all = Vec::new();
         let mut page = 1;
-        for _ in 0..MAX_PAGES {
+        for _ in 0..max_pages {
             let (body, next) = self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}"))?;
             let items: Vec<T> = serde_json::from_str(&body).map_err(|_| unexpected())?;
+            let full = items.len() >= PER_PAGE as usize;
             all.extend(items);
             match next {
                 Some(n) if n > page => page = n,
-                _ => break,
+                None if full => page += 1,
+                _ => return Ok(all),
             }
         }
+        tracing::warn!("a GitLab list was cut at {max_pages} pages");
         Ok(all)
     }
 
@@ -328,6 +367,71 @@ impl GitlabProvider {
     }
 }
 
+impl GitlabProvider {
+    /// The MR's own diff, labelled with the version it is of. `/diffs` (and
+    /// `/changes`) always diff the latest version, whatever head was asked
+    /// for, so the versions are read before and after it: when the latest
+    /// is the same both times, the diff is that version's. A push in
+    /// between reads it all once more.
+    fn review_diff(&self, r: &ReviewRef, base: &str, head: &str) -> CoreResult<FileDiff> {
+        let p = Self::mr_path(r);
+        let latest = || -> CoreResult<Option<GlVersion>> {
+            // Newest first, as GitLab lists them.
+            Ok(self
+                .get_all::<GlVersion>(&format!("{p}/versions"))?
+                .into_iter()
+                .next())
+        };
+        for _ in 0..2 {
+            let before = latest()?;
+            // `/diffs` (15.7+) pages; an older instance only has the
+            // single-shot `/changes`, whose `overflow` flags a cut list and
+            // whose `diff_refs` name the version it is of.
+            let (diffs, truncated, refs) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
+                Ok(d) => {
+                    let full = d.len() >= (PER_PAGE * MAX_PAGES) as usize;
+                    (d, full, None)
+                }
+                Err(CoreError::NotFound) => {
+                    let c: GlChanges = self.get_json(&format!("{p}/changes"))?;
+                    (c.changes, c.overflow, c.diff_refs)
+                }
+                Err(e) => return Err(e),
+            };
+            let after = latest()?;
+            if before != after {
+                continue;
+            }
+            // An MR without a version has no diff either; the shas asked
+            // for are as good as any then.
+            let (base_sha, head_sha) = match (refs, after) {
+                (
+                    Some(GlDiffRefs {
+                        base_sha: Some(b),
+                        head_sha: Some(h),
+                        ..
+                    }),
+                    _,
+                ) => (b, h),
+                (_, Some(v)) => (v.base_commit_sha, v.head_commit_sha),
+                _ => (base.to_string(), head.to_string()),
+            };
+            return Ok(FileDiff {
+                files: diffs
+                    .into_iter()
+                    .map(|d| changed_file(d, &head_sha))
+                    .collect(),
+                base_sha,
+                head_sha,
+                truncated,
+            });
+        }
+        Err(CoreError::Provider(
+            "the merge request got new commits while loading its diff; try again".into(),
+        ))
+    }
+}
+
 fn unexpected() -> CoreError {
     CoreError::Provider("unexpected response from GitLab".into())
 }
@@ -353,7 +457,9 @@ impl ReviewProvider for GitlabProvider {
     /// on. GitLab has no "commented by me" filter, and scanning every open MR
     /// on a large instance for the user's notes is far too expensive, so the
     /// second half reads the user's own `commented` events of the last
-    /// [`COMMENTED_DAYS`] days and fetches the MRs they point at.
+    /// [`COMMENTED_DAYS`] days and fetches the MRs they point at, a few at
+    /// a time. One of those failing is skipped (a rate limit stops the
+    /// list), and one seen merged or closed is not fetched again.
     fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
         let me = self.me()?;
         let reviewing: Vec<GlMr> = self.get_all(&format!(
@@ -371,24 +477,61 @@ impl ReviewProvider for GitlabProvider {
         let after = (Utc::now() - chrono::Duration::days(COMMENTED_DAYS)).format("%Y-%m-%d");
         let events: Vec<GlEvent> =
             self.get_all(&format!("/events?action=commented&after={after}"))?;
+        let done = self.done.lock().expect("done lock poisoned").clone();
+        let mut wanted: Vec<(u64, u64)> = Vec::new();
         for e in events {
             let Some(note) = e.note else { continue };
             let (Some(project), Some(iid)) = (e.project_id, note.noteable_iid) else {
                 continue;
             };
-            if note.noteable_type.as_deref() != Some("MergeRequest")
-                || !known.insert((project, iid))
+            if note.noteable_type.as_deref() == Some("MergeRequest")
+                && !done.contains(&(project, iid))
+                && known.insert((project, iid))
             {
-                continue;
+                wanted.push((project, iid));
             }
-            let mr: GlMr = match self.get_json(&format!("/projects/{project}/merge_requests/{iid}"))
-            {
+        }
+        // A few at a time: one per commented MR, every poll.
+        let mut fetched: Vec<CoreResult<GlMr>> = Vec::with_capacity(wanted.len());
+        for chunk in wanted.chunks(LIST_PARALLELISM) {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(project, iid)| {
+                        s.spawn(move || {
+                            self.get_json::<GlMr>(&format!(
+                                "/projects/{project}/merge_requests/{iid}"
+                            ))
+                        })
+                    })
+                    .collect();
+                fetched.extend(handles.into_iter().map(join));
+            });
+        }
+        for ((project, iid), mr) in wanted.into_iter().zip(fetched) {
+            let mr = match mr {
                 Ok(mr) => mr,
+                // The whole provider is paused: so is the list.
+                Err(e) if super::is_rate_limited(&e) => return Err(e),
                 // Gone or no longer visible: just not listed.
                 Err(CoreError::NotFound) => continue,
-                Err(e) => return Err(e),
+                // One MR failing never costs the rest of the list; the
+                // next poll tries it again.
+                Err(e) => {
+                    tracing::debug!("skipping commented MR {project}!{iid}: {e}");
+                    continue;
+                }
             };
-            if mr.state == "opened" && !same_user(&mr.author.username, &me.username) {
+            if mr.state != "opened" {
+                // Merged or closed is final for Argus (the poll treats it
+                // so too): not fetched again.
+                self.done
+                    .lock()
+                    .expect("done lock poisoned")
+                    .insert((project, iid));
+                continue;
+            }
+            if !same_user(&mr.author.username, &me.username) {
                 list.push(self.to_ref(&mr));
             }
         }
@@ -408,12 +551,23 @@ impl ReviewProvider for GitlabProvider {
             (join(a), join(b), join(c), join(d), join(e))
         });
         let mr = mr?;
-        // Reviewer states and approvals enrich the detail; an instance or
-        // licence without them still yields a usable review.
-        let reviewers = reviewers.ok();
-        let approved_by: Vec<String> = approvals
-            .map(|a| a.approved_by.into_iter().map(|u| u.user.username).collect())
-            .unwrap_or_default();
+        // Reviewer states and approvals decide whether the review is
+        // requested and approved, so a failure fails the fetch (the stored
+        // review stays as it was) rather than guessing: a guess of
+        // "requested" starts a false re-request round, one of "approved by
+        // nobody" clears the approval. Only an instance or tier that does
+        // not have the endpoint falls back.
+        let reviewers = match reviewers {
+            Ok(r) => Some(r),
+            Err(CoreError::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        let approved_by: Option<Vec<String>> = match approvals {
+            Ok(a) => Some(a.approved_by.into_iter().map(|u| u.user.username).collect()),
+            // 403: approvals are not in this tier (the MR itself was read).
+            Err(CoreError::NotFound | CoreError::GitlabAuth) => None,
+            Err(e) => return Err(e),
+        };
         Ok(assemble_detail(
             self.to_ref(&mr),
             &me,
@@ -429,7 +583,9 @@ impl ReviewProvider for GitlabProvider {
         let p = Self::mr_path(r);
         let (mr, discussions) = std::thread::scope(|s| {
             let a = s.spawn(|| self.get_json::<GlMr>(&p));
-            let b = s.spawn(|| self.get_all::<GlDiscussion>(&format!("{p}/discussions")));
+            let b = s.spawn(|| {
+                self.get_pages::<GlDiscussion>(&format!("{p}/discussions"), DISCUSSION_PAGES)
+            });
             (join(a), join(b))
         });
         let head = mr?.head_sha();
@@ -455,26 +611,7 @@ impl ReviewProvider for GitlabProvider {
             DiffRange::Review { base, head } => {
                 check_sha(base)?;
                 check_sha(head)?;
-                let p = Self::mr_path(r);
-                // `/diffs` (15.7+) pages; an older instance only has the
-                // single-shot `/changes`, whose `overflow` flags a cut list.
-                let (diffs, truncated) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
-                    Ok(d) => {
-                        let full = d.len() >= (PER_PAGE * MAX_PAGES) as usize;
-                        (d, full)
-                    }
-                    Err(CoreError::NotFound) => {
-                        let c: GlChanges = self.get_json(&format!("{p}/changes"))?;
-                        (c.changes, c.overflow)
-                    }
-                    Err(e) => return Err(e),
-                };
-                Ok(FileDiff {
-                    files: diffs.into_iter().map(|d| changed_file(d, head)).collect(),
-                    base_sha: base.clone(),
-                    head_sha: head.clone(),
-                    truncated,
-                })
+                self.review_diff(r, base, head)
             }
             DiffRange::Compare { from, to } => {
                 check_sha(from)?;
@@ -564,15 +701,30 @@ impl ReviewProvider for GitlabProvider {
 
     // --- M3: thread history ---
 
+    /// The diff endpoint names no parent, so the commit itself is read
+    /// alongside for its first `parent_ids` entry: without it the walk
+    /// cannot tell a merged side branch from a line of commits.
     fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
         check_sha(sha)?;
-        let diffs: Vec<GlDiff> = self.get_all(&format!(
-            "/projects/{}/repository/commits/{sha}/diff",
+        let commit = format!(
+            "/projects/{}/repository/commits/{sha}",
             encode_segment(&r.repo)
-        ))?;
+        );
+        let (diffs, parent) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.get_all::<GlDiff>(&format!("{commit}/diff")));
+            let b = s.spawn(|| self.get_json::<GlCommitParents>(&commit));
+            (join(a), join(b))
+        });
+        let diffs = diffs?;
+        let parent = match parent {
+            Ok(c) => c.parent_ids.into_iter().next().unwrap_or_default(),
+            // Not readable on its own: no parent named (the walk then diffs
+            // directly).
+            Err(CoreError::NotFound) => String::new(),
+            Err(e) => return Err(e),
+        };
         Ok(FileDiff {
-            // The diff endpoint names no parent.
-            base_sha: String::new(),
+            base_sha: parent,
             head_sha: sha.to_string(),
             truncated: diffs.len() >= (PER_PAGE * MAX_PAGES) as usize,
             files: diffs.into_iter().map(|d| changed_file(d, sha)).collect(),
@@ -584,8 +736,10 @@ impl ReviewProvider for GitlabProvider {
     /// instance that does not send `resolved_at` has no time and is left
     /// out.
     fn thread_resolutions(&self, r: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
-        let discussions: Vec<GlResolveDiscussion> =
-            self.get_all(&format!("{}/discussions", Self::mr_path(r)))?;
+        let discussions: Vec<GlResolveDiscussion> = self.get_pages(
+            &format!("{}/discussions", Self::mr_path(r)),
+            DISCUSSION_PAGES,
+        )?;
         Ok(discussions
             .into_iter()
             .filter_map(|d| {
@@ -683,8 +837,17 @@ fn assemble_detail(
     commits: Vec<GlCommit>,
     versions: Vec<GlVersion>,
     reviewers: Option<Vec<GlReviewer>>,
-    approved_by: Vec<String>,
+    approved_by: Option<Vec<String>>,
 ) -> ReviewDetail {
+    // Without the approvals API, the user's own reviewer state says it.
+    let approved_by = approved_by.unwrap_or_else(|| {
+        reviewers
+            .iter()
+            .flatten()
+            .filter(|r| reviewer_state(&r.state) == ReviewerState::Approved)
+            .map(|r| r.user.username.clone())
+            .collect()
+    });
     let i_approved = approved_by.iter().any(|u| same_user(u, me));
     let (mut list, requested_from_me) = match reviewers {
         Some(rs) => {
@@ -929,7 +1092,14 @@ struct GlCommit {
     authored_date: Option<DateTime<Utc>>,
 }
 
+/// A commit, for its parents.
 #[derive(Deserialize)]
+struct GlCommitParents {
+    #[serde(default)]
+    parent_ids: Vec<String>,
+}
+
+#[derive(Deserialize, PartialEq, Eq)]
 struct GlVersion {
     head_commit_sha: String,
     base_commit_sha: String,
@@ -1032,6 +1202,8 @@ struct GlChanges {
     changes: Vec<GlDiff>,
     #[serde(default)]
     overflow: bool,
+    #[serde(default)]
+    diff_refs: Option<GlDiffRefs>,
 }
 
 #[derive(Deserialize)]
@@ -1285,6 +1457,11 @@ mod tests {
             GitlabProvider::new("", StaticToken("t".into())),
             Err(CoreError::GitlabNotConfigured)
         ));
+        // A hand-edited settings file with plain http is refused too.
+        assert!(
+            GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_err()
+        );
+        assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
     }
 
     #[test]

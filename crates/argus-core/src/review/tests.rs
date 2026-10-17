@@ -34,7 +34,8 @@ fn first_sight_needs_review() {
 fn mark_reviewed_moves_the_watermark_and_waits_on_the_author() {
     let (r, d) = reviewed();
     assert_eq!(r.last_reviewed_sha.as_deref(), Some("h1"));
-    assert_eq!(r.last_reviewed_at, Some(at(10, 12)));
+    // Dated by what the user saw: the fetch at 10:10, not the click.
+    assert_eq!(r.last_reviewed_at, Some(at(10, 10)));
     assert_eq!(r.status, ReviewStatus::WaitingOnAuthor);
     // Still waiting after a refresh that brings nothing new, even though
     // the platform still lists the user as requested.
@@ -327,4 +328,47 @@ fn untouched_threads_with_line_walks() {
         ..input("h3", Some("h1"))
     };
     assert_eq!(untouched_with(&input, Some(&touches)), 0);
+}
+
+#[test]
+fn a_reply_between_the_last_fetch_and_the_click_still_counts() {
+    // Fetched at 10:10 with the user's own thread; the author replies at
+    // 10:30 (not fetched yet); the user marks it reviewed at 11:00.
+    let d = detail("h1");
+    let mine = thread("1", ME, "h1", vec![note("1", ME, at(10, 9))]);
+    let fetched = step(None, &d, std::slice::from_ref(&mine), at(10, 10));
+    let done = mark_reviewed(&fetched, std::slice::from_ref(&mine), at(11, 0));
+    assert_eq!(done.last_reviewed_at, Some(at(10, 10)));
+    assert_eq!(done.status, ReviewStatus::WaitingOnAuthor);
+
+    let mut replied = mine.clone();
+    replied.notes.push(note(
+        "2",
+        AUTHOR,
+        at(10, 10) + chrono::Duration::minutes(20),
+    ));
+    let next = step(Some(&done), &d, &[replied], at(11, 3));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::AuthorReplied]);
+}
+
+#[test]
+fn a_note_the_user_saw_is_never_after_the_watermark() {
+    // The poll started at 10:10, but the fetch already held a reply made at
+    // 10:11 (it was on the network meanwhile): the user saw it.
+    let d = detail("h1");
+    let seen = thread(
+        "1",
+        ME,
+        "h1",
+        vec![note("1", ME, at(10, 9)), note("2", AUTHOR, at(10, 11))],
+    );
+    let fetched = step(None, &d, std::slice::from_ref(&seen), at(10, 10));
+    let done = mark_reviewed(&fetched, std::slice::from_ref(&seen), at(12, 0));
+    assert_eq!(done.last_reviewed_at, Some(at(10, 11)));
+    assert_eq!(done.status, ReviewStatus::WaitingOnAuthor);
+    // Never later than the click itself.
+    let click = at(10, 10) + chrono::Duration::seconds(30);
+    let early = mark_reviewed(&fetched, &[seen], click);
+    assert_eq!(early.last_reviewed_at, Some(click));
 }

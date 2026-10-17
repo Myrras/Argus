@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::{CoreError, CoreResult};
 use crate::history::LineHistorySource;
@@ -93,12 +93,28 @@ fn is_sha(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Clones already checked to be usable, by (git, dir), with whether each
-/// is a partial clone. Positives only: a path that was not a repository may
-/// become one.
-fn checked() -> &'static Mutex<HashMap<(PathBuf, PathBuf), bool>> {
-    static CHECKED: OnceLock<Mutex<HashMap<(PathBuf, PathBuf), bool>>> = OnceLock::new();
+/// One remembered clone check: whether the clone is partial, and the
+/// modification time of its config when checked.
+type Checked = (Option<SystemTime>, bool);
+
+/// Clones already checked to be usable, by (git, dir). Positives only: a
+/// path that was not a repository may become one. A check stands only
+/// while the clone's config is unchanged (see [`config_stamp`]): the same
+/// directory re-cloned with a filter is partial now.
+fn checked() -> &'static Mutex<HashMap<(PathBuf, PathBuf), Checked>> {
+    static CHECKED: OnceLock<Mutex<HashMap<(PathBuf, PathBuf), Checked>>> = OnceLock::new();
     CHECKED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// When `dir`'s `.git/config` last changed: cloning (again), or making a
+/// clone partial, rewrites it. `None` when there is no such file (a
+/// worktree's `.git` is a file pointing elsewhere): checked on every open.
+fn config_stamp(dir: &Path) -> Option<SystemTime> {
+    std::fs::metadata(dir.join(".git").join("config"))
+        .ok()
+        .filter(|m| m.is_file())?
+        .modified()
+        .ok()
 }
 
 /// What a git command returned.
@@ -259,7 +275,8 @@ fn run(
     }
 }
 
-/// A usable local clone. Cheap to open (the check is remembered per path);
+/// A usable local clone. Cheap to open (the check is remembered per path
+/// while its config is unchanged);
 /// the commit lookups and diffs it reads are memoised for its lifetime, so
 /// open one per computation and share it between the threads of a review.
 pub struct LocalClone {
@@ -315,19 +332,21 @@ impl LocalClone {
             diffs: Mutex::new(HashMap::new()),
         };
         let key = (git.to_path_buf(), dir.to_path_buf());
+        let stamp = config_stamp(dir);
         let known = checked()
             .lock()
             .expect("clone check lock")
             .get(&key)
-            .copied();
+            .copied()
+            .filter(|(at, _)| at.is_some() && *at == stamp);
         clone.partial = match known {
-            Some(partial) => partial,
+            Some((_, partial)) => partial,
             None => match clone.check(version) {
                 Ok(partial) => {
                     checked()
                         .lock()
                         .expect("clone check lock")
-                        .insert(key, partial);
+                        .insert(key, (stamp, partial));
                     partial
                 }
                 Err(why) => {

@@ -27,7 +27,8 @@ fn fixtures() -> PathBuf {
 /// blank line, the body. Each fixture's ETag is `"fx-<file name>"`; a
 /// request naming it gets a 304 (logged as `304 <path>`), as GitHub answers
 /// an unchanged resource. Pages link to the next through `Link`. A
-/// `graphql-down` file next to the log makes GraphQL fail.
+/// `graphql-down` file next to the log makes GraphQL fail, a
+/// `compare-down` file every compare (a PR too large to compare).
 const FAKE: &str = r##"
 echo "$* token=${GH_TOKEN:-none} ent=${GH_ENTERPRISE_TOKEN:-none} host=${GH_HOST:-none}" >> "$LOG"
 case "$*" in
@@ -59,6 +60,13 @@ while [ $# -gt 0 ]; do
     *) path="$1"; shift ;;
   esac
 done
+case "$path" in
+  */compare/*)
+    if [ -e "${LOG%/*}/compare-down" ]; then
+      printf 'HTTP/2.0 500 Internal Server Error\r\n\r\n{"message":"Server Error"}'
+      echo "gh: HTTP 500" >&2; exit 1
+    fi ;;
+esac
 # respond FILE [NEXT-PAGE-QUERY]
 respond() {
   tag="\"fx-${1##*/}\""
@@ -571,8 +579,16 @@ fn a_second_poll_sends_the_etags_and_replays_the_304s() {
     };
     let first = poll();
     let calls = fake.calls();
-    assert!(!calls.contains("If-None-Match"));
-    assert!(!calls.contains("304 "));
+    // Within the first poll only the PR itself is read again (detail, and
+    // around the files): already a 304.
+    let repeats: Vec<&str> = calls.lines().filter(|l| l.starts_with("304 ")).collect();
+    assert!(!repeats.is_empty());
+    assert!(
+        repeats
+            .iter()
+            .all(|l| *l == "304 repos/acme-fixture/widgets/pulls/12"),
+        "{repeats:?}"
+    );
 
     let second = poll();
     // Exactly what a full fetch gave.
@@ -697,10 +713,16 @@ fn a_secondary_rate_limit_waits_for_retry_after() {
     let gh = fake.provider("github.com", None);
     let start = chrono::Utc::now();
     let err = gh.current_user().unwrap_err();
+    let end = chrono::Utc::now();
     assert!(err.to_string().contains("GitHub is rate limited until"));
     let until = gh.rate_limited_until().unwrap();
-    let wait = (until - start).num_seconds();
-    assert!((88..=92).contains(&wait), "{wait}");
+    // 90 s from the reply, which came somewhere in the call (a slow
+    // machine can take seconds to run the fake).
+    let (from_start, from_end) = ((until - start).num_seconds(), (until - end).num_seconds());
+    assert!(
+        from_start >= 89 && from_end <= 91,
+        "{from_start} {from_end}"
+    );
 }
 
 #[test]
@@ -714,4 +736,110 @@ fn a_hung_gh_is_killed_after_the_timeout() {
     let err = gh.fetch_review(&widgets_12()).unwrap_err();
     assert!(err.to_string().contains("gh did not answer in time"));
     assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// A fake `gh` serving PR 12's review comments from `page1.json` and
+/// `page2.json` next to its log, with an ETag per file content and a 304
+/// for a request that names it; GraphQL is down.
+const PAGED: &str = r##"
+echo "$*" >> "$LOG"
+case "$*" in "auth token"*) exit 1 ;; "api graphql "*) exit 1 ;; esac
+[ "$1 $2" = "api -i" ] || exit 1
+shift 2
+inm=""; path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -H) inm="${2#If-None-Match: }"; shift 2 ;;
+    --jq) shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+D="${LOG%/*}"
+case "$path" in
+  "repos/acme-fixture/widgets/pulls/12/comments?per_page=100") f="$D/page1.json" ;;
+  "repos/acme-fixture/widgets/pulls/12/comments?per_page=100&page=2") f="$D/page2.json" ;;
+  *) printf 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}'; exit 1 ;;
+esac
+tag="\"fx-$(cksum < "$f" | cut -d' ' -f1)\""
+if [ "$inm" = "$tag" ]; then
+  printf 'HTTP/2.0 304 Not Modified\r\nEtag: %s\r\n\r\n' "$tag"; exit 1
+fi
+printf 'HTTP/2.0 200 OK\r\nEtag: %s\r\n\r\n' "$tag"
+cat "$f"
+"##;
+
+/// `n` root review comments with ids from `from`, as JSON.
+fn comments(from: u64, n: u64) -> String {
+    let items: Vec<String> = (from..from + n)
+        .map(|i| {
+            format!(
+                r#"{{"id":{i},"in_reply_to_id":null,"user":{{"login":"alice-fixture"}},"body":"c{i}","created_at":"2026-10-10T08:00:00Z","path":"src/cache.rs","position":1,"line":1,"side":"RIGHT","commit_id":"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3","original_commit_id":"c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
+    let fake = script(PAGED);
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    std::fs::write(dir.join("page1.json"), comments(1, 100)).unwrap();
+    std::fs::write(dir.join("page2.json"), "[]").unwrap();
+    let gh = fake.provider("github.com", None);
+    assert_eq!(gh.fetch_threads(&widgets_12()).unwrap().len(), 100);
+    // A 101st comment: page 1 is unchanged (a 304 replaying "no next").
+    std::fs::write(dir.join("page2.json"), comments(101, 1)).unwrap();
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    assert_eq!(threads.len(), 101);
+    assert_eq!(threads[100].id, "101");
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_review_diff_names_the_head_it_was_taken_at() {
+    // The stored head is behind: the PR moved to c3 since the last poll.
+    // `pulls/{n}/files` is always the PR as it is now, so the diff is c3's,
+    // and says so.
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let stale = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2";
+    let diff = gh
+        .fetch_files(
+            &widgets_12(),
+            &DiffRange::Review {
+                base: BASE.into(),
+                head: stale.into(),
+            },
+        )
+        .unwrap();
+    assert_eq!(diff.head_sha, HEAD);
+    assert_eq!(diff.base_sha, "b".repeat(40));
+    assert_eq!(diff.files.len(), 6);
+    // The merge base is taken against the PR's own base and head.
+    assert!(fake.calls().contains(&format!(
+        "repos/acme-fixture/widgets/compare/{BASE}...{HEAD}"
+    )));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_pr_too_large_to_compare_still_lists_its_files() {
+    let fake = script(FAKE);
+    std::fs::write(fake.log.parent().unwrap().join("compare-down"), "").unwrap();
+    let gh = fake.provider("github.com", None);
+    let diff = gh
+        .fetch_files(
+            &widgets_12(),
+            &DiffRange::Review {
+                base: BASE.into(),
+                head: HEAD.into(),
+            },
+        )
+        .unwrap();
+    // No merge base to be had: the PR's base stands in for it.
+    assert_eq!(diff.base_sha, BASE);
+    assert_eq!(diff.head_sha, HEAD);
+    assert_eq!(diff.files.len(), 6);
 }

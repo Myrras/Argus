@@ -19,10 +19,9 @@
 //! per PR (REST has none).
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write as _};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -37,6 +36,7 @@ use super::model::{
 use super::rate_limit::{default_reset, reset_at, Backoff};
 use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
+use crate::platform::{run_with_timeout, ExecError};
 use crate::post::{sanitize, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
 
 /// Upper bound per search; a reviewer with more than this many open PRs in
@@ -49,7 +49,10 @@ const SEARCH_FIELDS: &str = "number,title,url,repository,author,updatedAt";
 const PULL_FILES_LIMIT: usize = 3000;
 const COMPARE_FILES_LIMIT: usize = 300;
 
-/// Pages followed at most per list (100 each: past the 3000-file cap).
+/// Page size of every list read.
+const PER_PAGE: usize = 100;
+/// Pages followed at most per list ([`PER_PAGE`] each: past the 3000-file
+/// cap).
 const MAX_PAGES: usize = 40;
 
 /// How long one `gh` call may run before it is killed. Generous: a large
@@ -355,19 +358,35 @@ impl GithubProvider {
     /// Every page of a list endpoint, one conditional request each, following
     /// the `Link` header's `rel="next"` (its query only: the host stays the
     /// one `gh` is set up for).
+    ///
+    /// A full page (an array of [`PER_PAGE`]) without a next link is
+    /// followed anyway: a 304 replays the link as it was when the page was
+    /// cached, and a last page of exactly [`PER_PAGE`] stays unchanged (a
+    /// 304) when more items arrive after it. An empty next page ends it.
     fn pages(&self, path: &str) -> CoreResult<Vec<String>> {
         let (base, query) = path.split_once('?').unwrap_or((path, ""));
-        let mut url = if query.is_empty() {
-            format!("{base}?per_page=100")
+        let first = if query.is_empty() {
+            format!("{base}?per_page={PER_PAGE}")
         } else {
-            format!("{base}?{query}&per_page=100")
+            format!("{base}?{query}&per_page={PER_PAGE}")
         };
+        let mut url = first.clone();
+        let mut number = 1;
         let mut bodies = Vec::new();
         for _ in 0..MAX_PAGES {
             let page = self.get(&url, None)?;
+            let full = serde_json::from_str::<Vec<serde::de::IgnoredAny>>(&page.body)
+                .is_ok_and(|items| items.len() >= PER_PAGE);
             bodies.push(page.body);
             match page.next {
-                Some(q) if format!("{base}?{q}") != url => url = format!("{base}?{q}"),
+                Some(q) if format!("{base}?{q}") != url => {
+                    number = page_number(&q).unwrap_or(number + 1);
+                    url = format!("{base}?{q}");
+                }
+                None if full => {
+                    number += 1;
+                    url = format!("{first}&page={number}");
+                }
                 _ => break,
             }
         }
@@ -473,19 +492,71 @@ impl GithubProvider {
     }
 }
 
-fn unexpected() -> CoreError {
-    CoreError::Provider("unexpected response from gh".into())
+impl GithubProvider {
+    /// The PR's own diff, labelled with the head it is of. `pulls/{n}/files`
+    /// is always the PR as it is now, whatever head was asked for, so the
+    /// PR is read before and after the files (conditional: normally two
+    /// 304s); the same head both times is the files' head. A push in
+    /// between reads it all once more.
+    ///
+    /// The files are diffed from the merge base (three-dot), not from the
+    /// base branch tip the PR reports: the compare API of the PR's own base
+    /// and head names that commit. When GitHub cannot compare (a PR too
+    /// large for it), the PR's base commit stands in.
+    fn review_diff(&self, r: &ReviewRef) -> CoreResult<FileDiff> {
+        let pull_path = format!("repos/{}/pulls/{}", r.repo, r.number);
+        for _ in 0..2 {
+            let pull: GhPull = self.api(&pull_path)?;
+            let (base, head) = (pull.base.sha, pull.head.sha);
+            check_sha(&base).map_err(|_| unexpected())?;
+            check_sha(&head).map_err(|_| unexpected())?;
+            let (files, merge_base) = std::thread::scope(|s| {
+                let a = s.spawn(|| self.api_list::<GhFile>(&format!("{pull_path}/files")));
+                let b = s.spawn(|| {
+                    self.get(
+                        &format!("repos/{}/compare/{base}...{head}", r.repo),
+                        Some(".merge_base_commit.sha"),
+                    )
+                });
+                (join(a), join(b))
+            });
+            let files = files?;
+            let merge_base = match merge_base {
+                Ok(page) => {
+                    let sha = page.body.trim().to_string();
+                    check_sha(&sha).map_err(|_| unexpected())?;
+                    sha
+                }
+                // GitHub gives up comparing a very large PR (a server
+                // error or a timeout) while its files still list. The
+                // base branch commit the PR reports is the closest left
+                // side then: the merge base itself while the branch is
+                // up to date with its base.
+                Err(e @ CoreError::Provider(_)) if !super::is_rate_limited(&e) => {
+                    tracing::debug!("no merge base for a large PR; using its base commit");
+                    base.clone()
+                }
+                Err(e) => return Err(e),
+            };
+            let after: GhPull = self.api(&pull_path)?;
+            if after.head.sha != head {
+                continue;
+            }
+            return Ok(FileDiff {
+                base_sha: merge_base,
+                head_sha: head,
+                truncated: files.len() >= PULL_FILES_LIMIT,
+                files: files.into_iter().map(changed_file).collect(),
+            });
+        }
+        Err(CoreError::Provider(
+            "the pull request got new commits while loading its diff; try again".into(),
+        ))
+    }
 }
 
-/// Why a `gh` process gave no output.
-#[derive(Debug)]
-enum ExecError {
-    /// The program is not there.
-    Missing,
-    /// It could not be started (or waited on).
-    Failed,
-    /// Killed after the timeout.
-    TimedOut,
+fn unexpected() -> CoreError {
+    CoreError::Provider("unexpected response from gh".into())
 }
 
 impl From<ExecError> for CoreError {
@@ -496,66 +567,6 @@ impl From<ExecError> for CoreError {
             ExecError::TimedOut => CoreError::Provider("gh did not answer in time".into()),
         }
     }
-}
-
-/// Run `cmd` to completion with `input` on stdin, or kill it once `timeout`
-/// has passed. Both pipes are drained on their own threads so a large output
-/// never stalls the child; on a timeout those threads are left to end when
-/// the pipes close.
-fn run_with_timeout(
-    cmd: &mut Command,
-    input: Option<Vec<u8>>,
-    timeout: Duration,
-) -> Result<Output, ExecError> {
-    if input.is_some() {
-        cmd.stdin(Stdio::piped());
-    }
-    let mut child = cmd.spawn().map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => ExecError::Missing,
-        _ => ExecError::Failed,
-    })?;
-    if let (Some(data), Some(mut stdin)) = (input, child.stdin.take()) {
-        // gh reads all of stdin before it sends anything. A write error means
-        // gh exited early; its status says why.
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&data);
-        });
-    }
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
-    let deadline = Instant::now() + timeout;
-    let mut pause = Duration::from_millis(1);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                tracing::debug!("gh timed out after {timeout:?}");
-                return Err(ExecError::TimedOut);
-            }
-            Ok(None) => {
-                std::thread::sleep(pause);
-                pause = (pause * 2).min(Duration::from_millis(25));
-            }
-            Err(_) => return Err(ExecError::Failed),
-        }
-    };
-    Ok(Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
-}
-
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut p) = pipe {
-            let _ = p.read_to_end(&mut buf);
-        }
-        buf
-    })
 }
 
 /// One REST page: its body and the query of the next page, if any.
@@ -627,6 +638,14 @@ fn next_query(link: &str) -> Option<String> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b"=&_-.%+,:".contains(&b))
         .then(|| query.to_string())
+}
+
+/// The `page=` number of a next-page query.
+fn page_number(query: &str) -> Option<usize> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("page="))
+        .and_then(|n| n.parse().ok())
 }
 
 /// The REST id in a review comment URL (`…/pull/12#discussion_r501`).
@@ -764,33 +783,7 @@ impl ReviewProvider for GithubProvider {
             DiffRange::Review { base, head } => {
                 check_sha(base)?;
                 check_sha(head)?;
-                // The PR's files are diffed from the merge base (three-dot),
-                // not from the base branch tip the PR reports: the compare
-                // API names that commit.
-                let (files, merge_base) = std::thread::scope(|s| {
-                    let a = s.spawn(|| {
-                        self.api_list::<GhFile>(&format!(
-                            "repos/{}/pulls/{}/files",
-                            r.repo, r.number
-                        ))
-                    });
-                    let b = s.spawn(|| {
-                        self.get(
-                            &format!("repos/{}/compare/{base}...{head}", r.repo),
-                            Some(".merge_base_commit.sha"),
-                        )
-                    });
-                    (join(a), join(b))
-                });
-                let files = files?;
-                let merge_base = merge_base?.body.trim().to_string();
-                check_sha(&merge_base).map_err(|_| unexpected())?;
-                Ok(FileDiff {
-                    base_sha: merge_base,
-                    head_sha: head.clone(),
-                    truncated: files.len() >= PULL_FILES_LIMIT,
-                    files: files.into_iter().map(changed_file).collect(),
-                })
+                self.review_diff(r)
             }
             DiffRange::Compare { from, to } => {
                 check_sha(from)?;
@@ -900,8 +893,11 @@ fn changed_file(f: GhFile) -> ChangedFile {
         _ => FileStatus::Modified,
     };
     let no_patch = f.patch.is_none();
+    // Only a "modified" file with no patch and no lines is a binary by
+    // that alone: "changed" (a mode change), "copied" and "unchanged" also
+    // map to Modified and send no patch, but have no content change.
     let binary =
-        no_patch && f.changes == 0 && (status == FileStatus::Modified || looks_binary(&f.filename));
+        no_patch && f.changes == 0 && (f.status == "modified" || looks_binary(&f.filename));
     ChangedFile {
         old_path: f
             .previous_filename
@@ -1471,6 +1467,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_mode_only_change_is_not_a_binary() {
+        let file = |status: &str, name: &str| GhFile {
+            filename: name.into(),
+            status: status.into(),
+            sha: Some("f1".repeat(20)),
+            additions: 0,
+            deletions: 0,
+            changes: 0,
+            patch: None,
+            previous_filename: None,
+        };
+        // chmod +x: status "changed", no patch, no lines.
+        let chmod = changed_file(file("changed", "scripts/run.sh"));
+        assert!(!chmod.binary && !chmod.too_large);
+        assert_eq!(chmod.status, FileStatus::Modified);
+        // A pure rename or copy is no binary either.
+        assert!(!changed_file(file("copied", "src/a.rs")).binary);
+        // A modified file without a patch or lines is.
+        assert!(changed_file(file("modified", "assets/blob")).binary);
+        // A binary type whatever the status.
+        assert!(changed_file(file("changed", "assets/logo.png")).binary);
+    }
+
+    #[test]
     fn parses_concatenated_pages() {
         let v: Vec<u32> = parse_pages("[1,2]\n[3]").unwrap();
         assert_eq!(v, [1, 2, 3]);
@@ -1538,19 +1558,6 @@ mod tests {
             root_comment_id("https://github.com/o/r/pull/12#discussion_rx"),
             None
         );
-    }
-
-    #[test]
-    fn times_out_a_hung_process() {
-        #[cfg(unix)]
-        {
-            let start = Instant::now();
-            let mut cmd = Command::new("sleep");
-            cmd.arg("5").stdout(Stdio::piped()).stderr(Stdio::piped());
-            let r = run_with_timeout(&mut cmd, None, Duration::from_millis(100));
-            assert!(matches!(r, Err(ExecError::TimedOut)));
-            assert!(start.elapsed() < Duration::from_secs(3));
-        }
     }
 
     #[test]

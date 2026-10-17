@@ -24,9 +24,9 @@ pub trait LineHistorySource: Sync {
 
     /// What one commit changed, against its first parent.
     /// [`FileDiff::base_sha`] is that parent when known (empty otherwise):
-    /// a parent that is not the previous commit of the walk means the
-    /// commits do not form one line (a merged side branch) and the walk
-    /// falls back to [`direct_diff`](Self::direct_diff).
+    /// a parent that is not the previous commit of the walk, or none named,
+    /// means the commits are not proven to form one line (a merged side
+    /// branch) and the walk falls back to [`direct_diff`](Self::direct_diff).
     fn commit_diff(&self, sha: &str) -> CoreResult<FileDiff>;
 
     /// The plain diff from `from` to `to`, or `None` when the source cannot
@@ -101,7 +101,11 @@ pub fn walk_line(
                 break;
             }
             let diff = source.commit_diff(sha)?;
-            if !diff.base_sha.is_empty() && diff.base_sha != prev {
+            // Only a named parent that is the previous commit proves one
+            // line of commits. A merge of a side branch repeats the
+            // branch's changes in its own diff, so taking an unnamed parent
+            // for linear would count them twice.
+            if diff.base_sha != prev {
                 linear = false;
                 break;
             }

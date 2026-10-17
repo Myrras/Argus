@@ -223,7 +223,9 @@ pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> 
 /// then the review is classified.
 ///
 /// - `approved_at` is set (once) while the user's approval stands, and
-///   cleared when the platform no longer shows it.
+///   cleared when the platform no longer shows it — unless it was stored
+///   after `now` (the fetch's start): an approval from Argus the fetch could
+///   not see yet.
 /// - A re-request is a transition: requested now, not requested at the last
 ///   fetch. A request that never went away (the user reviewed in Argus but
 ///   not on the platform) is not one.
@@ -251,10 +253,13 @@ pub fn advance_with(
     now: DateTime<Utc>,
     touches: Option<&LineTouches>,
 ) -> ReviewRecord {
+    // `now` is when the fetch started: an approval stored after that (from
+    // Argus, while this fetch was on its way) is newer than what the fetch
+    // saw, so it stands until a fetch that started later disagrees.
     let approved_at = if detail.approved_by_me {
         prev.and_then(|p| p.approved_at).or(Some(now))
     } else {
-        None
+        prev.and_then(|p| p.approved_at).filter(|a| *a > now)
     };
     let rerequested_at = match prev {
         Some(p) if detail.requested_from_me && !p.requested => Some(now),
@@ -302,17 +307,30 @@ pub fn advance_with(
     }
 }
 
-/// The user finished this round: the watermark moves to the current head
-/// and `now`, and the review is classified again (normally to
+/// The user finished this round: the watermark moves to the current head,
+/// and the review is classified again (normally to
 /// [`ReviewStatus::WaitingOnAuthor`]).
+///
+/// The watermark's time is what the user saw, not the click: the last
+/// stored fetch (`fetched_at`), or the newest stored note when that is later
+/// (a fetch holds notes made while it was on the network), never past `now`.
+/// A reply that came in between the last fetch and the click is then after
+/// the watermark and starts a round once fetched, instead of being taken as
+/// seen.
 pub fn mark_reviewed(
     record: &ReviewRecord,
     threads: &[Thread],
     now: DateTime<Utc>,
 ) -> ReviewRecord {
+    let newest_note = threads
+        .iter()
+        .flat_map(|t| &t.notes)
+        .map(|n| n.created_at)
+        .max();
+    let seen = newest_note.map_or(record.fetched_at, |n| n.max(record.fetched_at));
     let mut next = record.clone();
     next.last_reviewed_sha = Some(record.head_sha.clone());
-    next.last_reviewed_at = Some(now);
+    next.last_reviewed_at = Some(seen.min(now));
     let round = classify(&RoundInput {
         state: next.state,
         head_sha: &next.head_sha,

@@ -13,6 +13,7 @@ use crate::provider::{
     ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, ProviderId, ReviewDetail,
     ReviewProvider, ReviewRef, Side, Thread,
 };
+use crate::review::ReviewStatus;
 use crate::store::Store;
 use crate::testutil::{at, detail, note, thread, AUTHOR, ME};
 use crate::Core;
@@ -485,6 +486,25 @@ fn rewritten_or_branched_history_uses_one_direct_diff() {
     )
     .unwrap();
     assert_eq!(where_(&m), located("a.rs", 6, 6));
+}
+
+#[test]
+fn a_commit_that_names_no_parent_is_not_taken_as_linear() {
+    // c2 names no parent (GitLab's commit diff did not): it may merge a
+    // side branch, whose changes c2's own diff repeats, so walking commit by
+    // commit would count the insertion twice. The direct diff decides.
+    let mut src = MemSource::new(vec![
+        ("c1", vec![changed("a.rs", "@@ -0,0 +1 @@\n+x")]),
+        ("c2", vec![changed("a.rs", "@@ -0,0 +1 @@\n+x")]),
+    ]);
+    src.diffs.get_mut("c2").unwrap().base_sha = String::new();
+    src.direct.insert(
+        ("c0".into(), "c2".into()),
+        diff("c0", "c2", vec![changed("a.rs", "@@ -0,0 +1 @@\n+x")]),
+    );
+    let m = walk_line(&src, &start("a.rs", 5, 5), "c2").unwrap();
+    assert_eq!(where_(&m), located("a.rs", 6, 6));
+    assert!(!m.attributed);
 }
 
 // -------------------------------------------------------------- snapshots
@@ -1133,4 +1153,173 @@ fn a_stored_thread_knows_its_review() {
     for t in core.threads(rec.id).unwrap() {
         assert_eq!(core.thread_review(t.thread_id).unwrap(), rec.id);
     }
+}
+
+#[test]
+fn a_history_call_over_a_stale_record_keeps_the_round_and_the_watermark() {
+    let repo = repo();
+    // Head at c2: the walk turns the untouched count from 0 to 1.
+    {
+        let mut d = repo.detail.lock().unwrap();
+        d.head_sha = "c2".into();
+        d.commits.truncate(2);
+    }
+    let core = core_over(&repo);
+    let stale = core.reviews().unwrap()[0].clone();
+    assert_eq!(stale.status, ReviewStatus::NeedsReview);
+    // The user marks it reviewed while a history call holds the old record.
+    let marked = core.mark_reviewed(stale.id).unwrap();
+    assert_eq!(marked.status, ReviewStatus::WaitingOnAuthor);
+
+    let provider: CoreResult<Arc<dyn ReviewProvider>> = Ok(repo.clone());
+    super::api::compute_histories(&core.store, &stale, &provider, None, None).unwrap();
+    let rec = core.review(stale.id).unwrap();
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("c2"));
+    assert_eq!(rec.round, marked.round);
+    // Counted against the stored watermark (at head: nothing touched since).
+    assert_eq!(rec.untouched_threads, 1);
+
+    // Walks for a head the review no longer has never write the count.
+    let mut old = rec.clone();
+    old.head_sha = "c1".into();
+    old.untouched_threads = 7;
+    core.store
+        .set_round(rec.id, rec.round, &rec.round_reasons, rec.status, 0)
+        .unwrap();
+    super::api::compute_histories(&core.store, &old, &provider, None, None).unwrap();
+    assert_eq!(core.review(rec.id).unwrap().untouched_threads, 0);
+}
+
+/// [`Repo`], but the review's threads vanish from the store when the
+/// computation fetches the review: a poll that dropped them meanwhile.
+struct Vanishing {
+    repo: Arc<Repo>,
+    store: Arc<Store>,
+    review: crate::ids::ReviewId,
+}
+
+impl ReviewProvider for Vanishing {
+    fn id(&self) -> ProviderId {
+        self.repo.id()
+    }
+    fn host(&self) -> &str {
+        "github.com"
+    }
+    fn current_user(&self) -> CoreResult<String> {
+        self.repo.current_user()
+    }
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        self.repo.list_reviews()
+    }
+    fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+        self.store.upsert_threads(self.review, &[], ME).unwrap();
+        self.repo.fetch_review(r)
+    }
+    fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        self.repo.fetch_threads(r)
+    }
+    fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String> {
+        self.repo.file_at(r, sha, path)
+    }
+    fn fetch_files(&self, r: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
+        self.repo.fetch_files(r, range)
+    }
+    fn commit_diff(&self, r: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
+        self.repo.commit_diff(r, sha)
+    }
+    fn thread_resolutions(&self, r: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
+        self.repo.thread_resolutions(r)
+    }
+}
+
+#[test]
+fn a_thread_dropped_while_computing_is_answered_not_cached() {
+    let repo = repo();
+    let core = core_over(&repo);
+    let record = core.reviews().unwrap()[0].clone();
+    let provider: CoreResult<Arc<dyn ReviewProvider>> = Ok(Arc::new(Vanishing {
+        repo: repo.clone(),
+        store: core.store.clone(),
+        review: record.id,
+    }));
+    let histories =
+        super::api::compute_histories(&core.store, &record, &provider, None, None).unwrap();
+    assert_eq!(histories.len(), 2);
+    assert!(matches!(histories[0].status, LineStatus::Located { .. }));
+    for h in &histories {
+        assert_eq!(core.store.cached_history(h.thread_id, "c3").unwrap(), None);
+    }
+}
+
+#[test]
+fn caching_for_a_thread_that_is_gone_stores_nothing() {
+    let store = Store::in_memory().unwrap();
+    let gone = crate::ids::ThreadId::new();
+    let h = cached(LineStatus::unlocated("x"), Vec::new());
+    store.put_history(gone, "h1", &h).unwrap();
+    assert_eq!(store.cached_history(gone, "h1").unwrap(), None);
+}
+
+#[test]
+fn githubs_current_line_on_a_file_gone_at_head_is_unlocated() {
+    let repo = repo();
+    // The walk cannot follow (a commit diff is missing), so GitHub's own
+    // current line stands in, under the path the comment was made on; but
+    // that path is not at head (renamed or removed there).
+    repo.diffs.lock().unwrap().remove("c2");
+    repo.files
+        .lock()
+        .unwrap()
+        .remove(&("c3".to_string(), "src/cache.rs".to_string()));
+    {
+        let mut threads = repo.threads.lock().unwrap();
+        threads[0].anchor.as_mut().unwrap().current_line = Some(12);
+    }
+    let core = core_over(&repo);
+    let id = core.reviews().unwrap()[0].id;
+    let h = &core.review_histories(id).unwrap()[0];
+    assert!(
+        matches!(&h.status, LineStatus::Unlocated { reason } if reason.contains("not at head")),
+        "{:?}",
+        h.status
+    );
+    assert!(h.now_snapshot.is_none());
+}
+
+#[test]
+fn a_retarget_an_outdated_flag_or_a_new_clone_recomputes() {
+    let repo = repo();
+    let core = core_over(&repo);
+    let id = core.reviews().unwrap()[0].id;
+    let calls = || repo.file_calls.load(Ordering::SeqCst);
+    core.review_histories(id).unwrap();
+    let before = calls();
+    core.review_histories(id).unwrap();
+    assert_eq!(calls(), before, "a plain hit");
+
+    // Retargeted: same head, another base.
+    repo.detail.lock().unwrap().base_sha = "base2".into();
+    core.refresh();
+    core.review_histories(id).unwrap();
+    let after_retarget = calls();
+    assert!(after_retarget > before);
+
+    // The platform now calls the thread outdated.
+    repo.threads.lock().unwrap()[0].outdated = true;
+    core.refresh();
+    core.review_histories(id).unwrap();
+    let after_outdated = calls();
+    assert!(after_outdated > after_retarget);
+
+    // A local clone configured since: computed again (through it, where
+    // it can).
+    let record = core.review(id).unwrap();
+    let provider: CoreResult<Arc<dyn ReviewProvider>> = Ok(repo.clone());
+    let clone = std::path::Path::new("/nonexistent/argus-fixture-clone");
+    super::api::compute_histories(&core.store, &record, &provider, Some(clone), None).unwrap();
+    assert!(calls() > after_outdated);
+    let with_clone = calls();
+    super::api::compute_histories(&core.store, &record, &provider, Some(clone), None).unwrap();
+    assert_eq!(calls(), with_clone, "a hit again");
 }

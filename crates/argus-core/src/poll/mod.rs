@@ -16,13 +16,14 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::error::{CoreError, CoreResult};
+use crate::history::cache::read_line_touches;
 use crate::ids::ReviewId;
 use crate::provider::{
     is_rate_limited, rate_limited, ProviderId, ReviewDetail, ReviewProvider, ReviewRef,
     ReviewState, Thread,
 };
 use crate::review::advance_with;
-use crate::store::{ReviewRecord, Store};
+use crate::store::{self, ReviewRecord, Store, WriteColumns};
 
 /// How many reviews of one provider are fetched at the same time.
 const FETCH_PARALLELISM: usize = 4;
@@ -113,8 +114,8 @@ type Fetched = (ReviewRef, bool, CoreResult<(ReviewDetail, Vec<Thread>)>);
 
 /// Refresh one provider: what it lists now, plus the stored open reviews it
 /// no longer lists (fetched once more to learn whether they were merged,
-/// closed, or just dropped off). Merged and closed reviews are final and
-/// not fetched again.
+/// closed, or just dropped off, then daily: see [`unlisted_due`]). Merged
+/// and closed reviews are final and not fetched again.
 ///
 /// While the provider is rate-limited nothing is called: one provider-level
 /// "rate limited until HH:MM" error, the stored reviews untouched. A limit
@@ -151,6 +152,7 @@ pub fn refresh_provider(
                     && r.review.host == provider.host()
                     && r.state == ReviewState::Open
                     && !listed_ids.contains(&r.id)
+                    && unlisted_due(r, now)
             })
             .map(|r| (r.review.clone(), false)),
     );
@@ -189,12 +191,18 @@ pub fn refresh_provider(
             // An unlisted review that is gone (deleted, access lost): just
             // no longer listed.
             Err(CoreError::NotFound) if !listed => match prev {
-                Some(p) if p.listed => {
-                    let mut next = p.clone();
-                    next.listed = false;
-                    store.upsert_review(&next).map(|_| true)
+                Some(p) => {
+                    let dropped = p.listed;
+                    let marked = if dropped {
+                        store.set_listed(id, false)
+                    } else {
+                        Ok(())
+                    };
+                    marked
+                        .and_then(|_| store.touch_fetched(id, now))
+                        .map(|_| dropped)
                 }
-                _ => Ok(false),
+                None => Ok(false),
             },
             Err(e) => Err(e),
         };
@@ -217,36 +225,70 @@ pub fn refresh_provider(
     (changed, errors)
 }
 
-/// Classify a fresh fetch against `prev` and store it if anything changed.
+/// How often a stored open review the list no longer has is fetched (to
+/// learn whether it was merged or closed meanwhile): once when it drops
+/// off, then at most this often.
+const UNLISTED_EVERY: chrono::Duration = chrono::Duration::days(1);
+
+/// Whether the unlisted review `r` is fetched in a refresh at `now`: right
+/// after it dropped off (the last list still had it), then once per
+/// [`UNLISTED_EVERY`] since its last fetch.
+fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
+    r.listed || now - r.fetched_at >= UNLISTED_EVERY
+}
+
+/// Classify a fresh fetch against the stored record and store it if
+/// anything changed. `now` is when the fetch started.
+///
+/// The stored record is re-read, classified against and written in one
+/// transaction, so whatever landed while the fetch was on the network (the
+/// user marking it reviewed, an approval from Argus) is what the fetch is
+/// folded into, never overwritten by an older copy. The poll's own `prev`
+/// is therefore not used (kept for callers that still pass one). The
+/// watermark is never written here (see [`WriteColumns::Fetched`]).
 pub(crate) fn persist(
     store: &Store,
-    prev: Option<&ReviewRecord>,
+    _prev: Option<&ReviewRecord>,
     detail: &ReviewDetail,
     threads: &[Thread],
     me: &str,
     listed: bool,
     now: DateTime<Utc>,
 ) -> CoreResult<bool> {
-    // The cached line walks at this head sharpen the untouched count; none
-    // (or a failed read) falls back to the approximation.
-    let touches = store
-        .line_touches(detail.review.id(), &detail.head_sha)
-        .ok();
-    let mut next = advance_with(prev, detail, threads, me, listed, now, touches.as_ref());
-    next.fingerprint = fingerprint(detail, threads);
-    let changed = match prev {
-        Some(p) => {
-            let mut same_time = p.clone();
-            same_time.fetched_at = next.fetched_at;
-            same_time != next
+    let id = detail.review.id();
+    store.transaction(|conn| {
+        let prev = store::read_review(conn, id)?;
+        // The cached line walks at this head sharpen the untouched count;
+        // none (or a failed read) falls back to the approximation.
+        let touches = read_line_touches(conn, id, &detail.head_sha).ok();
+        let mut next = advance_with(
+            prev.as_ref(),
+            detail,
+            threads,
+            me,
+            listed,
+            now,
+            touches.as_ref(),
+        );
+        next.fingerprint = fingerprint(detail, threads);
+        let changed = match &prev {
+            Some(p) => {
+                let mut same_time = p.clone();
+                same_time.fetched_at = next.fetched_at;
+                same_time != next
+            }
+            None => true,
+        };
+        if changed {
+            store::write_review(conn, &next, WriteColumns::Fetched)?;
+            store::write_threads(conn, id, threads, me)?;
+        } else if !listed {
+            // An unlisted review is fetched daily (see `unlisted_due`),
+            // timed from its last fetch, changed or not.
+            store::touch_fetched(conn, id, now)?;
         }
-        None => true,
-    };
-    if changed {
-        store.upsert_review(&next)?;
-        store.upsert_threads(next.id, threads, me)?;
-    }
-    Ok(changed)
+        Ok(changed)
+    })
 }
 
 /// FNV-1a over the fetched data: stable across runs and releases (unlike

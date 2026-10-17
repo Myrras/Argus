@@ -285,21 +285,36 @@ pub struct ChangedFile {
 /// reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffRange {
-    /// The MR/PR's own diff (what the platform's Files/Changes tab shows).
-    /// `base` and `head` are the review's stored shas; the provider resolves
-    /// the side the diff is really taken from.
+    /// The MR/PR's own diff (what the platform's Files/Changes tab shows),
+    /// as it is on the platform now. `base` and `head` are the review's
+    /// stored shas; the diff may be of a newer head, and
+    /// [`FileDiff::head_sha`] says which.
     Review { base: String, head: String },
     /// Two commits of the review, e.g. "since my last review".
     Compare { from: String, to: String },
 }
 
 /// The files of one diff and the commits its two sides are read at.
+///
+/// **Contract:** `base_sha` and `head_sha` are the commits this diff was
+/// actually computed at, as the platform reports them, never just the shas
+/// the caller passed in. A platform diffs a review as it is now, so for
+/// [`DiffRange::Review`] `head_sha` is the platform's current head (GitHub:
+/// the PR's `head.sha` read around the files; GitLab: the latest diff
+/// version's `head_commit_sha`), which is newer than the stored head when
+/// the review moved since the last poll: compare it with the stored head to
+/// tell. `base_sha` is the left side the patches are relative to (GitHub:
+/// the merge base of the PR's base and head; GitLab: that version's
+/// `base_commit_sha`). For [`DiffRange::Compare`] they are what the compare
+/// was taken between (GitHub: its merge base and `to`; GitLab: `from` and
+/// `to`). For a commit diff (`commit_diff`), `head_sha` is the commit and
+/// `base_sha` its first parent, or empty when the platform names none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
     /// The left side: the commit the patches are relative to.
     pub base_sha: String,
-    /// The right side.
+    /// The right side: the commit the patches lead to.
     pub head_sha: String,
     pub files: Vec<ChangedFile>,
     /// The platform's file limit was hit; more files changed than listed.

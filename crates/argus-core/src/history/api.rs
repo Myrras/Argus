@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::cache::{CachedHistory, CachedMapping};
+use super::cache::{read_line_touches, CacheKey, CachedHistory, CachedMapping};
 use super::snapshot::{anchored_text, around, diff_rows, from_diff_hunk, window};
 use super::timeline::{commit_entries, merge, note_entries, resolution_entries};
 use super::walk::{walk_line, ApiSource, LineMapping, WalkStart};
@@ -29,7 +29,7 @@ use crate::git::{file_or, LocalClone};
 use crate::ids::{ReviewId, ThreadId};
 use crate::provider::{Anchor, CommitInfo, ReviewProvider, ReviewRef, Side, Thread};
 use crate::review::{untouched_with, RoundInput};
-use crate::store::{ReviewRecord, Store, StoredThread};
+use crate::store::{read_review, read_threads, ReviewRecord, Store, StoredThread};
 use crate::Core;
 
 /// How many threads of one review are computed at the same time.
@@ -107,11 +107,22 @@ pub(crate) fn compute_histories(
         .into_iter()
         .filter(|t| only.is_none_or(|o| o.contains(&t.thread_id)))
         .collect();
+    let key_of = |t: &StoredThread| CacheKey {
+        base_sha: record.base_sha.clone(),
+        outdated: t.thread.outdated,
+        clone: clone.map(|p| p.display().to_string()),
+    };
     let mut cached: Vec<Option<CachedHistory>> = Vec::with_capacity(threads.len());
     for t in &threads {
+        // Stale when the thread was resolved or reopened since, or when
+        // what else it was computed from changed (see `CacheKey`).
         let hit = store
-            .cached_history(t.thread_id, &record.head_sha)?
-            .filter(|c| c.mapping.resolved == t.thread.resolved);
+            .cached_history_keyed(t.thread_id, &record.head_sha)?
+            .filter(|(c, key)| {
+                c.mapping.resolved == t.thread.resolved
+                    && key.as_ref().is_none_or(|k| *k == key_of(t))
+            })
+            .map(|(c, _)| c);
         cached.push(hit);
     }
     let misses: Vec<usize> = (0..threads.len())
@@ -121,8 +132,18 @@ pub(crate) fn compute_histories(
         let wanted: Vec<&Thread> = misses.iter().map(|&i| &threads[i].thread).collect();
         let computed = compute(provider, record, clone, &wanted);
         for (&i, (history, cacheable)) in misses.iter().zip(computed) {
+            // A failed cache write only means not cached: the history
+            // itself stands, and the next call computes it again.
             if cacheable {
-                store.put_history(threads[i].thread_id, &record.head_sha, &history)?;
+                let key = key_of(&threads[i]);
+                if let Err(e) = store.put_history_keyed(
+                    threads[i].thread_id,
+                    &record.head_sha,
+                    Some(&key),
+                    &history,
+                ) {
+                    tracing::debug!("caching a thread history failed: {e}");
+                }
             }
             cached[i] = Some(history);
         }
@@ -189,36 +210,46 @@ fn compute(
 }
 
 /// Store the review's untouched count as the cached walks now tell it.
+///
+/// Only the count is written, and only while the review is still at the
+/// head the walks are for: `record` may be older than the store (a poll or
+/// the user marking it reviewed since), so the count is taken from the
+/// stored record, threads and watermark in one transaction, never by
+/// writing `record`'s round or status back.
 fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
-    let threads: Vec<Thread> = store
-        .threads(record.id)?
-        .into_iter()
-        .map(|t| t.thread)
-        .collect();
-    let touches = store.line_touches(record.id, &record.head_sha)?;
-    let n = untouched_with(
-        &RoundInput {
-            state: record.state,
-            head_sha: &record.head_sha,
-            last_reviewed_sha: record.last_reviewed_sha.as_deref(),
-            last_reviewed_at: record.last_reviewed_at,
-            approved_at: record.approved_at,
-            rerequested_at: record.rerequested_at,
-            threads: &threads,
-            me: &record.viewer,
-        },
-        Some(&touches),
-    );
-    if n != record.untouched_threads {
-        store.set_round(
-            record.id,
-            record.round,
-            &record.round_reasons,
-            record.status,
-            n,
-        )?;
-    }
-    Ok(())
+    store.transaction(|conn| {
+        let Some(current) = read_review(conn, record.id)? else {
+            return Ok(());
+        };
+        if current.head_sha != record.head_sha {
+            return Ok(());
+        }
+        let threads: Vec<Thread> = read_threads(conn, record.id)?
+            .into_iter()
+            .map(|t| t.thread)
+            .collect();
+        let touches = read_line_touches(conn, record.id, &current.head_sha)?;
+        let n = untouched_with(
+            &RoundInput {
+                state: current.state,
+                head_sha: &current.head_sha,
+                last_reviewed_sha: current.last_reviewed_sha.as_deref(),
+                last_reviewed_at: current.last_reviewed_at,
+                approved_at: current.approved_at,
+                rerequested_at: current.rerequested_at,
+                threads: &threads,
+                me: &current.viewer,
+            },
+            Some(&touches),
+        );
+        if n != current.untouched_threads {
+            conn.execute(
+                "UPDATE reviews SET untouched_threads = ?3 WHERE id = ?1 AND head_sha = ?2",
+                rusqlite::params![record.id.to_string(), current.head_sha, n],
+            )?;
+        }
+        Ok(())
+    })
 }
 
 /// What every thread of one computation shares.
@@ -527,10 +558,10 @@ fn hunk_window(
     from_diff_hunk(&anchor.head_sha, path, hunk, side, start, end)
 }
 
-/// The now window for where the walk put the lines. A located line that is
-/// not in the file at head, or an untouched line whose text differs from
-/// then, means the walk went wrong: the status turns Unlocated rather than
-/// show a wrong line.
+/// The now window for where the walk put the lines. A located line in a
+/// file that is not at head, a line past its end, or an untouched line
+/// whose text differs from then, means the walk went wrong: the status
+/// turns Unlocated rather than show a wrong line.
 fn now_window(
     ctx: &Ctx<'_>,
     mapping: &mut LineMapping,
@@ -547,6 +578,15 @@ fn now_window(
         } => {
             let text = match file_at(ctx, ctx.head, path) {
                 Ok(t) => t,
+                // A definite answer: there is no such file at head (the
+                // located path is a fallback's, e.g. GitHub's current line
+                // under the path the comment was made on). Never cache a
+                // line in a file that is not there.
+                Err(CoreError::NotFound) => {
+                    mapping.status =
+                        LineStatus::unlocated("the file is not at head under this name");
+                    return None;
+                }
                 Err(e) => {
                     *transient |= is_transient(&e);
                     return None;

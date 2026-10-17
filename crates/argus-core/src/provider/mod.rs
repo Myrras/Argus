@@ -56,14 +56,18 @@ pub trait ReviewProvider: Send + Sync {
     /// The content of `path` at commit `sha`.
     fn file_at(&self, r: &ReviewRef, sha: &str, path: &str) -> CoreResult<String>;
 
-    /// The changed files of `range`, with the commit each side is read at.
+    /// The changed files of `range`, with the commit each side is read at:
+    /// the commits the diff was really computed at (see [`FileDiff`]'s
+    /// contract), which for [`DiffRange::Review`] may be newer than the
+    /// shas asked for.
     ///
     /// [`DiffRange::Review`]: GitHub `pulls/{n}/files` (up to 3000 files;
-    /// large patches are left out) with the merge base of base and head from
-    /// the compare API as the left side, as GitHub's own Files tab diffs
-    /// three-dot. GitLab `merge_requests/:iid/diffs` (`changes` on instances
-    /// before 15.7) with the latest version's `base_sha` (the merge base
-    /// GitLab diffs from) as the left side.
+    /// large patches are left out) at the PR's current head, with the merge
+    /// base of the PR's base and head from the compare API as the left side,
+    /// as GitHub's own Files tab diffs three-dot. GitLab
+    /// `merge_requests/:iid/diffs` (`changes` on instances before 15.7): the
+    /// latest version, with its `base_sha` (the merge base GitLab diffs
+    /// from) as the left side.
     ///
     /// [`DiffRange::Compare`]: GitHub `compare/{from}...{to}` (up to 300
     /// files; left side its merge base, which is `from` unless the branch was
@@ -104,8 +108,9 @@ pub trait ReviewProvider: Send + Sync {
     /// What commit `sha` changed, against its first parent (the thread
     /// history's line walk). GitHub `repos/{o}/{r}/commits/{sha}` (`files`,
     /// up to 3000; `base_sha` is the first parent); GitLab
-    /// `repository/commits/:sha/diff` (`base_sha` empty: it sends no
-    /// parent). `head_sha` is `sha`. The default is for providers without
+    /// `repository/commits/:sha/diff` with `repository/commits/:sha` for
+    /// the first parent (`base_sha` empty when that cannot be read).
+    /// `head_sha` is `sha`. The default is for providers without
     /// commit diffs (test doubles).
     fn commit_diff(&self, _r: &ReviewRef, _sha: &str) -> CoreResult<FileDiff> {
         Err(crate::error::CoreError::Provider(
@@ -164,7 +169,7 @@ pub fn from_settings(settings: &Settings) -> Vec<Arc<dyn ReviewProvider>> {
             Ok(p) => out.push(Arc::new(p)),
             // `Settings::validated` rejects such a URL before it is saved;
             // a hand-edited file lands here.
-            Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not http(s)"),
+            Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not https"),
         }
     }
     out

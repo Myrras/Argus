@@ -389,3 +389,39 @@ fn a_failed_migration_step_leaves_the_database_as_it_was() {
         .unwrap();
     assert_eq!(reviews, 1);
 }
+
+#[test]
+fn update_review_reads_and_writes_in_one_go() {
+    let store = Store::in_memory().unwrap();
+    let r = record();
+    store.upsert_review(&r).unwrap();
+    store.set_watermark(r.id, "h1", at(11, 8)).unwrap();
+    let next = store
+        .update_review(r.id, |mut cur| {
+            // Sees what is stored now, not `r`.
+            assert_eq!(cur.last_reviewed_sha.as_deref(), Some("h1"));
+            cur.approved_at = Some(at(11, 9));
+            Ok(cur)
+        })
+        .unwrap();
+    assert_eq!(store.review(r.id).unwrap(), Some(next));
+    assert!(matches!(
+        store.update_review(crate::ids::ReviewId::new(), Ok),
+        Err(CoreError::NotFound)
+    ));
+    store.set_listed(r.id, false).unwrap();
+    assert!(!store.review(r.id).unwrap().unwrap().listed);
+}
+
+#[test]
+fn a_locked_database_is_waited_on_not_failed() {
+    // Another connection (a second Argus, a backup tool) holding a lock
+    // makes a write wait up to the busy timeout instead of failing at once.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("argus.db")).unwrap();
+    let ms: i64 = store
+        .conn()
+        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(ms, 5000);
+}

@@ -242,17 +242,22 @@ impl Core {
     }
 
     /// The user finished this round: move the watermark to the current head.
+    ///
+    /// Read, classified and written in one store transaction, and only the
+    /// watermark and its classification are written: a poll storing at the
+    /// same time can neither lose the watermark nor be undone by it.
     pub fn mark_reviewed(&self, id: ReviewId) -> CoreResult<ReviewRecord> {
-        let record = self.review(id)?;
-        let threads: Vec<_> = self
-            .store
-            .threads(id)?
-            .into_iter()
-            .map(|t| t.thread)
-            .collect();
-        let next = review::mark_reviewed(&record, &threads, Utc::now());
-        self.store.upsert_review(&next)?;
-        Ok(next)
+        let now = Utc::now();
+        self.store.transaction(|conn| {
+            let record = store::read_review(conn, id)?.ok_or(CoreError::NotFound)?;
+            let threads: Vec<_> = store::read_threads(conn, id)?
+                .into_iter()
+                .map(|t| t.thread)
+                .collect();
+            let next = review::mark_reviewed(&record, &threads, now);
+            store::write_mark(conn, &next)?;
+            Ok(next)
+        })
     }
 
     /// The provider a review belongs to.
