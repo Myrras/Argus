@@ -479,14 +479,12 @@ export const NOT_READ_ONLY_NOTE =
   "Auggie can still use MCP tools from your own Auggie setup; Argus cannot guarantee this run only reads.";
 
 /**
- * Whether the configured agent can be held to reading only, as the runs
- * report it (`AiRunState.readOnlyGuaranteed`, from the configured adapter).
- * True while no run has said otherwise.
+ * Whether the configured agent can be held to reading only: read from the
+ * settings, not from the runs (none may be loaded, or still report the
+ * agent they last ran with). Auggie cannot be held to it.
  */
 export function useReadOnlyGuaranteed(): boolean {
-  return useAiStore(
-    (s) => !Object.values(s.runs).some((r) => r.readOnlyGuaranteed === false),
-  );
+  return useBackendSettingsStore((s) => s.settings?.ai.adapter !== "auggie");
 }
 
 /** The AI pass is on for this review (else none of its UI shows). */
@@ -578,7 +576,12 @@ export async function subscribeAiEvents(): Promise<() => void> {
   const offSettings = useBackendSettingsStore.subscribe((s, prev) => {
     const now = s.settings?.ai;
     const before = prev.settings?.ai;
-    if (!now || !before || now.enabled === before.enabled) return;
+    if (!now || !before) return;
+    // Switching the pass or the agent changes what the runs report
+    // (`enabled`, `readOnlyGuaranteed`): read them again.
+    if (now.enabled === before.enabled && now.adapter === before.adapter) {
+      return;
+    }
     const store = useAiStore.getState();
     for (const id of Object.keys(store.runs)) void store.loadState(id);
     for (const id of Object.keys(store.byReview)) void store.reloadOutput(id);
