@@ -813,6 +813,88 @@ fn an_exact_left_side_is_never_replaced_by_the_clone() {
 
 #[test]
 #[cfg_attr(windows, ignore)]
+fn a_removed_line_is_refused_while_the_left_side_is_a_stand_in() {
+    // No clone could give the merge base: the old side shown may not line
+    // up with the patch. A comment on a removed line (a keyboard `c`, an
+    // AI finding) is refused rather than posted on another line; one on
+    // an added line still goes out.
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    fx.commit("src/cache.rs", &file_of(10), "c1");
+    git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
+    let head = fx.commit(
+        "src/cache.rs",
+        &file_of(10).replace("line 10\n", "line ten\n"),
+        "feature",
+    );
+    git_in(&fx.path, &["checkout", "-q", "main"]);
+    let tip = fx.commit("src/other.rs", "x\n", "main moves on");
+    let p = platform(&fx, std::slice::from_ref(&head));
+    let file = crate::provider::ChangedFile {
+        path: "src/cache.rs".into(),
+        old_path: None,
+        status: crate::provider::FileStatus::Modified,
+        additions: 1,
+        deletions: 1,
+        patch: Some("@@ -9,2 +9,2 @@\n line 9\n-line 10\n+line ten\n".into()),
+        content_sha: "c1".into(),
+        binary: false,
+        too_large: false,
+    };
+    *p.files.lock().unwrap() = Some(FileDiff {
+        base_sha: tip.clone(),
+        head_sha: head.clone(),
+        files: vec![file],
+        truncated: false,
+        base_approximate: true,
+    });
+    let elsewhere = tempfile::tempdir().unwrap();
+    let core = core_with(&p, elsewhere.path());
+    let id = core.reviews().unwrap()[0].id;
+    let files = core.list_files(id, false).unwrap();
+    assert!(files.base_approximate);
+
+    let comment = |line, side| crate::NewComment {
+        path: "src/cache.rs".into(),
+        line,
+        side,
+        start_line: None,
+        body: "Why?".into(),
+        head_sha: Some(head.clone()),
+        base_sha: Some(tip.clone()),
+    };
+    let results = core
+        .post_comments(
+            id,
+            vec![
+                comment(10, crate::provider::Side::Old),
+                comment(10, crate::provider::Side::New),
+            ],
+        )
+        .unwrap();
+    match &results[0] {
+        crate::PostResult::Failed(e) => {
+            assert_eq!(e.kind, crate::PostErrorKind::LineNotInDiff);
+            assert!(
+                e.message.contains("until Argus knows its merge base"),
+                "{}",
+                e.message
+            );
+        }
+        other => panic!("old side posted: {other:?}"),
+    }
+    assert!(
+        matches!(results[1], crate::PostResult::Posted(_)),
+        "{results:?}"
+    );
+    let posted = p.posted.lock().unwrap();
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].side, crate::provider::Side::New);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
 fn a_removed_line_posts_against_the_left_side_the_clone_found() {
     // The code view showed the clone's merge base as the left side; posting
     // and the commentable lines must read the diff the same way, or every

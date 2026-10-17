@@ -344,6 +344,29 @@ fn keeps_old_side_lines_unless_the_base_moved() {
 }
 
 #[test]
+fn refuses_old_side_lines_against_a_stand_in_left_side() {
+    // GitHub had no merge base and no clone gave one: the old side shown
+    // may not line up with the patch, so a removed line is never placed.
+    let mut current = diff("tip", "h1", vec![changed("src/cache.rs", PATCH_H1)]);
+    current.base_approximate = true;
+    for base in [None, Some("tip".to_string())] {
+        let mut c = comment(2, Side::Old);
+        c.base_sha = base;
+        let err = resolve(&c, "h1", &current, None).unwrap_err();
+        assert_eq!(err.kind, PostErrorKind::LineNotInDiff);
+        assert!(
+            err.message.contains(
+                "Removed lines can't take comments for this file until Argus knows its merge base"
+            ),
+            "{}",
+            err.message
+        );
+    }
+    // The new side does not depend on the left side: it still posts.
+    assert!(resolve(&comment(3, Side::New), "h1", &current, None).is_ok());
+}
+
+#[test]
 fn validates_input() {
     let ok = comment(3, Side::New);
     assert!(validate(&ok).is_ok());

@@ -279,8 +279,9 @@ pub(crate) fn validate(c: &NewComment) -> Result<(), PostError> {
 ///   not the head written at (the branch was rewritten) fails the comment.
 /// - Old side: the old side is the review's base, which new commits do not
 ///   move, so the line is kept; when `c.base_sha` is given and the diff's
-///   left side is no longer it (a rebase), the comment fails instead of
-///   landing on another line.
+///   left side is no longer it (a rebase), or the left side is only a
+///   stand-in ([`FileDiff::base_approximate`]), the comment fails instead
+///   of landing on another line.
 /// - Either way the result must be on a hunk row of that side in `current`,
 ///   a range inside one hunk, or the comment fails with
 ///   [`PostErrorKind::LineNotInDiff`].
@@ -344,6 +345,15 @@ pub fn resolve(
             }
         }
         (Side::Old, _) => {
+            if current.base_approximate {
+                // A stand-in left side (no merge base from the platform or
+                // the clone): the old side the user saw may not line up
+                // with the patch, so a removed line could land elsewhere.
+                // The code view offers none; this holds for every caller.
+                return Err(not_in_diff(
+                    "Removed lines can't take comments for this file until Argus knows its merge base. Fetch your local clone and try again.".into(),
+                ));
+            }
             if c.base_sha.as_deref().is_some_and(|b| b != current.base_sha) {
                 // The left side differs either because the lines were read
                 // in a diff since the last review (an AI run's scope), whose
