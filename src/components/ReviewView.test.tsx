@@ -706,6 +706,86 @@ describe("ReviewView", () => {
       "1,2,3",
     );
   });
+  it("re-reads a stale file list once when the lines already report the merge base", async () => {
+    // The list was read with the stand-in; the user then fetched their
+    // clone, so the first commentable read reports the merge base while
+    // the list (nothing re-read it) still has the stand-in.
+    const standIn = reviewFiles({
+      reviewId: r.id,
+      files,
+      baseApproximate: true,
+    });
+    const mergeBase = "e".repeat(40);
+    const exact = reviewFiles({ reviewId: r.id, files, baseSha: mergeBase });
+    let listReads = 0;
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) => {
+      if (cmd === "list_files") {
+        listReads += 1;
+        return Promise.resolve(listReads === 1 ? standIn : exact);
+      }
+      if (cmd === "commentable_lines") {
+        return Promise.resolve({
+          reviewId: r.id,
+          path: (args as { path: string }).path,
+          baseSha: mergeBase,
+          headSha: exact.headSha,
+          hunks: [{ old: [1, 2], new: [1, 2, 3] }],
+        });
+      }
+      return backend(cmd, args);
+    }) as typeof invoke);
+    render(<ReviewView review={r} now={NOW} />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+        "data-comment-a",
+        "1,2",
+      ),
+    );
+    expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+      "data-comment-b",
+      "1,2,3",
+    );
+    expect(
+      useCodeViewStore.getState().byReview[r.id]?.files?.reviewBaseSha,
+    ).toBe(mergeBase);
+    expect(listReads).toBe(2);
+  });
+
+  it("re-reads the file list only once when the bases keep disagreeing", async () => {
+    // GitHub compared in one read and not in the other: the list keeps the
+    // stand-in, the lines keep the merge base. One re-read, then no loop.
+    listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
+    const mergeBase = "e".repeat(40);
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "commentable_lines"
+        ? Promise.resolve({
+            reviewId: r.id,
+            path: (args as { path: string }).path,
+            baseSha: mergeBase,
+            headSha: listed.headSha,
+            hunks: [{ old: [1, 2], new: [1, 2, 3] }],
+          })
+        : backend(cmd, args)) as typeof invoke);
+    const calls = (name: string) =>
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === name).length;
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() => expect(calls("list_files")).toBe(2));
+    const lineReads = calls("commentable_lines");
+    // Let any further reads that would loop run.
+    for (let i = 0; i < 10; i += 1) {
+      await act(() => new Promise((done) => setTimeout(done, 0)));
+    }
+    expect(calls("list_files")).toBe(2);
+    expect(calls("commentable_lines")).toBe(lineReads);
+    // Lines of another diff are never offered.
+    expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+      "data-comment-b",
+      "",
+    );
+  });
+
   it("takes no comments on removed lines when GitHub had no merge base", async () => {
     listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
     render(<ReviewView review={r} now={NOW} />);

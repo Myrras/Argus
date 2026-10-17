@@ -19,7 +19,7 @@
  * keeps it recoverable: the toast's Undo brings it back.
  *
  * Also caches each file's commentable lines (`commentable_lines`) per
- * (review, head, path), like the file contents.
+ * (review, head, review base, path), like the file contents.
  */
 
 import { create } from "zustand";
@@ -40,6 +40,7 @@ import type {
 } from "../ipc/types";
 import { clampRange, type LineRange } from "../lib/commentRanges";
 import { FOCUS, requestFocus } from "../lib/focusRequests";
+import { useCodeViewStore } from "./codeViewStore";
 import { useHistoryStore } from "./historyStore";
 import {
   toastError,
@@ -699,6 +700,8 @@ export function usePostableCount(reviewId: ReviewId): number {
 // -- Commentable lines ------------------------------------------------------
 
 const commentable = new Map<string, Promise<CommentableLines>>();
+/** (review, head, list base, lines base) pairs a file list was re-read for. */
+const reread = new Set<string>();
 
 /**
  * A file's commentable lines, fetched once per (review, head, review base,
@@ -706,6 +709,13 @@ const commentable = new Map<string, Promise<CommentableLines>>();
  * `ReviewFiles`): a retarget, or a fetched clone resolving a stand-in,
  * moves it under an unchanged head, and the lines follow. A failed fetch is
  * forgotten so the next view retries.
+ *
+ * Lines at the same head but another base than `reviewBaseSha` mean the
+ * file list is stale (the user fetched their clone since it was read, or
+ * GitHub compared in one read and not the other): they are not kept under
+ * this key, and the review's file list is read again, once per such pair so
+ * bases that keep disagreeing cannot loop. The new list's base gives a new
+ * key, which reads the lines afresh.
  */
 export function loadCommentable(
   reviewId: ReviewId,
@@ -718,7 +728,19 @@ export function loadCommentable(
   if (!p) {
     p = commentableLines(reviewId, path);
     commentable.set(key, p);
-    p.catch(() => commentable.delete(key));
+    p.then(
+      (lines) => {
+        if (lines.headSha !== headSha || lines.baseSha === reviewBaseSha) {
+          return;
+        }
+        commentable.delete(key);
+        const pair = `${reviewId}|${headSha}|${reviewBaseSha}|${lines.baseSha}`;
+        if (reread.has(pair)) return;
+        reread.add(pair);
+        void useCodeViewStore.getState().load(reviewId);
+      },
+      () => commentable.delete(key),
+    );
   }
   return p;
 }
@@ -726,4 +748,5 @@ export function loadCommentable(
 /** Tests: forget the cached commentable lines. */
 export function clearCommentableCache() {
   commentable.clear();
+  reread.clear();
 }
