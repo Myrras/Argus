@@ -254,7 +254,8 @@ impl Core {
     /// Refresh every provider once (blocking). A refresh already under way
     /// (the poll's) is waited for first: refreshes run one at a time.
     pub fn refresh(&self) -> RefreshReport {
-        poll::refresh_all(&self.providers(), &self.store, Utc::now())
+        poll::refresh_all_unless(&self.providers(), &self.store, &Utc::now, None)
+            .expect("no stop flag to stop on")
     }
 
     /// The user finished this round: move the watermark to the current head.

@@ -680,6 +680,56 @@ fn a_fetch_that_started_earlier_never_overwrites_a_later_one() {
 }
 
 #[test]
+fn a_fetched_at_from_a_clock_that_ran_ahead_does_not_freeze_the_review() {
+    // Stored while the clock was a day ahead; corrected since.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let ahead = Utc::now() + chrono::Duration::days(1);
+    assert!(persist(&store, None, &detail_n(12, "h1"), &[], ME, true, ahead).unwrap());
+    let now = Utc::now();
+    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, now).unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.fetched_at, now);
+    // Unchanged fetches move it too, so the order holds from here on.
+    let later = Utc::now();
+    assert!(!persist(&store, None, &detail_n(12, "h2"), &[], ME, true, later).unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().fetched_at, later);
+}
+
+#[test]
+fn a_review_is_timed_when_its_fetch_starts_not_when_the_refresh_was_asked() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    // Each reading: the time it gave, and how far the provider got by then.
+    let readings: Mutex<Vec<(DateTime<Utc>, usize)>> = Mutex::new(Vec::new());
+    let clock = || {
+        // Only read once this refresh's turn came (the lock is held).
+        assert!(store.refreshing.try_lock().is_err(), "read before the lock");
+        let mut r = readings.lock().unwrap();
+        let t = at(10, 10) + chrono::Duration::minutes(r.len() as i64);
+        r.push((t, gh.calls.load(Ordering::SeqCst)));
+        t
+    };
+    let report = refresh_all_unless(&providers, &store, &clock, None).unwrap();
+    assert_eq!(report.errors, []);
+    let fetched_at = store
+        .review(review_ref(12).id())
+        .unwrap()
+        .unwrap()
+        .fetched_at;
+    let readings = readings.into_inner().unwrap();
+    let (_, calls) = readings
+        .iter()
+        .find(|(t, _)| *t == fetched_at)
+        .expect("fetched_at is a clock reading");
+    // Read after the provider's first call (`current_user`): per review.
+    assert_eq!(*calls, 1, "{readings:?}");
+}
+
+#[test]
 fn an_unchanged_fetch_still_counts_as_the_latest() {
     let store = Store::in_memory().unwrap();
     let id = review_ref(12).id();
