@@ -159,8 +159,10 @@ when it merges.
   before they are saved, including more token shapes. Claude cannot read
   the clone's `.git` (nested repositories included), `.env` files,
   `.netrc`/`.npmrc`/`.pypirc`, private keys (`*.pem`, `*.key`) or local app
-  secrets (`appsettings.<env>.json`, `local.settings.json`, `.dev.vars`,
-  `secrets.json`/`.yml`). Auggie runs keep only its read tools: Argus
+  secrets (`appsettings.Local.json`, `appsettings.<env>.Local.json`,
+  `appsettings.Secrets.json`, `local.settings.json`, `.dev.vars`,
+  `secrets.json`/`.yml`); the committed `appsettings.json` and
+  `appsettings.<env>.json` stay readable. Auggie runs keep only its read tools: Argus
   removes every other tool Auggie lists, including MCP tools, and does not
   start the run when Auggie cannot list its tools.
 - AI findings post on the code the AI actually read; a finding from a later

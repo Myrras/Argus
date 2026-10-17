@@ -386,11 +386,13 @@ pub(crate) fn claude_settings(allowed: &[PathBuf], clone: Option<&Path>) -> serd
 /// and the reflog repeat that URL), git and package-registry credential
 /// files, every `.env*` file, private keys (`*.pem`, `*.key`, Rails'
 /// `master.key` among them) and the usual local app secrets (.NET's
-/// `appsettings.<env>.json` and `local.settings.json`, Wrangler's
-/// `.dev.vars`, `secrets.json`/`.yml`). Exact names and extensions only: a
-/// `*.keymap` or `secrets.rs` is code the review may need. A character
-/// of the clone's path the rule syntax would read becomes `?`. Unix paths
-/// only, as in [`deny_outside`].
+/// `appsettings.Local.json`, `appsettings.<env>.Local.json`,
+/// `appsettings.Secrets.json` and Azure Functions' `local.settings.json`,
+/// Wrangler's `.dev.vars`, `secrets.json`/`.yml`). Exact names and
+/// extensions only: a `*.keymap`, `secrets.rs` or the committed
+/// `appsettings.<env>.json` is code the review may need. A character of the
+/// clone's path the rule syntax would read becomes `?`. Unix paths only, as
+/// in [`deny_outside`].
 pub(crate) fn clone_secret_rules(clone: &Path) -> Vec<String> {
     if !clone.is_absolute() || cfg!(windows) {
         return Vec::new();
@@ -420,7 +422,16 @@ pub(crate) fn clone_secret_rules(clone: &Path) -> Vec<String> {
         "**/.git/**",
         "**/*.pem",
         "**/*.key",
-        "**/appsettings.*.json",
+        // .NET: only the variants kept out of git for local secrets; the
+        // committed `appsettings.json` and `appsettings.<env>.json` are
+        // config the review may need. Rule globs match case-sensitively,
+        // hence both spellings.
+        "**/appsettings.local.json",
+        "**/appsettings.Local.json",
+        "**/appsettings.*.local.json",
+        "**/appsettings.*.Local.json",
+        "**/appsettings.secrets.json",
+        "**/appsettings.Secrets.json",
         "**/local.settings.json",
         "**/.dev.vars",
         "**/secrets.json",
@@ -1125,7 +1136,12 @@ Total: 35 tools (34 enabled, 1 disabled)\n";
             "**/.git/**",
             "**/*.pem",
             "**/*.key",
-            "**/appsettings.*.json",
+            "**/appsettings.local.json",
+            "**/appsettings.Local.json",
+            "**/appsettings.*.local.json",
+            "**/appsettings.*.Local.json",
+            "**/appsettings.secrets.json",
+            "**/appsettings.Secrets.json",
             "**/local.settings.json",
             "**/.dev.vars",
             "**/secrets.json",
@@ -1134,6 +1150,16 @@ Total: 35 tools (34 enabled, 1 disabled)\n";
         ] {
             let rule = format!("Read(//src/widgets/{p})");
             assert!(rules.contains(&rule), "{rule}: {rules:?}");
+        }
+        // The committed .NET config (`appsettings.json`,
+        // `appsettings.Development.json`) is code the review may need: only
+        // the local and secrets variants are denied.
+        for r in rules.iter().filter(|r| r.contains("appsettings")) {
+            let lower = r.to_lowercase();
+            assert!(
+                lower.ends_with(".local.json)") || lower.ends_with(".secrets.json)"),
+                "{r}"
+            );
         }
         // Exact names and extensions: a `*.keymap` or `secrets.rs` is code
         // the review may need.
