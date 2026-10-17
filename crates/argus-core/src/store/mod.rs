@@ -284,30 +284,18 @@ impl Store {
     ///
     /// A full-row write of a record read earlier loses whatever changed in
     /// between (a poll's fetch, the user's watermark): code that reads,
-    /// changes and writes back uses [`update_review`](Self::update_review).
+    /// changes and writes back does so in one [`transaction`](Self::transaction).
     pub fn upsert_review(&self, r: &ReviewRecord) -> CoreResult<()> {
         write_review(&self.conn(), r, WriteColumns::All)
-    }
-
-    /// Read-modify-write one review in one transaction: `f` gets the record
-    /// as stored now and returns what to store (every column). No other
-    /// write lands between the read and the write.
-    pub fn update_review(
-        &self,
-        id: ReviewId,
-        f: impl FnOnce(ReviewRecord) -> CoreResult<ReviewRecord>,
-    ) -> CoreResult<ReviewRecord> {
-        self.transaction(|conn| {
-            let current = read_review(conn, id)?.ok_or(CoreError::NotFound)?;
-            let next = f(current)?;
-            write_review(conn, &next, WriteColumns::All)?;
-            Ok(next)
-        })
     }
 
     /// Run `f` in one transaction, holding the connection throughout (every
     /// other call on this store waits). `IMMEDIATE` takes the write lock up
     /// front, so what `f` reads is still current when it writes.
+    ///
+    /// `f` works through the `Connection` it is given (the `pub(crate)`
+    /// free functions of this module), never through `self`: a `Store`
+    /// method called inside would wait on the lock `f` runs under.
     pub(crate) fn transaction<T>(
         &self,
         f: impl FnOnce(&Connection) -> CoreResult<T>,
