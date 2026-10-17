@@ -26,8 +26,8 @@ use argus_core::post::{
     PostedComment, PostedNote,
 };
 use argus_core::provider::{
-    Anchor, ChangedFile, FileStatus, GithubStatus, GitlabStatus, Note, ProviderId, ProviderStatus,
-    ReviewRef, ReviewState, Side, Thread,
+    Anchor, ChangedFile, FileStatus, GithubStatus, GitlabProblem, GitlabStatus, Note, ProviderId,
+    ProviderStatus, ReviewRef, ReviewState, Side, Thread,
 };
 use argus_core::{
     RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewStatus, RoundReason, Settings,
@@ -384,6 +384,7 @@ fn current() -> Value {
             configured: true,
             base_url: "https://gitlab.example.test".into(),
             token_present: true,
+            problem: Some(GitlabProblem::InvalidUrl),
         },
     };
     let snapshot = CodeSnapshot {
@@ -536,6 +537,7 @@ fn current() -> Value {
         ("ReviewStatus", values(&review_statuses())),
         ("RoundReason", values(&round_reasons())),
         ("Side", values(&[Side::Old, Side::New])),
+        ("GitlabProblem", values(&[GitlabProblem::InvalidUrl])),
         (
             "FileStatus",
             values(&[

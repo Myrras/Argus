@@ -179,6 +179,7 @@ pub fn from_settings(settings: &Settings) -> Vec<Arc<dyn ReviewProvider>> {
             Ok(p) => out.push(Arc::new(p)),
             // `Settings::validated` rejects such a URL before it is saved;
             // a hand-edited file lands here.
+            // Shown in the provider status as well (`GitlabProblem`).
             Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not https"),
         }
     }
@@ -213,6 +214,18 @@ pub struct GitlabStatus {
     pub base_url: String,
     /// A token for that instance is in the keychain (never the token itself).
     pub token_present: bool,
+    /// Why a configured GitLab is off anyway; `None` when nothing is wrong.
+    pub problem: Option<GitlabProblem>,
+}
+
+/// Why a configured GitLab is not used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GitlabProblem {
+    /// The URL is not one Argus sends the token to: not https (plain http
+    /// only for localhost), or not a plain instance URL. Saving settings
+    /// refuses it; a hand-edited file can still hold one.
+    InvalidUrl,
 }
 
 /// The [`ProviderStatus`] for `settings`. Blocking: runs `gh auth token`
@@ -228,6 +241,10 @@ pub fn status(settings: &Settings) -> ProviderStatus {
         }
     };
     let url = settings.gitlab.base_url.trim().to_string();
+    // The same check `from_settings` makes: an unusable URL means no GitLab
+    // provider, and no keychain lookup for it either.
+    let problem = (!url.is_empty() && gitlab::normalize_base_url(&url).is_none())
+        .then_some(GitlabProblem::InvalidUrl);
     ProviderStatus {
         github: GithubStatus {
             enabled: gh.enabled,
@@ -237,8 +254,11 @@ pub fn status(settings: &Settings) -> ProviderStatus {
         },
         gitlab: GitlabStatus {
             configured: !url.is_empty(),
-            token_present: !url.is_empty() && gitlab::gitlab_token_present(&url),
+            token_present: !url.is_empty()
+                && problem.is_none()
+                && gitlab::gitlab_token_present(&url),
             base_url: url,
+            problem,
         },
     }
 }
@@ -313,6 +333,24 @@ pub(crate) fn first_line(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gitlab_url_argus_will_not_use_says_why() {
+        // A hand-edited settings.json with plain http: GitLab stays off, and
+        // the status says so instead of a silent log line.
+        let mut s = Settings::default();
+        s.github.enabled = false;
+        s.gitlab.base_url = "http://gitlab.example.test".into();
+        assert!(from_settings(&s).is_empty());
+        let st = status(&s).gitlab;
+        assert!(st.configured);
+        assert!(!st.token_present);
+        assert_eq!(st.problem, Some(GitlabProblem::InvalidUrl));
+        assert_eq!(serde_json::to_value(&st).unwrap()["problem"], "invalidUrl");
+        // Not set up is no problem, just off.
+        s.gitlab.base_url = String::new();
+        assert_eq!(status(&s).gitlab.problem, None);
+    }
 
     #[test]
     fn encodes_paths() {

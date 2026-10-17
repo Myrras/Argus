@@ -1,6 +1,6 @@
 /**
- * What needs attention in the sidebar's Providers section: GitHub unavailable, GitLab not set up or
- * without a token, and the last refresh's errors the status does not
+ * What needs attention in the sidebar's Providers section: GitHub unavailable, GitLab not set up,
+ * off for an unusable URL or without a token, and the last refresh's errors the status does not
  * already explain.
  */
 
@@ -52,6 +52,16 @@ export function bannerItems(
       provider: "gitlab",
       tone: "info",
       text: "GitLab is not set up.",
+      settings: true,
+    });
+  } else if (status?.gitlab.problem === "invalidUrl") {
+    // A hand-edited settings file: saving settings refuses such a URL.
+    down.add("gitlab");
+    items.push({
+      key: "gl-url",
+      provider: "gitlab",
+      tone: "warning",
+      text: "GitLab is off: its URL must start with https:// (http:// only for localhost). Fix it in Settings.",
       settings: true,
     });
   } else if (status?.gitlab.configured && !status.gitlab.tokenPresent) {

@@ -317,11 +317,16 @@ export interface GithubStatus {
   loggedIn: boolean;
 }
 
+/** `provider::GitlabProblem`: why a configured GitLab is off anyway. */
+export type GitlabProblem = "invalidUrl";
+
 /** `provider::GitlabStatus`. */
 export interface GitlabStatus {
   configured: boolean;
   baseUrl: string;
   tokenPresent: boolean;
+  /** `null` when nothing is wrong. */
+  problem: GitlabProblem | null;
 }
 
 /** `provider::ProviderStatus`. */

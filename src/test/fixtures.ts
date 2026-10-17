@@ -135,6 +135,7 @@ export function status(
       configured: true,
       baseUrl: "https://gitlab.example.test",
       tokenPresent: true,
+      problem: null,
     },
     ...overrides,
   };

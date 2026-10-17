@@ -33,9 +33,11 @@ export function providerLines(status: ProviderStatus): ProviderLine[] {
       host: gl.baseUrl.replace(/^https?:\/\//, ""),
       ...(!gl.configured
         ? { state: "Not set up", tone: "off" as const }
-        : !gl.tokenPresent
-          ? { state: "No token", tone: "warning" as const }
-          : { state: "Token set", tone: "ok" as const }),
+        : gl.problem === "invalidUrl"
+          ? { state: "Invalid URL", tone: "warning" as const }
+          : !gl.tokenPresent
+            ? { state: "No token", tone: "warning" as const }
+            : { state: "Token set", tone: "ok" as const }),
     },
   ];
 }
