@@ -17,9 +17,14 @@ import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { useThreadStore } from "../state/threadStore";
+import { useToastStore } from "../state/toastStore";
 import { aiRun, finding } from "../test/aiFixtures";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
-import { runFlowAction } from "./keyboardFlow";
+import {
+  commentOnFocusedItem,
+  lineTarget,
+  runFlowAction,
+} from "./keyboardFlow";
 import { useAppShortcuts } from "./useAppShortcuts";
 
 const r = review();
@@ -324,6 +329,76 @@ describe("since my last review", () => {
         baseSha: null,
       }),
     );
+  });
+});
+
+describe("removed lines", () => {
+  const withOldLines = () =>
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === "commentable_lines"
+        ? Promise.resolve({
+            reviewId: r.id,
+            path: "src/a.rs",
+            baseSha: r.baseSha,
+            headSha: r.headSha,
+            hunks: [{ old: [2], new: [1, 2, 3] }],
+          })
+        : Promise.resolve([]),
+    );
+  const approximate = () => {
+    const base = useCodeViewStore.getState().byReview[r.id]!;
+    useCodeViewStore.setState({
+      byReview: {
+        [r.id]: {
+          ...base,
+          files: { ...base.files!, baseApproximate: true },
+        },
+      },
+    });
+  };
+
+  it("take a comment in the split view against an exact base", async () => {
+    withOldLines();
+    useLayoutStore.setState({ diffLayout: "split" });
+    await expect(lineTarget(r.id, "src/a.rs", "old", 2)).resolves.toMatchObject(
+      { side: "old", anchor: 2, baseSha: r.baseSha },
+    );
+  });
+
+  it("take none while the base is only approximate, as in the code view", async () => {
+    withOldLines();
+    useLayoutStore.setState({ diffLayout: "split" });
+    approximate();
+    await expect(lineTarget(r.id, "src/a.rs", "old", 2)).resolves.toBeNull();
+    // The new side does not depend on the left side.
+    await expect(lineTarget(r.id, "src/a.rs", "new", 2)).resolves.toMatchObject(
+      { side: "new", anchor: 2 },
+    );
+
+    // `c` on a focused old-side thread: a notice, no composer, no post.
+    useToastStore.setState({ toasts: [] });
+    useFocusStore.setState({
+      reviewId: r.id,
+      item: {
+        kind: "thread",
+        threadId: onA.id,
+        mine: false,
+        card: "src/a.rs",
+        line: 2,
+        side: "old",
+      },
+    });
+    expect(commentOnFocusedItem(r.id)).toBe(true);
+    await waitFor(() =>
+      expect(useToastStore.getState().toasts).toHaveLength(1),
+    );
+    expect(useCommentStore.getState().composer).toBeNull();
+    for (const cmd of WRITES) {
+      expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+        cmd,
+        expect.anything(),
+      );
+    }
   });
 });
 

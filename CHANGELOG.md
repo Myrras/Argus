@@ -180,7 +180,8 @@ when it merges.
 - GitLab over plain http is refused except on localhost, so your token never
   travels unencrypted.
 - On a pull request too large for GitHub to find its merge base, removed
-  lines take no comments (the file says why), unless a local clone supplies
+  lines take no comments (the file says why; the `c` key and posting refuse
+  them as well, so nothing lands on the wrong line), unless a local clone supplies
   the merge base: then comments and AI findings on them post as shown. The
   clone needs the base branch's latest commit; fetch it when the file still
   says removed lines take no comments.

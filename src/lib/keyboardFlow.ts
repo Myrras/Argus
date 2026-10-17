@@ -32,10 +32,13 @@ export async function lineTarget(
   const files = useCodeViewStore.getState().byReview[reviewId]?.files;
   if (!files || line < 1) return null;
   // The unified view comments on new-side lines only; "since" mode's left
-  // side is not the base old-side lines refer to.
+  // side is not the base old-side lines refer to, and an approximate base
+  // may not line up with the patch (FileDiffCard's `oldSideOff`).
   if (
     side === "old" &&
-    (files.sinceLastReview || useLayoutStore.getState().diffLayout !== "split")
+    (files.sinceLastReview ||
+      files.baseApproximate ||
+      useLayoutStore.getState().diffLayout !== "split")
   ) {
     return null;
   }
