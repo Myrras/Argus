@@ -277,7 +277,7 @@ describe("SettingsModal — AI tab", () => {
 
   it("warns when the configured agent is auggie, with no run read yet", async () => {
     const warning =
-      "Auggie can still use MCP tools from your own Auggie setup; Argus cannot guarantee this run only reads.";
+      "Auggie can still use MCP tools from your own Auggie setup and read local secret files in the clone (.env files, keys); Argus cannot guarantee this run only reads.";
     const initialAi = useAiStore.getState();
     useAiStore.setState({ runs: {} });
     await renderTab("AI");

@@ -381,9 +381,14 @@ pub(crate) fn claude_settings(allowed: &[PathBuf], clone: Option<&Path>) -> serd
 }
 
 /// Deny rules for the files of a clone that hold credentials rather than
-/// code: all of `.git` (its `config` keeps the remote URL, a token in it
-/// included, and `FETCH_HEAD` and the reflog repeat that URL), git and
-/// package-registry credential files, and every `.env*` file. A character
+/// code: all of `.git`, a nested repository's or submodule's included (its
+/// `config` keeps the remote URL, a token in it included, and `FETCH_HEAD`
+/// and the reflog repeat that URL), git and package-registry credential
+/// files, every `.env*` file, private keys (`*.pem`, `*.key`, Rails'
+/// `master.key` among them) and the usual local app secrets (.NET's
+/// `appsettings.<env>.json` and `local.settings.json`, Wrangler's
+/// `.dev.vars`, `secrets.json`/`.yml`). Exact names and extensions only: a
+/// `*.keymap` or `secrets.rs` is code the review may need. A character
 /// of the clone's path the rule syntax would read becomes `?`. Unix paths
 /// only, as in [`deny_outside`].
 pub(crate) fn clone_secret_rules(clone: &Path) -> Vec<String> {
@@ -411,6 +416,16 @@ pub(crate) fn clone_secret_rules(clone: &Path) -> Vec<String> {
         "**/.pypirc",
         "**/.env*",
         "**/.env*/**",
+        "**/.git",
+        "**/.git/**",
+        "**/*.pem",
+        "**/*.key",
+        "**/appsettings.*.json",
+        "**/local.settings.json",
+        "**/.dev.vars",
+        "**/secrets.json",
+        "**/secrets.yml",
+        "**/secrets.yaml",
     ]
     .iter()
     .map(|p| format!("Read(/{base}/{p})"))
@@ -1099,6 +1114,32 @@ Total: 35 tools (34 enabled, 1 disabled)\n";
         // The clone itself stays readable.
         assert!(!rules.iter().any(|r| r == "Read(//src/w?1?/widgets/**)"));
         assert!(clone_secret_rules(Path::new("relative")).is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore)]
+    fn nested_repos_keys_and_app_secrets_are_denied() {
+        let rules = clone_secret_rules(Path::new("/src/widgets"));
+        for p in [
+            "**/.git",
+            "**/.git/**",
+            "**/*.pem",
+            "**/*.key",
+            "**/appsettings.*.json",
+            "**/local.settings.json",
+            "**/.dev.vars",
+            "**/secrets.json",
+            "**/secrets.yml",
+            "**/secrets.yaml",
+        ] {
+            let rule = format!("Read(//src/widgets/{p})");
+            assert!(rules.contains(&rule), "{rule}: {rules:?}");
+        }
+        // Exact names and extensions: a `*.keymap` or `secrets.rs` is code
+        // the review may need.
+        for r in &rules {
+            assert!(!r.contains(".key*") && !r.contains("secrets.*"), "{r}");
+        }
         let settings = claude_settings(&[], Some(Path::new("/src/widgets")));
         let deny = settings["permissions"]["deny"].as_array().unwrap();
         assert!(deny.iter().any(|r| r == "Read(//src/widgets/.git/**)"));
