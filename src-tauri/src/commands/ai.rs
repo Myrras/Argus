@@ -11,7 +11,7 @@ use tauri::{AppHandle, State};
 
 use argus_core::{
     AiRunState, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost, FindingPostOutcome,
-    FindingPostResult, Verdict, VerdictLabel,
+    FindingPostResult, PostErrorKind, Verdict, VerdictLabel,
 };
 
 use super::{blocking, blocking_post, parse_id, parse_review_id, parse_thread_id};
@@ -121,21 +121,24 @@ pub async fn post_findings(
     let results = blocking_post(state, move |core| core.post_findings(id, posts)).await;
     super::post::emit_if_head_moved(&app, id, &results);
     let results = results?;
-    if any_posted(&results) {
+    if changes_review(&results) {
         events::emit_changed(&app, id);
     }
     Ok(results)
 }
 
-fn any_posted(results: &[FindingPostResult]) -> bool {
-    results
-        .iter()
-        .any(|r| matches!(r.outcome, FindingPostOutcome::Posted { .. }))
+/// Whether the core stored something new for the review: a finding was
+/// posted, or one was refused for a push (it stored the new head).
+fn changes_review(results: &[FindingPostResult]) -> bool {
+    results.iter().any(|r| match &r.outcome {
+        FindingPostOutcome::Posted { .. } => true,
+        FindingPostOutcome::Failed(e) => e.kind == PostErrorKind::HeadMoved,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use argus_core::{PostError, PostErrorKind};
+    use argus_core::PostError;
 
     use super::*;
 
@@ -160,11 +163,17 @@ mod tests {
     }
 
     #[test]
-    fn only_a_posted_finding_changes_the_review() {
+    fn a_posted_finding_or_a_moved_head_changes_the_review() {
         let (a, b) = (FindingId::new(), FindingId::new());
-        assert!(!any_posted(&[]));
-        assert!(!any_posted(&[failed(a), failed(b)]));
-        assert!(any_posted(&[failed(a), posted(b)]));
+        assert!(!changes_review(&[]));
+        assert!(!changes_review(&[failed(a), failed(b)]));
+        assert!(changes_review(&[failed(a), posted(b)]));
+        // GitLab refused one for a push: the core stored the new head.
+        let moved = FindingPostResult {
+            finding_id: b,
+            outcome: FindingPostOutcome::Failed(PostError::new(PostErrorKind::HeadMoved, "moved")),
+        };
+        assert!(changes_review(&[failed(a), moved]));
     }
 
     #[test]

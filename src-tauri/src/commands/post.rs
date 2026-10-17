@@ -41,10 +41,20 @@ pub async fn post_comments(
     let results = blocking_post(state, move |core| core.post_comments(id, comments)).await;
     emit_if_head_moved(&app, id, &results);
     let results = results?;
-    if results.iter().any(PostResult::is_posted) {
+    if changes_review(&results) {
         events::emit_changed(&app, id);
     }
     Ok(results)
+}
+
+/// Whether the core stored something new for the review: a comment was
+/// posted, or one was refused for a push (GitLab's version check; the core
+/// stored the new head).
+fn changes_review(results: &[PostResult]) -> bool {
+    results.iter().any(|r| match r {
+        PostResult::Posted(_) => true,
+        PostResult::Failed(e) => e.kind == PostErrorKind::HeadMoved,
+    })
 }
 
 /// Reply to a stored thread of the review `review_id`. The thread's review
@@ -133,6 +143,17 @@ mod tests {
         assert!(check_thread_review(a, a).is_ok());
         let err = IpcError::from(check_thread_review(a, b).unwrap_err());
         assert_eq!(err.kind, "invalidInput");
+    }
+
+    #[test]
+    fn a_posted_comment_or_a_moved_head_changes_the_review() {
+        let failed = |kind| PostResult::Failed(argus_core::PostError::new(kind, "x"));
+        assert!(!changes_review(&[]));
+        assert!(!changes_review(&[failed(PostErrorKind::LineNotInDiff)]));
+        assert!(changes_review(&[
+            failed(PostErrorKind::LineNotInDiff),
+            failed(PostErrorKind::HeadMoved),
+        ]));
     }
 
     #[test]

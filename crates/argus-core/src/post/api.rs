@@ -18,7 +18,7 @@ use crate::ids::{ReviewId, ThreadId};
 use crate::poll;
 use crate::provider::{DiffRange, FileDiff, ReviewProvider, Side, Thread};
 use crate::review::{self, ReviewStatus, RoundInput};
-use crate::store::{ReviewRecord, StoredThread};
+use crate::store::{self, ReviewRecord, StoredThread};
 use crate::Core;
 
 impl Core {
@@ -32,7 +32,8 @@ impl Core {
     /// in its slot and the rest still go out. After at least one comment
     /// was posted the review's threads are refreshed and its watermark
     /// moves to the head the user was looking at (see
-    /// [`advance_after_write`]).
+    /// [`advance_after_write`]); when none was but one was refused with
+    /// [`PostErrorKind::HeadMoved`], the review is refreshed all the same.
     ///
     /// `Err` only for failures before anything was posted: the review or
     /// its provider is unknown, or its head or diff could not be read.
@@ -74,7 +75,7 @@ impl Core {
         }
         // Per head a comment was written at: the diff from it to now.
         let mut since: HashMap<String, Result<FileDiff, PostError>> = HashMap::new();
-        let mut posted_any = false;
+        let (mut posted_any, mut head_moved) = (false, false);
         for (c, slot) in comments.iter().zip(results.iter_mut()) {
             if slot.is_some() {
                 continue;
@@ -89,6 +90,9 @@ impl Core {
                 &mut since,
             );
             posted_any |= outcome.is_ok();
+            head_moved |= outcome
+                .as_ref()
+                .is_err_and(|e| e.kind == PostErrorKind::HeadMoved);
             *slot = Some(match outcome {
                 Ok(p) => PostResult::Posted(p),
                 Err(e) => PostResult::Failed(e),
@@ -96,6 +100,10 @@ impl Core {
         }
         if posted_any {
             self.after_write_logged(provider.as_ref(), &record, false);
+        } else if head_moved {
+            // A comment the platform refused for a push (GitLab's own
+            // version check): store the new head, as for a refused batch.
+            self.refresh_after_head_moved(provider.as_ref(), &record);
         }
         Ok(results.into_iter().flatten().collect())
     }
@@ -264,16 +272,21 @@ impl Core {
             // The write went through; the watermark still moves.
             tracing::debug!("refreshing after a post failed: {e}");
         }
-        let record = self.review(before.id)?;
-        let threads: Vec<Thread> = self
-            .store
-            .threads(before.id)?
-            .into_iter()
-            .map(|t| t.thread)
-            .collect();
-        let next = advance_after_write(&record, &threads, &before.head_sha, approved, now);
-        self.store.upsert_review(&next)?;
-        Ok(next)
+        // Read, advanced and written in one transaction: a poll storing at
+        // the same time lands before or after it, never in between (a
+        // write of a record read earlier would undo it).
+        self.store.transaction(|conn| {
+            let record = store::read_review(conn, before.id)?.ok_or(CoreError::NotFound)?;
+            let threads: Vec<Thread> = store::read_threads(conn, before.id)?
+                .into_iter()
+                .map(|t| t.thread)
+                .collect();
+            #[cfg(test)]
+            before_watermark_write();
+            let next = advance_after_write(&record, &threads, &before.head_sha, approved, now);
+            store::write_review(conn, &next, store::WriteColumns::All)?;
+            Ok(next)
+        })
     }
 
     /// Fetch one review and its threads and store them, as a poll would.
@@ -297,6 +310,22 @@ impl Core {
             now,
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run once inside `after_write` between reading the stored review and
+    /// writing it back (tests only): where a poll storing at the same time
+    /// would land.
+    pub(crate) static BEFORE_WATERMARK_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_watermark_write() {
+    if let Some(f) = BEFORE_WATERMARK_WRITE.with(|h| h.borrow_mut().take()) {
+        f();
     }
 }
 

@@ -345,8 +345,13 @@ pub fn resolve(
         }
         (Side::Old, _) => {
             if c.base_sha.as_deref().is_some_and(|b| b != current.base_sha) {
+                // The left side differs either because the lines were read
+                // in a diff since the last review (an AI run's scope), whose
+                // left side is a commit of the branch, or because the
+                // branch was rebased. Neither numbering fits the review's
+                // diff, and the two cannot be told apart here.
                 return Err(not_in_diff(format!(
-                    "{label} ({}) is no longer in the diff: the base changed since",
+                    "{label} ({}) was read against another left side than the review's diff has now. Comments on removed lines from a since-last-review AI run can't be posted; re-run the AI pass on the full diff (after a rebase, comment again on the current diff).",
                     side_name(Side::Old)
                 )));
             }

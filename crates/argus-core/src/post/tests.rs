@@ -335,7 +335,11 @@ fn keeps_old_side_lines_unless_the_base_moved() {
     pinned.base_sha = Some("old-base".into());
     let err = resolve(&pinned, "h1", &current, None).unwrap_err();
     assert_eq!(err.kind, PostErrorKind::LineNotInDiff);
-    assert!(err.message.contains("base changed"));
+    assert!(
+        err.message.contains("since-last-review AI run") && err.message.contains("full diff"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -477,6 +481,12 @@ impl ReviewProvider for Fake {
     fn post_comment(&self, r: &ReviewRef, c: &PlacedComment) -> Result<PostedComment, PostError> {
         if c.body.contains("reject") {
             return Err(PostError::new(PostErrorKind::PostRejected, "Fake: refused"));
+        }
+        // As GitLab's own version check: a push landed right before this
+        // comment, which is refused in its slot (not the whole batch).
+        if c.body.contains("push first") {
+            push_h2(self);
+            return Err(PostError::new(PostErrorKind::HeadMoved, "Fake: moved"));
         }
         let mut posted = self.posted.lock().unwrap();
         posted.push(c.clone());
@@ -877,4 +887,65 @@ fn the_watermark_rule_after_a_write() {
     assert_eq!(next.last_reviewed_sha.as_deref(), Some("h0"));
     assert_eq!(next.status, ReviewStatus::NeedsReReview);
     assert_eq!(next.round, record.round + 1);
+}
+
+#[test]
+fn a_comment_refused_for_a_moved_head_refreshes_the_review() {
+    let (core, _fake, id) = setup();
+    let mut moved = comment(12, Side::New);
+    moved.body = "push first".into();
+    let results = core.post_comments(id, vec![moved]).unwrap();
+    let PostResult::Failed(e) = &results[0] else {
+        panic!("{results:?}")
+    };
+    assert_eq!(e.kind, PostErrorKind::HeadMoved);
+    // Nothing was posted, yet the stored review caught up with the push,
+    // so the retry the user makes is placed on the new head.
+    let after = core.review(id).unwrap();
+    assert_eq!(after.head_sha, "h2");
+    assert_eq!(after.last_reviewed_sha, None);
+    let results = core
+        .post_comments(id, vec![comment(14, Side::New)])
+        .unwrap();
+    assert!(results[0].is_posted(), "{results:?}");
+}
+
+#[test]
+fn a_poll_storing_while_the_watermark_moves_is_kept() {
+    let (core, fake, id) = setup();
+    let store = core.store.clone();
+    let mut renamed = fake.detail.lock().unwrap().clone();
+    renamed.review.title = "Renamed".into();
+    let platform = fake.clone();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let poll: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+    let handle = poll.clone();
+    // Right after the post read the stored review back, a poll stores a
+    // change (a new title). It is given a moment to land: with the read
+    // and the write in one transaction it waits for the write instead.
+    super::api::BEFORE_WATERMARK_WRITE.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            let threads = platform.threads.lock().unwrap().clone();
+            *handle.lock().unwrap() = Some(std::thread::spawn(move || {
+                crate::poll::persist(&store, None, &renamed, &threads, ME, true, at(11, 12))
+                    .unwrap();
+                let _ = done_tx.send(());
+            }));
+            let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));
+        }));
+    });
+    let results = core
+        .post_comments(id, vec![comment(12, Side::New)])
+        .unwrap();
+    assert!(results[0].is_posted(), "{results:?}");
+    poll.lock()
+        .unwrap()
+        .take()
+        .expect("the hook ran")
+        .join()
+        .unwrap();
+    let rec = core.review(id).unwrap();
+    assert_eq!(rec.review.title, "Renamed");
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
 }
