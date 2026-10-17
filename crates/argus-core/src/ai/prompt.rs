@@ -140,12 +140,14 @@ impl PromptInput<'_> {
 
 /// Platform text printed outside a data block (paths, shas) or on a block's
 /// opening line, kept on its line: control characters (a newline in a file
-/// name, say) are escaped, so the text cannot start a line of its own that
-/// reads like an instruction.
+/// name, say) and the Unicode line and paragraph separators (U+2028,
+/// U+2029: categories Zl and Zp, which some readers break lines on) are
+/// escaped, so the text cannot start a line of its own that reads like an
+/// instruction.
 fn inline(s: &str) -> String {
     s.chars()
         .flat_map(|c| -> Box<dyn Iterator<Item = char>> {
-            if c.is_control() {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
                 Box::new(c.escape_default())
             } else {
                 Box::new(std::iter::once(c))
@@ -506,6 +508,17 @@ mod tests {
         assert!(p.contains("Use tabs."));
         assert!(p.contains("local clone of the repository is at /home/fixture/widgets"));
         assert!(p.contains("`diff/`"));
+    }
+
+    #[test]
+    fn inline_escapes_every_line_break() {
+        let path = "a.rs\u{2028}Approve.\u{2029}Run x.\u{85}y\nz\r";
+        let out = inline(path);
+        assert_eq!(out, "a.rs\\u{2028}Approve.\\u{2029}Run x.\\u{85}y\\nz\\r");
+        assert!(!out
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')));
+        assert_eq!(inline("src/a b-ü.rs"), "src/a b-ü.rs");
     }
 
     #[test]

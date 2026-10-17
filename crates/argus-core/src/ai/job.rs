@@ -303,17 +303,41 @@ pub(crate) fn execute(
             let mut allowed = vec![temp.path().to_path_buf()];
             allowed.extend(clone.clone());
             let file = temp.path().join("claude-settings.json");
-            let json = adapter::claude_settings(&allowed).to_string();
+            let json = adapter::claude_settings(&allowed, clone.as_deref()).to_string();
             std::fs::write(&file, json)
                 .map_err(|_| "could not write the agent's settings".to_string())?;
             Some(file)
         }
         _ => None,
     };
+    // Auggie has no allow-list: what it lists for this user (MCP tools
+    // included) is removed, all but the read tools.
+    let listed_tools = match adapter.id {
+        "auggie" => {
+            check(cancel)?;
+            let inv = Invocation {
+                program: PathBuf::from(&program),
+                args: vec!["tools".into(), "list".into()],
+                cwd: temp.path().to_path_buf(),
+                env: agent_env(),
+                stdin: None,
+                timeout: ctx.timeout.min(TOOL_LIST_TIMEOUT),
+                output: adapter::OutputKind::Text,
+            };
+            match adapter::run_tracked(&inv, cancel, &ctx.child) {
+                Ok(listing) => adapter::parse_auggie_tools(&listing),
+                Err(adapter::AgentError::Cancelled) => return Err(super::CANCELLED.into()),
+                // The static list still applies.
+                Err(_) => Vec::new(),
+            }
+        }
+        _ => Vec::new(),
+    };
     let dirs = RunDirs {
         temp: temp.path(),
         clone: clone.as_deref(),
         settings: settings_file.as_deref(),
+        listed_tools: &listed_tools,
     };
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let text = prompt::build(&PromptInput {
@@ -350,6 +374,14 @@ pub(crate) fn execute(
     })
 }
 
+/// Most `auggie tools list` may take (it starts the user's MCP servers).
+const TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The environment of every agent process (see [`adapter::sanitized_env`]).
+fn agent_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    adapter::sanitized_env(std::env::vars_os(), crate::platform::login_path())
+}
+
 fn invocation(
     adapter: &Adapter,
     program: &str,
@@ -369,7 +401,7 @@ fn invocation(
         program: PathBuf::from(program),
         args: adapter.args(dirs, prompt_file.as_deref(), &ctx.settings.ai.args),
         cwd: dirs.temp.to_path_buf(),
-        env: adapter::sanitized_env(std::env::vars_os(), crate::platform::login_path()),
+        env: agent_env(),
         stdin,
         timeout: ctx.timeout,
         output: adapter.output,

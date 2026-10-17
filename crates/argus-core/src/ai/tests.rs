@@ -667,6 +667,58 @@ fn shutdown_cancels_everything_and_starts_nothing_after() {
     assert_eq!(probe.starts.load(Ordering::SeqCst), 2);
 }
 
+/// Shutdown kills the agent itself, not only through the run's cancel
+/// flag: a run thread that is not polling the flag (here: one that only
+/// waits for its agent to exit) still ends within the grace.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn shutdown_kills_the_agent_of_a_run_that_ignores_its_cancel_flag() {
+    let (store, ids) = store_with(&[1]);
+    let started = Arc::new(AtomicBool::new(false));
+    let s2 = started.clone();
+    let ex: Executor = Arc::new(
+        move |_: &Store, _: &ReviewRecord, ctx: &JobContext, _: &AtomicBool| {
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            *ctx.child.lock().unwrap() = Some(child);
+            s2.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let exited = ctx
+                    .child
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .is_some_and(|c| c.try_wait().ok().flatten().is_some());
+                if exited || Instant::now() > deadline {
+                    return Err("the agent exited".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        },
+    );
+    let rt = AiRuntime::new(store, true, ex, MAX_CONCURRENT);
+    assert!(rt.enqueue(
+        ids[0],
+        ctx(Settings::default(), FakeProvider::new(&["src/a.rs"]))
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the run never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let start = Instant::now();
+    assert!(rt.shutdown(Duration::from_secs(5)));
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(rt.state(ids[0]).unwrap().error.as_deref(), Some(CANCELLED));
+}
+
 #[test]
 fn a_secret_in_the_answer_never_reaches_the_store() {
     let (store, ids) = store_with(&[1]);
@@ -1369,13 +1421,25 @@ fn claude_runs_in_the_clone_with_its_conventions_in_a_later_round() {
         .iter()
         .map(|r| r.as_str().unwrap().to_string())
         .collect();
-    // The clone and the run's dir stay readable, their surroundings not.
+    // The clone and the run's dir stay readable, their surroundings not,
+    // and neither do the clone's git dir and `.env` files.
+    assert_eq!(
+        settings["permissions"]["blockReadsOutsideWorkingDirectories"],
+        true
+    );
     for open in [&canonical_clone, &cwd] {
-        let rule = format!("Read(/{})", open.display());
-        assert!(
-            !deny.iter().any(|r| r.starts_with(&rule)),
-            "{rule} in {deny:?}"
-        );
+        for rule in [
+            format!("Read(/{})", open.display()),
+            format!("Read(/{}/**)", open.display()),
+        ] {
+            assert!(!deny.contains(&rule), "{rule} in {deny:?}");
+        }
+    }
+    let run_dir = format!("Read(/{}/", cwd.display());
+    assert!(!deny.iter().any(|r| r.starts_with(&run_dir)), "{deny:?}");
+    for secret in [".git/**", "**/.env*"] {
+        let rule = format!("Read(/{}/{secret})", canonical_clone.display());
+        assert!(deny.contains(&rule), "{rule} not in {deny:?}");
     }
     #[cfg(unix)]
     assert!(
@@ -1656,6 +1720,11 @@ fn auggie_takes_an_instruction_file_and_answers_in_text() {
         "auggie",
         r#"#!/bin/sh
 dir="$(dirname "$0")"
+if [ "$1" = "tools" ]; then
+  pwd -P > "$dir/tools-cwd.txt"
+  printf 'Integration Tools:\n  \342\234\223 add_todo_fixture   enabled\n  \342\234\223 view   enabled\n'
+  exit 0
+fi
 printf '%s\n' "$@" > "$dir/argv.txt"
 while [ $# -gt 0 ]; do
   if [ "$1" = "--instruction-file" ]; then cp "$2" "$dir/prompt.txt"; fi
@@ -1675,7 +1744,13 @@ printf 'Sure.\n```json\n{"findings":[],"checklist":[{"text":"Check the rollout"}
     assert_eq!(out.checklist, vec!["Check the rollout"]);
     let argv = std::fs::read_to_string(bin.path().join("argv.txt")).unwrap();
     assert!(argv.starts_with("--print\n--quiet\n--ask\n--dont-save-session\n--workspace-root\n"));
-    assert!(argv.contains("--remove-tool\nlaunch-process\n"), "{argv}");
+    assert!(argv.contains("--remove-tool=launch-process\n"), "{argv}");
+    // What `auggie tools list` named, in the run's own dir, goes too; the
+    // read tools stay.
+    assert!(argv.contains("--remove-tool=add_todo_fixture\n"), "{argv}");
+    assert!(!argv.contains("--remove-tool=view\n"), "{argv}");
+    let tools_cwd = std::fs::read_to_string(bin.path().join("tools-cwd.txt")).unwrap();
+    assert!(tools_cwd.contains("argus-ai-"), "{tools_cwd}");
     assert!(argv.contains("--instruction-file\n"), "{argv}");
     assert!(!argv.contains("--add-workspace"), "{argv}");
     let prompt = std::fs::read_to_string(bin.path().join("prompt.txt")).unwrap();
