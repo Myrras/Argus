@@ -13,7 +13,7 @@
 //! cached body and `X-Next-Page`. A 429 stops all calls until GitLab's
 //! `Retry-After` / `RateLimit-Reset`. Requests time out (connect and total).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -51,6 +51,10 @@ const DISCUSSION_PAGES: u32 = 100;
 
 /// How many commented-on MRs the list fetches at the same time.
 const LIST_PARALLELISM: usize = 4;
+
+/// How long a commented-on MR seen merged or closed is left out of the
+/// list before it is read again (it may have been reopened).
+const FINAL_RECHECK: chrono::Duration = chrono::Duration::days(1);
 
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
@@ -186,9 +190,14 @@ pub struct GitlabProvider {
     /// Conditional-request cache of GETs, keyed by path under `/api/v4`.
     cache: ConditionalCache,
     limit: Backoff,
-    /// Commented-on MRs (project id, iid) seen merged or closed: final, so
-    /// the list never fetches them again. Memory only.
-    done: Mutex<HashSet<(u64, u64)>>,
+    /// Commented-on MRs (project id, iid) seen merged or closed, and when:
+    /// the list skips them for [`FINAL_RECHECK`] (`final_recheck`), then
+    /// reads them once more in case one was reopened. Memory only.
+    done: Mutex<HashMap<(u64, u64), DateTime<Utc>>>,
+    final_recheck: chrono::Duration,
+    /// The last successful read of each commented-on open MR: what the list
+    /// shows when a read fails once (see `list_reviews`). Memory only.
+    commented: Mutex<HashMap<(u64, u64), ReviewRef>>,
 }
 
 impl GitlabProvider {
@@ -204,8 +213,17 @@ impl GitlabProvider {
             client: build_client(REQUEST_TIMEOUT),
             cache: ConditionalCache::default(),
             limit: Backoff::default(),
-            done: Mutex::new(HashSet::new()),
+            done: Mutex::new(HashMap::new()),
+            final_recheck: FINAL_RECHECK,
+            commented: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Read a commented-on MR seen merged or closed again after `after`
+    /// instead of [`FINAL_RECHECK`] (tests).
+    pub fn with_final_recheck(mut self, after: chrono::Duration) -> Self {
+        self.final_recheck = after;
+        self
     }
 
     /// Give up on a request after `timeout` instead of the default 30 s.
@@ -365,6 +383,13 @@ impl GitlabProvider {
         Ok(all)
     }
 
+    fn forget_commented(&self, project: u64, iid: u64) {
+        self.commented
+            .lock()
+            .expect("commented lock poisoned")
+            .remove(&(project, iid));
+    }
+
     fn me(&self) -> CoreResult<GlUser> {
         let mut me = self.me.lock().expect("me lock poisoned");
         if let Some(m) = me.as_ref() {
@@ -488,8 +513,10 @@ impl ReviewProvider for GitlabProvider {
     /// on a large instance for the user's notes is far too expensive, so the
     /// second half reads the user's own `commented` events of the last
     /// [`COMMENTED_DAYS`] days and fetches the MRs they point at, a few at
-    /// a time. One of those failing is skipped (a rate limit stops the
-    /// list), and one seen merged or closed is not fetched again.
+    /// a time. One of those failing stays listed as it was last read (or is
+    /// skipped when it never was; a rate limit stops the list): dropping it
+    /// would mark the stored review unlisted for a poll. One seen merged or
+    /// closed is not fetched again for [`FINAL_RECHECK`].
     fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
         let me = self.me()?;
         let reviewing: Vec<GlMr> = self.get_all(&format!(
@@ -507,7 +534,12 @@ impl ReviewProvider for GitlabProvider {
         let after = (Utc::now() - chrono::Duration::days(COMMENTED_DAYS)).format("%Y-%m-%d");
         let events: Vec<GlEvent> =
             self.get_all(&format!("/events?action=commented&after={after}"))?;
-        let done = self.done.lock().expect("done lock poisoned").clone();
+        let now = Utc::now();
+        let done: HashSet<(u64, u64)> = {
+            let mut done = self.done.lock().expect("done lock poisoned");
+            done.retain(|_, at| now - *at < self.final_recheck);
+            done.keys().copied().collect()
+        };
         let mut wanted: Vec<(u64, u64)> = Vec::new();
         for e in events {
             let Some(note) = e.note else { continue };
@@ -544,25 +576,41 @@ impl ReviewProvider for GitlabProvider {
                 // The whole provider is paused: so is the list.
                 Err(e) if super::is_rate_limited(&e) => return Err(e),
                 // Gone or no longer visible: just not listed.
-                Err(CoreError::NotFound) => continue,
-                // One MR failing never costs the rest of the list; the
-                // next poll tries it again.
+                Err(CoreError::NotFound) => {
+                    self.forget_commented(project, iid);
+                    continue;
+                }
+                // One MR failing never costs the rest of the list, nor
+                // that MR its place in it; the next poll tries it again.
                 Err(e) => {
-                    tracing::debug!("skipping commented MR {project}!{iid}: {e}");
+                    tracing::debug!("commented MR {project}!{iid} unreadable: {e}");
+                    let last = self
+                        .commented
+                        .lock()
+                        .expect("commented lock poisoned")
+                        .get(&(project, iid))
+                        .cloned();
+                    list.extend(last);
                     continue;
                 }
             };
             if mr.state != "opened" {
                 // Merged or closed is final for Argus (the poll treats it
-                // so too): not fetched again.
+                // so too): not fetched again for a while.
                 self.done
                     .lock()
                     .expect("done lock poisoned")
-                    .insert((project, iid));
+                    .insert((project, iid), now);
+                self.forget_commented(project, iid);
                 continue;
             }
             if !same_user(&mr.author.username, &me.username) {
-                list.push(self.to_ref(&mr));
+                let r = self.to_ref(&mr);
+                self.commented
+                    .lock()
+                    .expect("commented lock poisoned")
+                    .insert((project, iid), r.clone());
+                list.push(r);
             }
         }
         list.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
