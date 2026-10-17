@@ -353,22 +353,46 @@ fn a_reply_between_the_last_fetch_and_the_click_still_counts() {
 }
 
 #[test]
-fn a_note_the_user_saw_is_never_after_the_watermark() {
-    // The poll started at 10:10, but the fetch already held a reply made at
-    // 10:11 (it was on the network meanwhile): the user saw it.
+fn a_reply_a_fetch_missed_is_never_taken_as_seen() {
+    // The poll started at 10:10 and read the thread pages one by one: the
+    // author replied at 10:10:30 on a page already read (missed), and a
+    // note from 10:11 on a later page made it in. The watermark is the
+    // fetch's start, so the missed reply still counts once fetched.
     let d = detail("h1");
-    let seen = thread(
-        "1",
-        ME,
+    let mine = thread("1", ME, "h1", vec![note("1", ME, at(10, 9))]);
+    let other = thread(
+        "2",
+        AUTHOR,
         "h1",
-        vec![note("1", ME, at(10, 9)), note("2", AUTHOR, at(10, 11))],
+        vec![note("2", AUTHOR, at(10, 10) + chrono::Duration::minutes(1))],
     );
-    let fetched = step(None, &d, std::slice::from_ref(&seen), at(10, 10));
-    let done = mark_reviewed(&fetched, std::slice::from_ref(&seen), at(12, 0));
-    assert_eq!(done.last_reviewed_at, Some(at(10, 11)));
-    assert_eq!(done.status, ReviewStatus::WaitingOnAuthor);
-    // Never later than the click itself.
-    let click = at(10, 10) + chrono::Duration::seconds(30);
-    let early = mark_reviewed(&fetched, &[seen], click);
-    assert_eq!(early.last_reviewed_at, Some(click));
+    let stored = [mine.clone(), other.clone()];
+    let fetched = step(None, &d, &stored, at(10, 10));
+    let done = mark_reviewed(&fetched, &stored, at(12, 0));
+    assert_eq!(done.last_reviewed_at, Some(at(10, 10)));
+
+    let mut replied = mine;
+    replied.notes.push(note(
+        "3",
+        AUTHOR,
+        at(10, 10) + chrono::Duration::seconds(30),
+    ));
+    let next = step(Some(&done), &d, &[replied, other], at(12, 5));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::AuthorReplied]);
+}
+
+#[test]
+fn the_watermark_is_the_last_fetch_and_never_after_the_click() {
+    let d = detail("h1");
+    let fetched = step(None, &d, &[], at(10, 10));
+    assert_eq!(
+        mark_reviewed(&fetched, &[], at(12, 0)).last_reviewed_at,
+        Some(at(10, 10))
+    );
+    let click = at(10, 10) - chrono::Duration::seconds(30);
+    assert_eq!(
+        mark_reviewed(&fetched, &[], click).last_reviewed_at,
+        Some(click)
+    );
 }
