@@ -77,12 +77,34 @@ pub struct RefreshReport {
     pub refreshed_at: DateTime<Utc>,
 }
 
-/// Refresh every provider, in parallel.
+/// Where a refresh reads the time: [`Utc::now`] in the app, a fixed or
+/// scripted time in tests.
+pub(crate) type Clock<'a> = &'a (dyn Fn() -> DateTime<Utc> + Sync);
+
+/// Refresh every provider, in parallel, with the time fixed at `now`.
 pub fn refresh_all(
     providers: &[Arc<dyn ReviewProvider>],
     store: &Store,
     now: DateTime<Utc>,
 ) -> RefreshReport {
+    refresh_all_unless(providers, store, &move || now, None).expect("no stop flag to stop on")
+}
+
+/// [`refresh_all`], unless `stop` is set once the refresh lock is held:
+/// a poll loop stopped while it waited for another refresh (its settings
+/// were replaced, or Argus quits) ends there instead of running a whole
+/// refresh over its old providers first. `None` when it stopped.
+///
+/// The time is read from `clock` once the lock is held, and per review just
+/// before its fetch: what a review's `fetched_at` says it was read at, and
+/// what a slower fetch is ordered against (see [`persist`]), never predates
+/// the read, however long the refresh waited or ran.
+pub(crate) fn refresh_all_unless(
+    providers: &[Arc<dyn ReviewProvider>],
+    store: &Store,
+    clock: Clock<'_>,
+    stop: Option<&AtomicBool>,
+) -> Option<RefreshReport> {
     // One refresh at a time per database: a manual refresh asked for while
     // the poll is on the network waits for it, then reads afresh, instead of
     // fetching alongside it and racing it to the store. A refresh that
@@ -91,10 +113,19 @@ pub fn refresh_all(
         .refreshing
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+        return None;
+    }
+    let now = clock();
     let results: Vec<(Vec<ReviewId>, Vec<RefreshError>)> = std::thread::scope(|s| {
         let handles: Vec<_> = providers
             .iter()
-            .map(|p| (p.id(), s.spawn(|| refresh_provider(p.as_ref(), store, now))))
+            .map(|p| {
+                (
+                    p.id(),
+                    s.spawn(|| refresh_provider_with(p.as_ref(), store, clock)),
+                )
+            })
             .collect();
         handles
             .into_iter()
@@ -115,11 +146,16 @@ pub fn refresh_all(
         report.changed.extend(changed);
         report.errors.extend(errors);
     }
-    report
+    Some(report)
 }
 
-/// One fetched review, or why it could not be.
-type Fetched = (ReviewRef, bool, CoreResult<(ReviewDetail, Vec<Thread>)>);
+/// One fetched review (and when its fetch started), or why it could not be.
+type Fetched = (
+    ReviewRef,
+    bool,
+    DateTime<Utc>,
+    CoreResult<(ReviewDetail, Vec<Thread>)>,
+);
 
 /// Refresh one provider: what it lists now, plus the stored open reviews it
 /// no longer lists (fetched once more to learn whether they were merged,
@@ -134,6 +170,18 @@ pub fn refresh_provider(
     store: &Store,
     now: DateTime<Utc>,
 ) -> (Vec<ReviewId>, Vec<RefreshError>) {
+    refresh_provider_with(provider, store, &move || now)
+}
+
+/// [`refresh_provider`], reading the time from `clock`: once for the
+/// provider (its rate limit, which unlisted reviews are due), and per
+/// review just before its fetch.
+fn refresh_provider_with(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    clock: Clock<'_>,
+) -> (Vec<ReviewId>, Vec<RefreshError>) {
+    let now = clock();
     let pid = provider.id();
     let fail = |e: CoreError| (Vec::new(), vec![RefreshError::for_provider(provider, &e)]);
     if let Some(until) = provider.rate_limited_until().filter(|u| *u > now) {
@@ -173,18 +221,22 @@ pub fn refresh_provider(
                 .iter()
                 .map(|(r, listed)| {
                     let h = s.spawn(move || {
-                        let detail = provider.fetch_review(r)?;
-                        let threads = provider.fetch_threads(r)?;
-                        Ok((detail, threads))
+                        let started = clock();
+                        let fetch = || {
+                            let detail = provider.fetch_review(r)?;
+                            let threads = provider.fetch_threads(r)?;
+                            Ok((detail, threads))
+                        };
+                        (started, fetch())
                     });
                     (r, *listed, h)
                 })
                 .collect();
             for (r, listed, h) in handles {
-                let result = h
+                let (started, result) = h
                     .join()
-                    .unwrap_or_else(|_| Err(CoreError::Provider("a fetch crashed".into())));
-                fetched.push((r.clone(), listed, result));
+                    .unwrap_or_else(|_| (now, Err(CoreError::Provider("a fetch crashed".into()))));
+                fetched.push((r.clone(), listed, started, result));
             }
         });
     }
@@ -192,11 +244,11 @@ pub fn refresh_provider(
     let mut changed = Vec::new();
     let mut errors = Vec::new();
     let mut limited: Option<CoreError> = None;
-    for (r, listed, result) in fetched {
+    for (r, listed, started, result) in fetched {
         let id = r.id();
         let prev = stored.iter().find(|s| s.id == id);
         let outcome = match result {
-            Ok((detail, threads)) => persist(store, prev, &detail, &threads, &me, listed, now),
+            Ok((detail, threads)) => persist(store, prev, &detail, &threads, &me, listed, started),
             // An unlisted review that is gone (deleted, access lost): just
             // no longer listed.
             Err(CoreError::NotFound) if !listed => match prev {
@@ -208,7 +260,7 @@ pub fn refresh_provider(
                         Ok(())
                     };
                     marked
-                        .and_then(|_| store.touch_fetched(id, now))
+                        .and_then(|_| store.touch_fetched(id, started))
                         .map(|_| dropped)
                 }
                 None => Ok(false),
@@ -261,7 +313,10 @@ fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
 /// after a refresh that overtook it (after a post) would otherwise move the
 /// head back, start a false round and drop the threads posted meanwhile.
 /// An unchanged fetch still moves `fetched_at`, so it counts as the newest
-/// look at the review too.
+/// look at the review too. A stored `fetched_at` later than the wall clock
+/// (written while the clock ran ahead, corrected since) orders nothing: the
+/// check is skipped, or the review would not update until the clock caught
+/// up.
 pub(crate) fn persist(
     store: &Store,
     _prev: Option<&ReviewRecord>,
@@ -274,7 +329,11 @@ pub(crate) fn persist(
     let id = detail.review.id();
     store.transaction(|conn| {
         let prev = store::read_review(conn, id)?;
-        if prev.as_ref().is_some_and(|p| p.fetched_at > now) {
+        let wall = Utc::now();
+        if prev
+            .as_ref()
+            .is_some_and(|p| p.fetched_at > now && p.fetched_at <= wall)
+        {
             return Ok(false);
         }
         // The cached line walks at this head sharpen the untouched count;
@@ -356,7 +415,10 @@ impl Poller {
         let handle = std::thread::Builder::new()
             .name("argus-poll".into())
             .spawn(move || loop {
-                let report = refresh_all(&providers, &store, Utc::now());
+                let Some(report) = refresh_all_unless(&providers, &store, &Utc::now, Some(&stop))
+                else {
+                    return;
+                };
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }

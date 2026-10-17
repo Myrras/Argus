@@ -56,6 +56,12 @@ const LIST_PARALLELISM: usize = 4;
 /// list before it is read again (it may have been reopened).
 const FINAL_RECHECK: chrono::Duration = chrono::Duration::days(1);
 
+/// How many polls in a row a commented-on MR whose read fails stays listed
+/// as last seen: a blip costs it nothing, a read that keeps failing (a
+/// permanent error on that MR) drops it instead of keeping it for as long
+/// as its comment event stays in the feed.
+const COMMENTED_FAILURES_KEPT: u32 = 3;
+
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
 const COMMENTED_DAYS: i64 = 30;
@@ -77,26 +83,51 @@ impl TokenSource for StaticToken {
 
 /// The token in the OS keychain for one GitLab instance.
 pub struct KeychainToken {
-    host: String,
+    base_url: String,
 }
 
 impl KeychainToken {
     /// The keychain entry for the instance at `base_url`. Keyed by host, so a
-    /// token never goes to a different instance after the URL changes.
+    /// token never goes to a different instance after the URL changes; the
+    /// host as the provider talks to it (see [`token_key`]).
     pub fn for_base_url(base_url: &str) -> Self {
         Self {
-            host: url_host(base_url).to_string(),
+            base_url: base_url.to_string(),
         }
     }
 }
 
 impl TokenSource for KeychainToken {
     fn token(&self) -> Option<String> {
-        keychain_entry(&self.host)
-            .ok()?
-            .get_password()
-            .ok()
-            .filter(|t| !t.is_empty())
+        read_token(&Keychain, &self.base_url)
+    }
+}
+
+/// Where tokens are kept, by account (the instance host): the OS keychain,
+/// or memory in tests.
+trait SecretStore {
+    fn get(&self, account: &str) -> Option<String>;
+    fn set(&self, account: &str, secret: &str) -> CoreResult<()>;
+    fn delete(&self, account: &str) -> CoreResult<()>;
+}
+
+/// The OS keychain, service [`KEYCHAIN_SERVICE`].
+struct Keychain;
+
+impl SecretStore for Keychain {
+    fn get(&self, account: &str) -> Option<String> {
+        keychain_entry(account).ok()?.get_password().ok()
+    }
+    fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
+        keychain_entry(account)?
+            .set_password(secret)
+            .map_err(|_| CoreError::Provider("could not update the keychain".into()))
+    }
+    fn delete(&self, account: &str) -> CoreResult<()> {
+        match keychain_entry(account)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(CoreError::Provider("could not update the keychain".into())),
+        }
     }
 }
 
@@ -105,18 +136,60 @@ fn keychain_entry(host: &str) -> CoreResult<keyring::Entry> {
         .map_err(|_| CoreError::Provider("could not open the keychain".into()))
 }
 
+/// The keychain account of the instance at `base_url`: the host of its
+/// normalized URL ([`normalize_base_url`]: lowercased, default port
+/// dropped), as the provider talks to it, so every spelling of one
+/// instance finds one entry. Plus the account Argus used before, the raw
+/// URL's host, when that differs: a token stored there is read once and
+/// moved (see [`read_token`]).
+fn token_key(base_url: &str) -> (String, Option<String>) {
+    let raw = url_host(base_url.trim()).to_string();
+    match normalize_base_url(base_url) {
+        Some(base) => {
+            let key = url_host(&base).to_string();
+            let legacy = (raw != key && !raw.is_empty()).then_some(raw);
+            (key, legacy)
+        }
+        None => (raw, None),
+    }
+}
+
+/// The token for `base_url`; one still under the old raw-host account is
+/// moved to the normalized one on the way.
+fn read_token(store: &dyn SecretStore, base_url: &str) -> Option<String> {
+    let (key, legacy) = token_key(base_url);
+    let nonblank = |t: Option<String>| t.filter(|t| !t.is_empty());
+    if let Some(token) = nonblank(store.get(&key)) {
+        return Some(token);
+    }
+    let legacy = legacy?;
+    let token = nonblank(store.get(&legacy))?;
+    // The old entry goes only once the new one holds the token.
+    if store.set(&key, &token).is_ok() {
+        let _ = store.delete(&legacy);
+    }
+    Some(token)
+}
+
+/// Store `token` for `base_url`; a blank one deletes it. The old raw-host
+/// entry goes either way: it would otherwise come back as the fallback.
+fn write_token(store: &dyn SecretStore, base_url: &str, token: &str) -> CoreResult<()> {
+    let (key, legacy) = token_key(base_url);
+    let token = token.trim();
+    if token.is_empty() {
+        store.delete(&key)?;
+    } else {
+        store.set(&key, token)?;
+    }
+    if let Some(legacy) = legacy {
+        store.delete(&legacy)?;
+    }
+    Ok(())
+}
+
 /// Store the token for the instance at `base_url`; a blank token deletes it.
 pub fn gitlab_token_set(base_url: &str, token: &str) -> CoreResult<()> {
-    let entry = keychain_entry(url_host(base_url))?;
-    let result = if token.trim().is_empty() {
-        match entry.delete_credential() {
-            Err(keyring::Error::NoEntry) => Ok(()),
-            other => other,
-        }
-    } else {
-        entry.set_password(token.trim())
-    };
-    result.map_err(|_| CoreError::Provider("could not update the keychain".into()))
+    write_token(&Keychain, base_url, token)
 }
 
 /// Whether a token is stored for `base_url` (the token never leaves here).
@@ -195,9 +268,10 @@ pub struct GitlabProvider {
     /// reads them once more in case one was reopened. Memory only.
     done: Mutex<HashMap<(u64, u64), DateTime<Utc>>>,
     final_recheck: chrono::Duration,
-    /// The last successful read of each commented-on open MR: what the list
-    /// shows when a read fails once (see `list_reviews`). Memory only.
-    commented: Mutex<HashMap<(u64, u64), ReviewRef>>,
+    /// The last successful read of each commented-on open MR and how many
+    /// reads failed since: what the list shows while a read fails (see
+    /// `list_reviews`). Memory only.
+    commented: Mutex<HashMap<(u64, u64), (ReviewRef, u32)>>,
 }
 
 impl GitlabProvider {
@@ -324,6 +398,7 @@ impl GitlabProvider {
             )),
             401 | 403 => Err(CoreError::GitlabAuth),
             404 => Err(CoreError::NotFound),
+            422 => Err(super::unprocessable("GitLab")),
             _ => Err(CoreError::Provider(
                 "GitLab could not fetch the merge request".into(),
             )),
@@ -341,8 +416,9 @@ impl GitlabProvider {
     /// header as it was when the page was cached, and a page that was the
     /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
     /// more items arrive after it. An empty next page ends it, and so does
-    /// that unasked-for page failing (any error but a rate limit): the list
-    /// read so far is complete as far as GitLab said.
+    /// that unasked-for page not existing (a 404 or 422, see
+    /// [`super::ends_list`]): the list read so far is complete as far as
+    /// GitLab said. Any other failure of it fails the list.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
         self.get_pages(path, MAX_PAGES)
     }
@@ -358,7 +434,7 @@ impl GitlabProvider {
             let (body, next) =
                 match self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}")) {
                     Ok(reply) => reply,
-                    Err(e) if guessed && !super::is_rate_limited(&e) => {
+                    Err(e) if guessed && super::ends_list(&e) => {
                         tracing::debug!("a GitLab list ends at a page it did not name: {e}");
                         return Ok(all);
                     }
@@ -582,16 +658,19 @@ impl ReviewProvider for GitlabProvider {
                     continue;
                 }
                 // One MR failing never costs the rest of the list, nor
-                // that MR its place in it; the next poll tries it again.
+                // that MR its place in it for a few polls; the next poll
+                // tries it again.
                 Err(e) => {
                     tracing::debug!("commented MR {project}!{iid} unreadable: {e}");
-                    let last = self
-                        .commented
-                        .lock()
-                        .expect("commented lock poisoned")
-                        .get(&(project, iid))
-                        .cloned();
-                    list.extend(last);
+                    let mut commented = self.commented.lock().expect("commented lock poisoned");
+                    if let Some((last, failures)) = commented.get_mut(&(project, iid)) {
+                        *failures += 1;
+                        if *failures <= COMMENTED_FAILURES_KEPT {
+                            list.push(last.clone());
+                        } else {
+                            commented.remove(&(project, iid));
+                        }
+                    }
                     continue;
                 }
             };
@@ -610,7 +689,7 @@ impl ReviewProvider for GitlabProvider {
                 self.commented
                     .lock()
                     .expect("commented lock poisoned")
-                    .insert((project, iid), r.clone());
+                    .insert((project, iid), (r.clone(), 0));
                 list.push(r);
             }
         }
@@ -1568,6 +1647,74 @@ mod tests {
             GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_err()
         );
         assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
+    }
+
+    /// An in-memory keychain: account → secret.
+    #[derive(Default)]
+    struct MemStore(Mutex<HashMap<String, String>>);
+
+    impl SecretStore for MemStore {
+        fn get(&self, account: &str) -> Option<String> {
+            self.0.lock().unwrap().get(account).cloned()
+        }
+        fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
+            self.0.lock().unwrap().insert(account.into(), secret.into());
+            Ok(())
+        }
+        fn delete(&self, account: &str) -> CoreResult<()> {
+            self.0.lock().unwrap().remove(account);
+            Ok(())
+        }
+    }
+
+    const FIXTURE_TOKEN: &str = "glpat-fixture-not-a-real-token";
+
+    #[test]
+    fn the_token_is_keyed_by_the_host_the_provider_talks_to() {
+        // Any spelling of one instance finds the same entry.
+        let store = MemStore::default();
+        write_token(&store, "https://GitLab.example.test:443/", FIXTURE_TOKEN).unwrap();
+        for url in [
+            "https://gitlab.example.test",
+            "https://GitLab.example.test",
+            "https://gitlab.example.test:443",
+        ] {
+            assert_eq!(
+                read_token(&store, url).as_deref(),
+                Some(FIXTURE_TOKEN),
+                "{url}"
+            );
+        }
+        assert_eq!(
+            store.0.lock().unwrap().keys().collect::<Vec<_>>(),
+            ["gitlab.example.test"]
+        );
+        // Another instance does not.
+        assert_eq!(read_token(&store, "https://gitlab.other.test"), None);
+    }
+
+    #[test]
+    fn a_token_under_the_old_raw_host_key_is_read_once_and_moved() {
+        let store = MemStore::default();
+        store.set("GitLab.example.test:443", FIXTURE_TOKEN).unwrap();
+        let url = "https://GitLab.example.test:443";
+        assert_eq!(read_token(&store, url).as_deref(), Some(FIXTURE_TOKEN));
+        let keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["gitlab.example.test"]);
+        // Saved settings hold the normalized URL from then on.
+        assert_eq!(
+            read_token(&store, "https://gitlab.example.test").as_deref(),
+            Some(FIXTURE_TOKEN)
+        );
+    }
+
+    #[test]
+    fn clearing_the_token_also_clears_the_old_entry() {
+        let store = MemStore::default();
+        store.set("GitLab.example.test:443", FIXTURE_TOKEN).unwrap();
+        write_token(&store, "https://GitLab.example.test:443", " ").unwrap();
+        assert!(store.0.lock().unwrap().is_empty());
+        assert_eq!(read_token(&store, "https://GitLab.example.test:443"), None);
     }
 
     #[test]

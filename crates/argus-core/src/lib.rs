@@ -46,6 +46,7 @@ mod testutil;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -104,6 +105,8 @@ pub struct Core {
     commentable: Mutex<Option<post::CommentableCache>>,
     /// The AI pass' scheduler (see [`ai`]).
     ai: ai::runtime::AiRuntime,
+    /// Set by [`shutdown`](Self::shutdown): no poll loop starts afterwards.
+    shut_down: AtomicBool,
 }
 
 impl Default for Core {
@@ -162,6 +165,7 @@ impl Core {
             content_keys: Mutex::new(HashMap::new()),
             commentable: Mutex::new(None),
             ai,
+            shut_down: AtomicBool::new(false),
         }
     }
 
@@ -193,8 +197,15 @@ impl Core {
             provider::from_settings(&settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();
         if let Some((poller, callback)) = running {
-            poller.stop();
+            // The old loop is told to stop, not waited for: a refresh it has
+            // on the network (up to a minute) would hold up the save. It
+            // ends on its own and reports nothing; the new loop's first
+            // refresh queues behind it on the refresh lock.
+            poller.request_stop();
             self.start_polling_with(callback);
+            if !poller.stop_within(POLL_STOP_GRACE) {
+                tracing::debug!("a refresh was still under way when the settings changed");
+            }
         }
         Ok(settings)
     }
@@ -243,7 +254,8 @@ impl Core {
     /// Refresh every provider once (blocking). A refresh already under way
     /// (the poll's) is waited for first: refreshes run one at a time.
     pub fn refresh(&self) -> RefreshReport {
-        poll::refresh_all(&self.providers(), &self.store, Utc::now())
+        poll::refresh_all_unless(&self.providers(), &self.store, &Utc::now, None)
+            .expect("no stop flag to stop on")
     }
 
     /// The user finished this round: move the watermark to the current head.
@@ -300,17 +312,7 @@ impl Core {
         let record = self.review(id)?;
         let provider = self.provider_for(&record)?;
         let (mut diff, keys) = files::fetch(provider.as_ref(), &record, since_last_review)?;
-        if diff.base_approximate {
-            let settings = self.settings();
-            let exact = settings
-                .clone_path(&record.review)
-                .and_then(git::LocalClone::open)
-                .and_then(|c| c.merge_base(&diff.base_sha, &diff.head_sha));
-            if let Some(sha) = exact {
-                diff.base_sha = sha;
-                diff.base_approximate = false;
-            }
-        }
+        self.exact_base(&record, &mut diff);
         let marks = self.store.viewed(id)?;
         let out = files::assemble(id, diff, &keys, &marks, since_last_review);
         self.remember_keys(id, &record.head_sha, keys);
@@ -337,6 +339,11 @@ impl Core {
             self.store.clear_viewed(id, path)?;
         }
         Ok(store::viewed_paths(&self.store.viewed(id)?, &keys))
+    }
+
+    /// [`exact_base`] with this core's settings.
+    pub(crate) fn exact_base(&self, record: &ReviewRecord, diff: &mut provider::FileDiff) {
+        exact_base(&self.settings(), &record.review, diff);
     }
 
     fn remember_keys(&self, id: ReviewId, head: &str, keys: files::ContentKeys) {
@@ -375,14 +382,23 @@ impl Core {
 
     fn start_polling_with(&self, callback: RefreshCallback) {
         self.stop_polling();
+        let providers = self.providers();
+        let interval = self.settings().poll_interval();
+        let mut slot = self.poller.lock().expect("poller lock poisoned");
+        // Checked under the lock `shutdown` sets it under: a start racing a
+        // quit (a settings save restarting the loop) either is stopped by
+        // it or does nothing.
+        if self.shut_down.load(Ordering::SeqCst) {
+            return;
+        }
         let cb = callback.clone();
-        let poller = poll::Poller::start(
-            self.providers(),
-            self.store.clone(),
-            self.settings().poll_interval(),
-            move |r| cb(r),
-        );
-        *self.poller.lock().expect("poller lock poisoned") = Some((poller, callback));
+        let poller = poll::Poller::start(providers, self.store.clone(), interval, move |r| cb(r));
+        let replaced = slot.replace((poller, callback));
+        drop(slot);
+        // Another start got in between: stop its loop, outside the lock.
+        if let Some((old, _)) = replaced {
+            old.stop();
+        }
     }
 
     /// Stop the background loop (waits for an in-flight refresh).
@@ -400,7 +416,11 @@ impl Core {
     /// [`POLL_STOP_GRACE`] before it is left behind: quitting never waits
     /// on the network. Nothing starts afterwards. Blocking.
     pub fn shutdown(&self) {
-        let poller = self.poller.lock().expect("poller lock poisoned").take();
+        let poller = {
+            let mut slot = self.poller.lock().expect("poller lock poisoned");
+            self.shut_down.store(true, Ordering::SeqCst);
+            slot.take()
+        };
         if let Some((p, _)) = &poller {
             p.request_stop();
         }
@@ -419,5 +439,29 @@ impl Core {
         if let Some((p, _)) = self.poller.lock().expect("poller lock poisoned").as_ref() {
             p.refresh_now();
         }
+    }
+}
+
+/// Replace a stand-in left side ([`provider::FileDiff::base_approximate`])
+/// by the local clone's merge base, when a clone is configured and has both
+/// commits. Every reader of a review's diff that shows, offers, numbers or
+/// posts old-side lines (the code view, the commentable lines, posting, an
+/// AI run) goes through it, so they agree on the left side: a comment read
+/// against one and posted against the other would be refused.
+pub(crate) fn exact_base(
+    settings: &Settings,
+    review: &provider::ReviewRef,
+    diff: &mut provider::FileDiff,
+) {
+    if !diff.base_approximate {
+        return;
+    }
+    let exact = settings
+        .clone_path(review)
+        .and_then(git::LocalClone::open)
+        .and_then(|c| c.merge_base(&diff.base_sha, &diff.head_sha));
+    if let Some(sha) = exact {
+        diff.base_sha = sha;
+        diff.base_approximate = false;
     }
 }

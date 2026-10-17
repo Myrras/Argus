@@ -1761,6 +1761,56 @@ printf 'Sure.\n```json\n{"findings":[],"checklist":[{"text":"Check the rollout"}
     assert!(prompt.contains(prompt::OUTPUT_CONTRACT));
 }
 
+/// A run of a fake `auggie` whose `tools list` does `tools` (shell); the
+/// agent itself records that it was started.
+fn auggie_with_tool_listing(tools: &str, timeout: Duration) -> (Result<RunOutput, String>, bool) {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(
+        bin.path(),
+        "auggie",
+        &format!(
+            r#"#!/bin/sh
+dir="$(dirname "$0")"
+if [ "$1" = "tools" ]; then
+  {tools}
+fi
+touch "$dir/agent-started"
+printf '```json\n{{"findings":[],"checklist":[],"verdicts":[]}}\n```\n'
+"#
+        ),
+    );
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let mut c = ctx(
+        fake_settings(&script, "auggie"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+    c.timeout = timeout;
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false));
+    (out, bin.path().join("agent-started").exists())
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn auggie_does_not_run_when_its_tools_cannot_be_listed() {
+    let refused = "Could not list auggie's tools, so Argus can't switch off the ones that write; the run was not started";
+    for (case, tools, timeout) in [
+        ("non-zero exit", "exit 3", Duration::from_secs(20)),
+        ("no output", "exit 0", Duration::from_secs(20)),
+        (
+            "unparsable output",
+            "printf 'Usage: auggie [options]\\n'; exit 0",
+            Duration::from_secs(20),
+        ),
+        ("timeout", "exec sleep 10", Duration::from_millis(500)),
+    ] {
+        let (out, started) = auggie_with_tool_listing(tools, timeout);
+        assert_eq!(out.err().as_deref(), Some(refused), "{case}");
+        assert!(!started, "{case}: the agent was started");
+    }
+}
+
 fn invocation(program: PathBuf, env: Vec<(std::ffi::OsString, std::ffi::OsString)>) -> Invocation {
     Invocation {
         program,

@@ -86,7 +86,8 @@ when it merges.
   bar elsewhere), in tabs: General (dark, light or retro theme, reduced
   motion, the refresh interval), GitHub (on or off, host and account),
   GitLab (URL and token; the token goes to the keychain only, Settings shows
-  just whether one is set, and it can be removed), AI (the AI analysis on
+  just whether one is set, and it can be removed; the URL's capitals or a
+  `:443` do not lose it), AI (the AI analysis on
   or off, and a local clone folder per repository), and Shortcuts. Switches apply at once, text fields have their
   own Save.
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `⇧R` (or
@@ -155,10 +156,13 @@ when it merges.
   its own agent settings, hooks or instructions. Claude can only read the
   review's files and the clone, not your home folder or other repositories,
   and anything shaped like a token or private key is removed from findings
-  before they are saved, including more token shapes. The agent cannot read
-  the clone's `.git`, `.env` files or `.netrc`/`.npmrc`/`.pypirc`. Auggie
-  runs keep only its read tools: Argus removes every other tool Auggie lists,
-  including MCP tools.
+  before they are saved, including more token shapes. Claude cannot read
+  the clone's `.git` (nested repositories included), `.env` files,
+  `.netrc`/`.npmrc`/`.pypirc`, private keys (`*.pem`, `*.key`) or local app
+  secrets (`appsettings.<env>.json`, `local.settings.json`, `.dev.vars`,
+  `secrets.json`/`.yml`). Auggie runs keep only its read tools: Argus
+  removes every other tool Auggie lists, including MCP tools, and does not
+  start the run when Auggie cannot list its tools.
 - AI findings post on the code the AI actually read; a finding from a later
   round's "since last review" diff on a removed line is refused instead of
   landing on another line, with a hint to re-run the AI pass on the full
@@ -175,7 +179,7 @@ when it merges.
   travels unencrypted.
 - On a pull request too large for GitHub to find its merge base, removed
   lines take no comments (the file says why), unless a local clone supplies
-  the merge base.
+  the merge base: then comments and AI findings on them post as shown.
 - Opening Argus a second time brings the running window to the front. If
   Argus cannot open its data at startup it says so, naming the folder.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and

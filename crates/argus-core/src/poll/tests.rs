@@ -589,6 +589,76 @@ fn quitting_does_not_wait_for_a_refresh_under_way() {
 }
 
 #[test]
+fn saving_settings_does_not_wait_for_a_refresh_under_way() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = Arc::new(crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    ));
+    let (tx, rx) = mpsc::channel();
+    let (started, go) = gh.hold_next_fetch();
+    core.start_polling(move |r| {
+        let _ = tx.send(r.refreshed_at);
+    });
+    // A refresh is on the network (a hung `gh` or a slow instance).
+    started.recv().unwrap();
+    // GitHub off: the restarted loop has no provider, so nothing runs `gh`.
+    let mut s = core.settings();
+    s.github.enabled = false;
+    let (saved_tx, saved) = mpsc::channel();
+    let saver = core.clone();
+    std::thread::spawn(move || {
+        saver.update_settings(s).unwrap();
+        let _ = saved_tx.send(());
+    });
+    let in_time = saved.recv_timeout(Duration::from_secs(2)).is_ok();
+    // Let the held fetch end either way, so a failing test ends too.
+    go.send(()).unwrap();
+    assert!(in_time, "the save waited for the refresh under way");
+    // The loop restarted (with the same callback) even so.
+    assert!(core.poller.lock().unwrap().is_some());
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    core.shutdown();
+}
+
+#[test]
+fn a_stopped_loop_waiting_for_the_refresh_lock_does_not_refresh() {
+    let gh = github();
+    let store = Arc::new(Store::in_memory().unwrap());
+    let reports = Arc::new(AtomicUsize::new(0));
+    let seen = reports.clone();
+    // A refresh under way (Shift+R) holds the lock when the loop starts.
+    let held = store.refreshing.lock().unwrap();
+    let poller = Poller::start(
+        as_providers(std::slice::from_ref(&gh)),
+        store.clone(),
+        Duration::from_secs(60),
+        move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+    // Settings saved meanwhile: this loop's providers are stale.
+    poller.request_stop();
+    drop(held);
+    poller.stop();
+    assert_eq!(
+        gh.calls.load(Ordering::SeqCst),
+        0,
+        "a stale provider was polled"
+    );
+    assert_eq!(reports.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn nothing_polls_after_shutdown() {
+    let core = crate::Core::with_providers(Store::in_memory().unwrap(), Vec::new());
+    core.shutdown();
+    core.start_polling(|_| panic!("polled after shutdown"));
+    assert!(core.poller.lock().unwrap().is_none());
+}
+
+#[test]
 fn a_fetch_that_started_earlier_never_overwrites_a_later_one() {
     // A refresh started at 10:12 stored h2 and the user marked it; a fetch
     // that started at 10:11 (still h1) lands after it.
@@ -607,6 +677,56 @@ fn a_fetch_that_started_earlier_never_overwrites_a_later_one() {
     assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
     assert_eq!(rec.round, 1);
     assert_eq!(rec.fetched_at, at(10, 12));
+}
+
+#[test]
+fn a_fetched_at_from_a_clock_that_ran_ahead_does_not_freeze_the_review() {
+    // Stored while the clock was a day ahead; corrected since.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let ahead = Utc::now() + chrono::Duration::days(1);
+    assert!(persist(&store, None, &detail_n(12, "h1"), &[], ME, true, ahead).unwrap());
+    let now = Utc::now();
+    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, now).unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.fetched_at, now);
+    // Unchanged fetches move it too, so the order holds from here on.
+    let later = Utc::now();
+    assert!(!persist(&store, None, &detail_n(12, "h2"), &[], ME, true, later).unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().fetched_at, later);
+}
+
+#[test]
+fn a_review_is_timed_when_its_fetch_starts_not_when_the_refresh_was_asked() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    // Each reading: the time it gave, and how far the provider got by then.
+    let readings: Mutex<Vec<(DateTime<Utc>, usize)>> = Mutex::new(Vec::new());
+    let clock = || {
+        // Only read once this refresh's turn came (the lock is held).
+        assert!(store.refreshing.try_lock().is_err(), "read before the lock");
+        let mut r = readings.lock().unwrap();
+        let t = at(10, 10) + chrono::Duration::minutes(r.len() as i64);
+        r.push((t, gh.calls.load(Ordering::SeqCst)));
+        t
+    };
+    let report = refresh_all_unless(&providers, &store, &clock, None).unwrap();
+    assert_eq!(report.errors, []);
+    let fetched_at = store
+        .review(review_ref(12).id())
+        .unwrap()
+        .unwrap()
+        .fetched_at;
+    let readings = readings.into_inner().unwrap();
+    let (_, calls) = readings
+        .iter()
+        .find(|(t, _)| *t == fetched_at)
+        .expect("fetched_at is a clock reading");
+    // Read after the provider's first call (`current_user`): per review.
+    assert_eq!(*calls, 1, "{readings:?}");
 }
 
 #[test]

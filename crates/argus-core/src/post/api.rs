@@ -53,13 +53,16 @@ impl Core {
         }
         // The platform's head now, not the stored one: comments go on it.
         let detail = provider.fetch_head(&record.review)?;
-        let current = provider.fetch_files(
+        let mut current = provider.fetch_files(
             &record.review,
             &DiffRange::Review {
                 base: detail.base_sha.clone(),
                 head: detail.head_sha.clone(),
             },
         )?;
+        // The left side the code view showed (the clone's merge base for a
+        // stand-in), which old-side comments were read against.
+        self.exact_base(&record, &mut current);
         // The diff must be the one of that head, and the head must not have
         // moved while it was read: GitHub serves a pull's files at its head
         // of the moment, and `commit_id` is the head read before, so a push
@@ -186,9 +189,10 @@ impl Core {
             .as_ref()
             .is_some_and(|c| c.review == id && c.stored_head == record.head_sha);
         if !fresh {
-            let diff = self
+            let mut diff = self
                 .provider_for(&record)?
                 .fetch_files(&record.review, &files::review_range(&record))?;
+            self.exact_base(&record, &mut diff);
             *cache = Some(CommentableCache {
                 review: id,
                 stored_head: record.head_sha.clone(),

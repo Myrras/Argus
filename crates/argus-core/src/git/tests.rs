@@ -329,6 +329,8 @@ struct Platform {
     files: std::sync::Mutex<Option<FileDiff>>,
     file_calls: AtomicUsize,
     diff_calls: AtomicUsize,
+    /// What `post_comment` was asked to post.
+    posted: std::sync::Mutex<Vec<crate::post::PlacedComment>>,
 }
 
 impl ReviewProvider for Platform {
@@ -370,6 +372,23 @@ impl ReviewProvider for Platform {
     fn thread_resolutions(&self, _: &ReviewRef) -> CoreResult<Vec<ThreadResolution>> {
         Ok(Vec::new())
     }
+    fn post_comment(
+        &self,
+        _: &ReviewRef,
+        c: &crate::post::PlacedComment,
+    ) -> crate::provider::PostResultOf<crate::PostedComment> {
+        self.posted.lock().unwrap().push(c.clone());
+        Ok(crate::PostedComment {
+            url: "https://github.com/acme-fixture/widgets/pull/12#r1".into(),
+            provider_thread_id: "900".into(),
+            provider_note_id: "900".into(),
+            path: c.path.clone(),
+            side: c.side,
+            line: c.line_number(),
+            start_line: None,
+            head_sha: c.head_sha.clone(),
+        })
+    }
 }
 
 /// c1: `src/cache.rs`, 30 lines (the comment is on line 10); c2: two lines
@@ -405,6 +424,7 @@ fn platform(fx: &Fixture, shas: &[String]) -> Arc<Platform> {
         files: std::sync::Mutex::new(None),
         file_calls: AtomicUsize::new(0),
         diff_calls: AtomicUsize::new(0),
+        posted: std::sync::Mutex::new(Vec::new()),
     })
 }
 
@@ -658,4 +678,106 @@ fn a_pr_without_a_merge_base_gets_it_from_the_clone() {
     let files = core.list_files(id, false).unwrap();
     assert_eq!(files.base_sha, tip);
     assert!(files.base_approximate);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_removed_line_posts_against_the_left_side_the_clone_found() {
+    // The code view showed the clone's merge base as the left side; posting
+    // and the commentable lines must read the diff the same way, or every
+    // comment on a removed line is refused as read against another side.
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    let base = fx.commit("src/cache.rs", &file_of(10), "c1");
+    git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
+    let head = fx.commit(
+        "src/cache.rs",
+        &file_of(10).replace("line 10\n", "line ten\n"),
+        "feature",
+    );
+    git_in(&fx.path, &["checkout", "-q", "main"]);
+    let tip = fx.commit("src/other.rs", "x\n", "main moves on");
+    let p = platform(&fx, std::slice::from_ref(&head));
+    let file = crate::provider::ChangedFile {
+        path: "src/cache.rs".into(),
+        old_path: None,
+        status: crate::provider::FileStatus::Modified,
+        additions: 1,
+        deletions: 1,
+        patch: Some("@@ -9,2 +9,2 @@\n line 9\n-line 10\n+line ten\n".into()),
+        content_sha: "c1".into(),
+        binary: false,
+        too_large: false,
+    };
+    *p.files.lock().unwrap() = Some(FileDiff {
+        base_sha: tip,
+        head_sha: head.clone(),
+        files: vec![file],
+        truncated: false,
+        base_approximate: true,
+    });
+    let core = core_with(&p, &fx.path);
+    let id = core.reviews().unwrap()[0].id;
+    let files = core.list_files(id, false).unwrap();
+    assert_eq!(files.base_sha, base);
+    let lines = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(lines.base_sha, base);
+
+    let results = core
+        .post_comments(
+            id,
+            vec![crate::NewComment {
+                path: "src/cache.rs".into(),
+                line: 10,
+                side: crate::provider::Side::Old,
+                start_line: None,
+                body: "Why drop the ten?".into(),
+                head_sha: Some(head),
+                base_sha: Some(files.base_sha),
+            }],
+        )
+        .unwrap();
+    assert!(
+        matches!(results[0], crate::PostResult::Posted(_)),
+        "{results:?}"
+    );
+    assert_eq!(p.posted.lock().unwrap()[0].base_sha, base);
+
+    // An AI run numbers its old-side findings at the same left side, so
+    // they post too.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let claude = bin.path().join("claude");
+        let answer = serde_json::json!({
+            "type": "result", "subtype": "success", "is_error": false,
+            "result": r#"{"findings":[],"checklist":[],"verdicts":[]}"#
+        });
+        std::fs::write(
+            &claude,
+            format!("#!/bin/sh\ncat > /dev/null\necho '{answer}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut settings = core.settings();
+        settings.ai.adapter = "claude".into();
+        settings.ai.binary = Some(claude.to_string_lossy().into_owned());
+        let ctx = crate::ai::job::JobContext {
+            settings,
+            provider: p.clone(),
+            timeout: Duration::from_secs(20),
+            child: Default::default(),
+        };
+        let record = core.review(id).unwrap();
+        let out = crate::ai::job::execute(
+            &core.store,
+            &record,
+            &ctx,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(out.base_sha.as_deref(), Some(base.as_str()));
+    }
 }
