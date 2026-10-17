@@ -11,6 +11,7 @@ import {
   formatBinding,
   isBrowserShortcut,
   matches,
+  ownsEnter,
   parseBinding,
   resolveKeymap,
   serializeBinding,
@@ -389,6 +390,22 @@ describe("recording", () => {
     expect(
       findConflict(DEFAULT_KEYMAP, "refresh", parseBinding("Mod+KeyU")!, true),
     ).toBeNull();
+  });
+});
+
+describe("ownsEnter", () => {
+  it("counts form inputs, links and buttons as owning their Enter", () => {
+    const make = (html: string) => {
+      const host = document.createElement("div");
+      host.innerHTML = html;
+      return host.firstElementChild;
+    };
+    expect(ownsEnter(make('<input type="checkbox">'))).toBe(true);
+    expect(ownsEnter(make('<input type="text">'))).toBe(true);
+    expect(ownsEnter(make('<a href="#x">x</a>'))).toBe(true);
+    expect(ownsEnter(make("<button>x</button>"))).toBe(true);
+    expect(ownsEnter(make('<div tabindex="0">x</div>'))).toBe(false);
+    expect(ownsEnter(null)).toBe(false);
   });
 });
 

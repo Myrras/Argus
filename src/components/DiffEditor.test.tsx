@@ -305,8 +305,9 @@ describe("DiffEditor", () => {
     await waitFor(() =>
       expect(container.querySelector(".cm-argusFocusedLine")).not.toBeNull(),
     );
-    // Line 1 is not commentable: Enter does nothing there.
-    fireEvent.keyDown(content, { key: "Enter" });
+    // Line 1 is not commentable: Enter does nothing there, and stays the
+    // code view's (it never reaches the list's Enter).
+    expect(fireEvent.keyDown(content, { key: "Enter" })).toBe(false);
     expect(onComment).not.toHaveBeenCalled();
     fireEvent.keyDown(content, { key: "ArrowDown" });
     await waitFor(() =>

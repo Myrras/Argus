@@ -174,6 +174,39 @@ describe("ThreadBlock and the focus", () => {
   });
 });
 
+describe("Enter and t outside the review list", () => {
+  it("t folds the focused thread even with a link focused", () => {
+    render(
+      <>
+        <Shell />
+        <ThreadBlock thread={t} provider="github" now={NOW} />
+      </>,
+    );
+    const card = screen.getByRole("article", { name: "Thread by bob-fixture" });
+    press({ key: "n", code: "KeyN" });
+    const link = document.createElement("a");
+    link.href = "#fixture";
+    link.textContent = "fixture link";
+    document.body.appendChild(link);
+    link.focus();
+    fireEvent.keyDown(link, { key: "t", code: "KeyT" });
+    expect(card).toHaveAttribute("data-open", "true");
+    link.remove();
+  });
+
+  it("Enter on a checkbox never opens the review under the list cursor", () => {
+    render(<Shell />);
+    act(() => useReviewStore.setState({ cursorId: other.id }));
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    document.body.appendChild(box);
+    box.focus();
+    fireEvent.keyDown(box, { key: "Enter", code: "Enter" });
+    expect(useReviewStore.getState().selectedId).toBe(r.id);
+    box.remove();
+  });
+});
+
 describe("CommandPalette", () => {
   it("lists the actions with their current shortcuts and runs one", () => {
     render(<Shell />);

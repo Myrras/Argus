@@ -479,9 +479,14 @@ function listenForComments(
       });
       return;
     }
-    if (e.key === "Enter" && cur !== null && c.lines[side].has(cur)) {
+    if (e.key === "Enter") {
+      // The code view's own, commentable line or not: it must not fall
+      // through to the list's Enter (which opens the review under its
+      // cursor).
       e.preventDefault();
-      c.onComment(side, cur, cur, e.shiftKey);
+      if (cur !== null && c.lines[side].has(cur)) {
+        c.onComment(side, cur, cur, e.shiftKey);
+      }
     }
   };
   view.dom.addEventListener("mousedown", onDown);

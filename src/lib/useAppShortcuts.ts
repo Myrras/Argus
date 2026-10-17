@@ -93,7 +93,11 @@ function runListAction(action: ActionId, target: EventTarget | null): boolean {
 }
 
 /** Run a review view action; false when no review is open. */
-function runFilesAction(action: ActionId, target: EventTarget | null): boolean {
+function runFilesAction(
+  action: ActionId,
+  target: EventTarget | null,
+  key: string | null = null,
+): boolean {
   const review = useReviewStore.getState().selectedId;
   if (!review) return false;
   const code = useCodeViewStore.getState();
@@ -124,7 +128,7 @@ function runFilesAction(action: ActionId, target: EventTarget | null): boolean {
       if (!useAiStore.getState().runs[review]?.enabled) return false;
       return useAiStore.getState().toggleFocused(review);
     default:
-      return runFlowAction(action, review, target) ?? false;
+      return runFlowAction(action, review, target, key) ?? false;
   }
 }
 
@@ -167,7 +171,7 @@ export function useAppShortcuts(options?: { onOpenSettings?: () => void }) {
           if (
             fileAction &&
             once(fileAction) &&
-            runFilesAction(fileAction, e.target)
+            runFilesAction(fileAction, e.target, e.key)
           ) {
             e.preventDefault();
             return;

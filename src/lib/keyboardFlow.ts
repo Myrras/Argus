@@ -107,6 +107,7 @@ export function runFlowAction(
   action: ActionId,
   reviewId: ReviewId,
   target: EventTarget | null,
+  key: string | null = null,
 ): boolean | null {
   const focus = useFocusStore.getState();
   switch (action) {
@@ -114,8 +115,9 @@ export function runFlowAction(
     case "prevItem":
       return focus.move(reviewId, action === "nextItem" ? 1 : -1);
     case "toggleThread": {
-      // A focused button or link handles its own keys.
-      if (ownsEnter(target)) return false;
+      // A focused button or link handles its own Enter (bound here by a
+      // user); other keys (`t`) still act on the focused thread.
+      if (key === "Enter" && ownsEnter(target)) return false;
       const t = focusedThread(reviewId);
       if (!t) return false;
       focus.commandThread(t.threadId, "toggle");

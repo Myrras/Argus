@@ -637,9 +637,13 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   );
 }
 
-/** Elements whose own Enter does something (follow, toggle, press). */
+/**
+ * Elements whose own Enter does something (follow, toggle, press, submit),
+ * or that a stray Enter must not leave (a checkbox: the list's Enter would
+ * open another review).
+ */
 const OWN_ENTER =
-  'button, a[href], summary, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="switch"]';
+  'button, a[href], summary, input, select, textarea, [role="button"], [role="link"], [role="menuitem"], [role="tab"], [role="option"], [role="checkbox"], [role="switch"]';
 
 /** A focused control that handles its own Enter: the shortcut leaves it. */
 export function ownsEnter(target: EventTarget | null): boolean {
