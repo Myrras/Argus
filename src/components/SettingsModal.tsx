@@ -29,6 +29,7 @@ import {
   withClone,
   withoutClone,
 } from "../lib/clonePaths";
+import { NOT_READ_ONLY_NOTE, useReadOnlyGuaranteed } from "../state/aiStore";
 import {
   POLL_MINUTES_MAX,
   POLL_MINUTES_MIN,
@@ -530,6 +531,7 @@ function GitlabTab() {
 function AiTab() {
   const settings = useBackendSettingsStore((s) => s.settings);
   const save = useBackendSettingsStore((s) => s.save);
+  const readOnly = useReadOnlyGuaranteed();
   const ai = settings?.ai;
   return (
     <section className={styles.section}>
@@ -541,6 +543,7 @@ function AiTab() {
         disabled={!ai}
         onChange={(enabled) => ai && void save({ ai: { ...ai, enabled } })}
       />
+      {!readOnly && <p className={styles.warning}>{NOT_READ_ONLY_NOTE}</p>}
     </section>
   );
 }

@@ -25,6 +25,7 @@ import {
   setChecklistChecked,
   setVerdictOverride,
   threadHistory,
+  toIpcError,
 } from "./commands";
 import { onAiState } from "./events";
 import type { AiRunState } from "./types";
@@ -38,6 +39,21 @@ const ITEM = "00000000-0000-4000-8000-000000000004";
 beforeEach(() => {
   vi.clearAllMocks();
   mockInvoke.mockResolvedValue(undefined);
+});
+
+describe("toIpcError", () => {
+  it("shows an internal failure as a generic error", () => {
+    expect(
+      toIpcError({ kind: "internal", message: "Something went wrong inside" }),
+    ).toEqual({
+      kind: "internal",
+      message: "Something went wrong in Argus; see the log",
+    });
+    // Other kinds keep their own text.
+    expect(
+      toIpcError({ kind: "notFound", message: "No such review." }),
+    ).toEqual({ kind: "notFound", message: "No such review." });
+  });
 });
 
 describe("thread history wrappers", () => {

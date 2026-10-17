@@ -7,7 +7,12 @@
  * pass off, it takes no space at all.
  */
 
-import { useAiEnabled, useAiRun, useAiStore } from "../state/aiStore";
+import {
+  NOT_READ_ONLY_NOTE,
+  useAiEnabled,
+  useAiRun,
+  useAiStore,
+} from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
 import { withHint } from "../lib/keymap";
@@ -62,6 +67,9 @@ function Panel({ reviewId }: { reviewId: string }) {
         </button>
       </div>
       <div className={styles.body}>
+        {run?.readOnlyGuaranteed === false && (
+          <p className={styles.warning}>{NOT_READ_ONLY_NOTE}</p>
+        )}
         {note && <p className={styles.note}>{note}</p>}
         {run && run.droppedFindings > 0 && (
           <p className={styles.note}>

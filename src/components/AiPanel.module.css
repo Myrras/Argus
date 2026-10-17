@@ -82,6 +82,15 @@
   color: var(--text-faint);
 }
 
+.warning {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+}
+
 .error {
   padding: var(--sp-2) var(--sp-3);
   font-size: var(--fs-sm);

@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -14,6 +20,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import type { Settings } from "../ipc/types";
+import { useAiStore } from "../state/aiStore";
+import { aiRun } from "../test/aiFixtures";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import { useSettingsStore } from "../state/settingsStore";
@@ -266,6 +274,28 @@ describe("SettingsModal — AI tab", () => {
         { ...settings(), ai: { ...settings().ai, enabled: false } },
       ]),
     );
+  });
+
+  it("warns when the agent cannot be held to reading only (auggie)", async () => {
+    const warning =
+      "Auggie can still use MCP tools from your own Auggie setup; Argus cannot guarantee this run only reads.";
+    const initialAi = useAiStore.getState();
+    useAiStore.setState({ runs: { r1: aiRun({ reviewId: "r1" }) } });
+    await renderTab("AI");
+    expect(screen.queryByText(warning)).toBeNull();
+    act(() =>
+      useAiStore.setState({
+        runs: {
+          r1: aiRun({
+            reviewId: "r1",
+            adapter: "auggie",
+            readOnlyGuaranteed: false,
+          }),
+        },
+      }),
+    );
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    useAiStore.setState(initialAi, true);
   });
 
   it("keeps the agent binary when it turns AI analysis off", async () => {

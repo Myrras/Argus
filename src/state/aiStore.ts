@@ -455,6 +455,21 @@ export function useAiRun(reviewId: ReviewId | null): AiRunState | undefined {
   return useAiStore((s) => (reviewId ? s.runs[reviewId] : undefined));
 }
 
+/** The note shown where the agent cannot be held to reading only. */
+export const NOT_READ_ONLY_NOTE =
+  "Auggie can still use MCP tools from your own Auggie setup; Argus cannot guarantee this run only reads.";
+
+/**
+ * Whether the configured agent can be held to reading only, as the runs
+ * report it (`AiRunState.readOnlyGuaranteed`, from the configured adapter).
+ * True while no run has said otherwise.
+ */
+export function useReadOnlyGuaranteed(): boolean {
+  return useAiStore(
+    (s) => !Object.values(s.runs).some((r) => r.readOnlyGuaranteed === false),
+  );
+}
+
 /** The AI pass is on for this review (else none of its UI shows). */
 export function useAiEnabled(reviewId: ReviewId | null): boolean {
   return useAiStore((s) => (reviewId ? !!s.runs[reviewId]?.enabled : false));

@@ -293,6 +293,16 @@
   margin-top: var(--sp-2);
 }
 
+.warning {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
 .error {
   margin: 0;
   padding: var(--sp-2) var(--sp-3);

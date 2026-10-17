@@ -332,6 +332,25 @@ describe("AiPanel", () => {
     expect(useLayoutStore.getState().aiPanelOpen).toBe(false);
   });
 
+  it("warns when the agent cannot be held to reading only (auggie)", () => {
+    const warning =
+      "Auggie can still use MCP tools from your own Auggie setup; Argus cannot guarantee this run only reads.";
+    const { unmount } = render(<AiPanel />);
+    expect(screen.queryByText(warning)).toBeNull();
+    unmount();
+    useAiStore.setState({
+      runs: {
+        [ID]: aiRun({
+          reviewId: ID,
+          adapter: "auggie",
+          readOnlyGuaranteed: false,
+        }),
+      },
+    });
+    render(<AiPanel />);
+    expect(screen.getByText(warning)).toBeInTheDocument();
+  });
+
   it("is absent with the AI pass off", () => {
     seed(false);
     const { container } = render(<AiPanel />);

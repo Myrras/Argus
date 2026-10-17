@@ -44,9 +44,20 @@ export function isIpcError(value: unknown): value is IpcError {
   );
 }
 
-/** Coerce any rejection into an `IpcError` (kind `"unknown"` as fallback). */
+/** What the UI says for an `internal` failure (a crashed background task). */
+export const INTERNAL_MESSAGE = "Something went wrong in Argus; see the log";
+
+/**
+ * Coerce any rejection into an `IpcError` (kind `"unknown"` as fallback).
+ * An `internal` one carries no reason the user can act on: it reads as a
+ * generic error pointing at the log.
+ */
 export function toIpcError(value: unknown): IpcError {
-  if (isIpcError(value)) return value;
+  if (isIpcError(value)) {
+    return value.kind === "internal"
+      ? { kind: "internal", message: INTERNAL_MESSAGE }
+      : value;
+  }
   if (value instanceof Error)
     return { message: value.message, kind: "unknown" };
   return { message: String(value), kind: "unknown" };
