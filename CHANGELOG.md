@@ -178,7 +178,7 @@ when it merges.
   travels unencrypted.
 - On a pull request too large for GitHub to find its merge base, removed
   lines take no comments (the file says why), unless a local clone supplies
-  the merge base.
+  the merge base: then comments and AI findings on them post as shown.
 - Opening Argus a second time brings the running window to the front. If
   Argus cannot open its data at startup it says so, naming the folder.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and

@@ -311,17 +311,7 @@ impl Core {
         let record = self.review(id)?;
         let provider = self.provider_for(&record)?;
         let (mut diff, keys) = files::fetch(provider.as_ref(), &record, since_last_review)?;
-        if diff.base_approximate {
-            let settings = self.settings();
-            let exact = settings
-                .clone_path(&record.review)
-                .and_then(git::LocalClone::open)
-                .and_then(|c| c.merge_base(&diff.base_sha, &diff.head_sha));
-            if let Some(sha) = exact {
-                diff.base_sha = sha;
-                diff.base_approximate = false;
-            }
-        }
+        self.exact_base(&record, &mut diff);
         let marks = self.store.viewed(id)?;
         let out = files::assemble(id, diff, &keys, &marks, since_last_review);
         self.remember_keys(id, &record.head_sha, keys);
@@ -348,6 +338,11 @@ impl Core {
             self.store.clear_viewed(id, path)?;
         }
         Ok(store::viewed_paths(&self.store.viewed(id)?, &keys))
+    }
+
+    /// [`exact_base`] with this core's settings.
+    pub(crate) fn exact_base(&self, record: &ReviewRecord, diff: &mut provider::FileDiff) {
+        exact_base(&self.settings(), &record.review, diff);
     }
 
     fn remember_keys(&self, id: ReviewId, head: &str, keys: files::ContentKeys) {
@@ -443,5 +438,29 @@ impl Core {
         if let Some((p, _)) = self.poller.lock().expect("poller lock poisoned").as_ref() {
             p.refresh_now();
         }
+    }
+}
+
+/// Replace a stand-in left side ([`provider::FileDiff::base_approximate`])
+/// by the local clone's merge base, when a clone is configured and has both
+/// commits. Every reader of a review's diff that shows, offers, numbers or
+/// posts old-side lines (the code view, the commentable lines, posting, an
+/// AI run) goes through it, so they agree on the left side: a comment read
+/// against one and posted against the other would be refused.
+pub(crate) fn exact_base(
+    settings: &Settings,
+    review: &provider::ReviewRef,
+    diff: &mut provider::FileDiff,
+) {
+    if !diff.base_approximate {
+        return;
+    }
+    let exact = settings
+        .clone_path(review)
+        .and_then(git::LocalClone::open)
+        .and_then(|c| c.merge_base(&diff.base_sha, &diff.head_sha));
+    if let Some(sha) = exact {
+        diff.base_sha = sha;
+        diff.base_approximate = false;
     }
 }

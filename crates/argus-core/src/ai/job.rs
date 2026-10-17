@@ -256,7 +256,10 @@ pub(crate) fn execute(
         since_range(record).ok()
     };
     let new_commits = since.is_some();
-    let diff = fetch(since.unwrap_or_else(|| review_range(record)))?;
+    let mut diff = fetch(since.unwrap_or_else(|| review_range(record)))?;
+    // Old-side findings are numbered at the left side the code view and
+    // posting use (see `crate::exact_base`).
+    crate::exact_base(&ctx.settings, &record.review, &mut diff);
     let scope = match (first, new_commits) {
         (true, _) => DiffScope::Full(&diff),
         (false, true) => DiffScope::SinceLastReview(&diff),
