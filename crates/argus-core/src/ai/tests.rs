@@ -667,6 +667,58 @@ fn shutdown_cancels_everything_and_starts_nothing_after() {
     assert_eq!(probe.starts.load(Ordering::SeqCst), 2);
 }
 
+/// Shutdown kills the agent itself, not only through the run's cancel
+/// flag: a run thread that is not polling the flag (here: one that only
+/// waits for its agent to exit) still ends within the grace.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn shutdown_kills_the_agent_of_a_run_that_ignores_its_cancel_flag() {
+    let (store, ids) = store_with(&[1]);
+    let started = Arc::new(AtomicBool::new(false));
+    let s2 = started.clone();
+    let ex: Executor = Arc::new(
+        move |_: &Store, _: &ReviewRecord, ctx: &JobContext, _: &AtomicBool| {
+            let child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            *ctx.child.lock().unwrap() = Some(child);
+            s2.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                let exited = ctx
+                    .child
+                    .lock()
+                    .unwrap()
+                    .as_mut()
+                    .is_some_and(|c| c.try_wait().ok().flatten().is_some());
+                if exited || Instant::now() > deadline {
+                    return Err("the agent exited".into());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        },
+    );
+    let rt = AiRuntime::new(store, true, ex, MAX_CONCURRENT);
+    assert!(rt.enqueue(
+        ids[0],
+        ctx(Settings::default(), FakeProvider::new(&["src/a.rs"]))
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !started.load(Ordering::SeqCst) {
+        assert!(Instant::now() < deadline, "the run never started");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let start = Instant::now();
+    assert!(rt.shutdown(Duration::from_secs(5)));
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(rt.state(ids[0]).unwrap().error.as_deref(), Some(CANCELLED));
+}
+
 #[test]
 fn a_secret_in_the_answer_never_reaches_the_store() {
     let (store, ids) = store_with(&[1]);
