@@ -843,3 +843,67 @@ fn a_pr_too_large_to_compare_still_lists_its_files() {
     assert_eq!(diff.head_sha, HEAD);
     assert_eq!(diff.files.len(), 6);
 }
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_push_between_reading_the_head_and_the_diff_fails_the_post_and_refreshes() {
+    use argus_core::post::PostErrorKind;
+    use argus_core::{Core, NewComment};
+
+    // Once armed, the PR's second read (the diff's, after the post read the
+    // head) shows a push to c4; every read after it too.
+    let pushed = r#"  "$P")
+    D="${LOG%/*}"
+    if [ -e "$D/push-armed" ]; then
+      [ -e "$D/pull-read" ] && respond "$D/pull_12_c4.json"
+      : > "$D/pull-read"
+    fi
+    respond "$F/pull_12.json" ;;
+  "repos/acme-fixture/widgets/compare/$B0...c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4")
+    respond "$F/compare_b0_c3_merge_base.txt" ;;"#;
+    let body = FAKE.replace(r#"  "$P") respond "$F/pull_12.json" ;;"#, pushed);
+    assert_ne!(body, FAKE);
+    let fake = script(&body);
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    let c4 = "c4".repeat(20);
+    let pull = std::fs::read_to_string(fixtures().join("pull_12.json")).unwrap();
+    std::fs::write(dir.join("pull_12_c4.json"), pull.replace(HEAD, &c4)).unwrap();
+
+    let core = Core::with_providers(
+        argus_core::store::Store::in_memory().unwrap(),
+        vec![std::sync::Arc::new(
+            fake.provider("github.com", Some("work")),
+        )],
+    );
+    // The search lists more PRs than the fixtures serve; only 12 matters.
+    let report = core.refresh();
+    let id = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.repo == "acme-fixture/widgets" && r.review.number == 12)
+        .unwrap()
+        .id;
+    assert!(report.errors.iter().all(|e| e.review != Some(id)));
+    assert_eq!(core.review(id).unwrap().head_sha, HEAD);
+
+    std::fs::write(dir.join("push-armed"), "").unwrap();
+    let err = core
+        .post_comments(
+            id,
+            vec![NewComment {
+                path: "src/cache.rs".into(),
+                line: 2,
+                side: Side::New,
+                start_line: None,
+                body: "Why?".into(),
+                head_sha: None,
+                base_sha: None,
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    assert!(!fake.calls().contains("--method POST"));
+    // The refusal stored the new head: a retry starts from it.
+    assert_eq!(core.review(id).unwrap().head_sha, c4);
+}

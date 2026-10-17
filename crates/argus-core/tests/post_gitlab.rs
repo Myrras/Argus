@@ -560,3 +560,69 @@ fn posting_and_approving_through_the_core() {
     let seen = log.lock().unwrap();
     assert!(seen.iter().all(|r| r.token && !r.body.contains(TOKEN)));
 }
+
+#[test]
+fn a_push_between_reading_the_head_and_the_diff_fails_the_post_and_refreshes() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const PUSHED: &str = "a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3";
+    // Once armed, the push lands right before the second versions read:
+    // the post read the head (its first), the diff reads the second.
+    let armed = Arc::new(AtomicBool::new(false));
+    let versions_read = Arc::new(AtomicUsize::new(0));
+    let (a, v) = (armed.clone(), versions_read.clone());
+    let (base, log) = serve(move |req| {
+        let route = req
+            .path
+            .split_once('?')
+            .map_or(req.path.as_str(), |(r, _)| r);
+        let versions = route == format!("{MR21}/versions");
+        if !a.load(Ordering::SeqCst) {
+            return instance(req);
+        }
+        if versions {
+            v.fetch_add(1, Ordering::SeqCst);
+        }
+        if v.load(Ordering::SeqCst) < 2 {
+            return instance(req);
+        }
+        if route == MR21 {
+            return reply("200 OK", fixture("mr_21.json").replace(HEAD_SHA, PUSHED));
+        }
+        if versions {
+            let newest = format!(
+                r#"[{{"id":803,"head_commit_sha":"{PUSHED}","base_commit_sha":"{BASE_SHA}","start_commit_sha":"{BASE_SHA}","created_at":"2026-10-11T08:00:00.000Z","merge_request_id":9021,"state":"collected","real_size":"3"}},"#
+            );
+            let rest = fixture("mr_21_versions.json");
+            return reply(
+                "200 OK",
+                format!("{newest}{}", rest.trim_start().trim_start_matches('[')),
+            );
+        }
+        instance(req)
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let id = core.reviews().unwrap()[0].id;
+    assert_eq!(core.review(id).unwrap().head_sha, HEAD_SHA);
+
+    armed.store(true, Ordering::SeqCst);
+    let err = core
+        .post_comments(
+            id,
+            vec![NewComment {
+                path: "src/importer.rs".into(),
+                line: 2,
+                side: Side::New,
+                start_line: None,
+                body: "Why three?".into(),
+                head_sha: None,
+                base_sha: None,
+            }],
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::HeadMoved);
+    assert!(posts(&log).is_empty());
+    // The refusal stored the new head: a retry starts from it.
+    assert_eq!(core.review(id).unwrap().head_sha, PUSHED);
+}
