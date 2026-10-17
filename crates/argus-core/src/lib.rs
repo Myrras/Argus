@@ -46,6 +46,7 @@ mod testutil;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::Utc;
@@ -104,6 +105,8 @@ pub struct Core {
     commentable: Mutex<Option<post::CommentableCache>>,
     /// The AI pass' scheduler (see [`ai`]).
     ai: ai::runtime::AiRuntime,
+    /// Set by [`shutdown`](Self::shutdown): no poll loop starts afterwards.
+    shut_down: AtomicBool,
 }
 
 impl Default for Core {
@@ -162,6 +165,7 @@ impl Core {
             content_keys: Mutex::new(HashMap::new()),
             commentable: Mutex::new(None),
             ai,
+            shut_down: AtomicBool::new(false),
         }
     }
 
@@ -193,8 +197,15 @@ impl Core {
             provider::from_settings(&settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();
         if let Some((poller, callback)) = running {
-            poller.stop();
+            // The old loop is told to stop, not waited for: a refresh it has
+            // on the network (up to a minute) would hold up the save. It
+            // ends on its own and reports nothing; the new loop's first
+            // refresh queues behind it on the refresh lock.
+            poller.request_stop();
             self.start_polling_with(callback);
+            if !poller.stop_within(POLL_STOP_GRACE) {
+                tracing::debug!("a refresh was still under way when the settings changed");
+            }
         }
         Ok(settings)
     }
@@ -375,14 +386,23 @@ impl Core {
 
     fn start_polling_with(&self, callback: RefreshCallback) {
         self.stop_polling();
+        let providers = self.providers();
+        let interval = self.settings().poll_interval();
+        let mut slot = self.poller.lock().expect("poller lock poisoned");
+        // Checked under the lock `shutdown` sets it under: a start racing a
+        // quit (a settings save restarting the loop) either is stopped by
+        // it or does nothing.
+        if self.shut_down.load(Ordering::SeqCst) {
+            return;
+        }
         let cb = callback.clone();
-        let poller = poll::Poller::start(
-            self.providers(),
-            self.store.clone(),
-            self.settings().poll_interval(),
-            move |r| cb(r),
-        );
-        *self.poller.lock().expect("poller lock poisoned") = Some((poller, callback));
+        let poller = poll::Poller::start(providers, self.store.clone(), interval, move |r| cb(r));
+        let replaced = slot.replace((poller, callback));
+        drop(slot);
+        // Another start got in between: stop its loop, outside the lock.
+        if let Some((old, _)) = replaced {
+            old.stop();
+        }
     }
 
     /// Stop the background loop (waits for an in-flight refresh).
@@ -400,7 +420,11 @@ impl Core {
     /// [`POLL_STOP_GRACE`] before it is left behind: quitting never waits
     /// on the network. Nothing starts afterwards. Blocking.
     pub fn shutdown(&self) {
-        let poller = self.poller.lock().expect("poller lock poisoned").take();
+        let poller = {
+            let mut slot = self.poller.lock().expect("poller lock poisoned");
+            self.shut_down.store(true, Ordering::SeqCst);
+            slot.take()
+        };
         if let Some((p, _)) = &poller {
             p.request_stop();
         }

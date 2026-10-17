@@ -83,6 +83,19 @@ pub fn refresh_all(
     store: &Store,
     now: DateTime<Utc>,
 ) -> RefreshReport {
+    refresh_all_unless(providers, store, now, None).expect("no stop flag to stop on")
+}
+
+/// [`refresh_all`], unless `stop` is set once the refresh lock is held:
+/// a poll loop stopped while it waited for another refresh (its settings
+/// were replaced, or Argus quits) ends there instead of running a whole
+/// refresh over its old providers first. `None` when it stopped.
+pub(crate) fn refresh_all_unless(
+    providers: &[Arc<dyn ReviewProvider>],
+    store: &Store,
+    now: DateTime<Utc>,
+    stop: Option<&AtomicBool>,
+) -> Option<RefreshReport> {
     // One refresh at a time per database: a manual refresh asked for while
     // the poll is on the network waits for it, then reads afresh, instead of
     // fetching alongside it and racing it to the store. A refresh that
@@ -91,6 +104,9 @@ pub fn refresh_all(
         .refreshing
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+        return None;
+    }
     let results: Vec<(Vec<ReviewId>, Vec<RefreshError>)> = std::thread::scope(|s| {
         let handles: Vec<_> = providers
             .iter()
@@ -115,7 +131,7 @@ pub fn refresh_all(
         report.changed.extend(changed);
         report.errors.extend(errors);
     }
-    report
+    Some(report)
 }
 
 /// One fetched review, or why it could not be.
@@ -356,7 +372,10 @@ impl Poller {
         let handle = std::thread::Builder::new()
             .name("argus-poll".into())
             .spawn(move || loop {
-                let report = refresh_all(&providers, &store, Utc::now());
+                let Some(report) = refresh_all_unless(&providers, &store, Utc::now(), Some(&stop))
+                else {
+                    return;
+                };
                 if stop.load(Ordering::SeqCst) {
                     return;
                 }
