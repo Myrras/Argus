@@ -495,16 +495,11 @@ thread_local! {
 ///
 /// The stand-in is the platform's base branch tip (T2). When the clone does
 /// not have it (the base branch moved on since the clone was fetched), the
-/// base tip stored with the review (T1) is used instead, but only when it
-/// was read together with this very head. Why that gives the same merge
-/// base: base branches move forward, so T1 is an ancestor of T2, and every
-/// common ancestor of T1 and the head is one of T2 and the head. A newer
-/// one would have to be a commit the base gained after T1 that the head
-/// already had, which an unchanged head only has when part of the PR itself
-/// was merged into the base. A head pushed since T1 was read may have
-/// merged newer base commits, so then the stand-in stays. Left over: a
-/// force-pushed base branch, or that partial merge, which are what the
-/// stand-in already risks.
+/// stand-in stays and the old side stays read-only until the user fetches
+/// their clone. No other commit is used in its place: the base commit stored
+/// with the review does not give the merge base reliably (a retargeted base,
+/// a stacked PR merged into the base or a force-pushed base would mark a
+/// wrong left side as exact).
 pub(crate) fn exact_base(
     settings: &Settings,
     record: &ReviewRecord,
@@ -519,14 +514,8 @@ pub(crate) fn exact_base(
     else {
         return;
     };
-    let exact = if clone.has_commit(&diff.base_sha) {
-        clone.merge_base(&diff.base_sha, &diff.head_sha)
-    } else if diff.head_sha == record.head_sha {
-        clone.merge_base(&record.base_sha, &diff.head_sha)
-    } else {
-        None
-    };
-    if let Some(sha) = exact {
+    // No answer when the clone lacks either commit.
+    if let Some(sha) = clone.merge_base(&diff.base_sha, &diff.head_sha) {
         diff.base_sha = sha;
         diff.base_approximate = false;
     }

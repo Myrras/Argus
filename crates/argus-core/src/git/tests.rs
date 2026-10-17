@@ -688,14 +688,15 @@ fn a_pr_without_a_merge_base_gets_it_from_the_clone() {
 
 #[test]
 #[cfg_attr(windows, ignore)]
-fn a_base_branch_newer_than_the_clone_falls_back_to_the_stored_base() {
+fn a_base_branch_newer_than_the_clone_keeps_the_stand_in() {
     // The base branch moved on after the clone was fetched: the platform's
-    // tip is not in it. The base commit stored with this same head is, and
-    // its merge base with the head is the real left side.
+    // tip is not in it. No other commit (the base stored with the review,
+    // say) is trusted in its place: the left side stays approximate and
+    // nothing is marked exact, until the clone is fetched.
     let Some(fx) = Fixture::new() else {
         return;
     };
-    let base = fx.commit("src/cache.rs", &file_of(10), "c1");
+    fx.commit("src/cache.rs", &file_of(10), "c1");
     git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
     let head = fx.commit("src/cache.rs", &file_of(12), "feature");
     git_in(&fx.path, &["checkout", "-q", "main"]);
@@ -712,22 +713,6 @@ fn a_base_branch_newer_than_the_clone_falls_back_to_the_stored_base() {
     let core = core_with(&p, &fx.path);
     let id = core.reviews().unwrap()[0].id;
     assert_eq!(core.review(id).unwrap().base_sha, stored_tip);
-    let files = core.list_files(id, false).unwrap();
-    assert_eq!(files.base_sha, base);
-    assert!(!files.base_approximate);
-
-    // A head pushed since the stored base was read may have merged newer
-    // base commits: the stored base says nothing about it, the stand-in
-    // stays.
-    git_in(&fx.path, &["checkout", "-q", "feature"]);
-    let pushed = fx.commit("src/cache.rs", &file_of(13), "pushed");
-    *p.files.lock().unwrap() = Some(FileDiff {
-        base_sha: platform_tip.clone(),
-        head_sha: pushed,
-        files: Vec::new(),
-        truncated: false,
-        base_approximate: true,
-    });
     let files = core.list_files(id, false).unwrap();
     assert_eq!(files.base_sha, platform_tip);
     assert!(files.base_approximate);
