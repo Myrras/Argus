@@ -745,8 +745,18 @@ export function loadCommentable(
   return p;
 }
 
-/** Tests: forget the cached commentable lines. */
-export function clearCommentableCache() {
-  commentable.clear();
-  reread.clear();
+/** Forget the cached commentable lines: of one review, or of all (tests). */
+export function clearCommentableCache(reviewId?: ReviewId) {
+  if (reviewId === undefined) {
+    commentable.clear();
+    reread.clear();
+    return;
+  }
+  const prefix = `${reviewId}|`;
+  for (const key of [...commentable.keys()]) {
+    if (key.startsWith(prefix)) commentable.delete(key);
+  }
+  for (const key of [...reread]) {
+    if (key.startsWith(prefix)) reread.delete(key);
+  }
 }

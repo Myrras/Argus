@@ -184,8 +184,8 @@ when it merges.
   them as well, so nothing lands on the wrong line), unless a local clone supplies
   the merge base: then comments and AI findings on them post as shown. The
   clone needs the base branch's latest commit; fetch it when the file still
-  says removed lines take no comments, and the files pick up the merge base
-  without reopening the review.
+  says removed lines take no comments, then press "Check again" on that note
+  (or open another file) to pick up the merge base.
 - Opening Argus a second time brings the running window to the front. If
   Argus cannot open its data at startup it says so, naming the folder.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and

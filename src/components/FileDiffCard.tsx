@@ -51,8 +51,9 @@ import {
   threadCounts,
   type DiffSide,
 } from "../lib/diffThreads";
-import { loadContents } from "../state/codeViewStore";
+import { loadContents, useCodeViewStore } from "../state/codeViewStore";
 import {
+  clearCommentableCache,
   loadCommentable,
   useCommentStore,
   useDrafts,
@@ -616,6 +617,21 @@ export const FileDiffCard = memo(function FileDiffCard({
                   could not compute its merge base.
                   {hasClone &&
                     " If your local clone is behind, fetch it to enable them."}
+                  {hasClone && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        aria-label="Check again for the merge base"
+                        onClick={() => {
+                          clearCommentableCache(reviewId);
+                          void useCodeViewStore.getState().load(reviewId);
+                        }}
+                      >
+                        Check again
+                      </button>
+                    </>
+                  )}
                 </p>
               )}
               <DiffEditor

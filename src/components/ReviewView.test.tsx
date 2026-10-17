@@ -823,6 +823,48 @@ describe("ReviewView", () => {
     expect(screen.queryByText(/fetch it to enable them/)).toBeNull();
   });
 
+  it("checks again for the merge base after the clone is fetched", async () => {
+    listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
+    useBackendSettingsStore.setState({
+      settings: settings({
+        clonePaths: { [`${r.host}/${r.repo}`]: "/work/widgets" },
+      }),
+    });
+    const calls = (name: string) =>
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === name).length;
+    render(<ReviewView review={r} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    expect(editor).toHaveAttribute("data-comment-a", "");
+    const lists = calls("list_files");
+    const lines = calls("commentable_lines");
+
+    // The user fetches the clone: the backend now reports the merge base.
+    listed = reviewFiles({
+      reviewId: r.id,
+      files,
+      reviewBaseSha: "e".repeat(40),
+    });
+    fireEvent.click(
+      within(card("src/cache.rs")).getByRole("button", {
+        name: "Check again for the merge base",
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+        "data-comment-a",
+        "1,2",
+      ),
+    );
+    expect(calls("list_files")).toBeGreaterThan(lists);
+    await waitFor(() =>
+      expect(calls("commentable_lines")).toBeGreaterThan(lines),
+    );
+    expect(screen.queryByText(/Removed lines can't take comments/)).toBeNull();
+  });
+
   it("says nothing about removed lines when the left side is exact", async () => {
     render(<ReviewView review={r} now={NOW} />);
     await screen.findByTestId("editor-src/cache.rs");
