@@ -324,11 +324,22 @@ pub(crate) fn execute(
                 timeout: ctx.timeout.min(TOOL_LIST_TIMEOUT),
                 output: adapter::OutputKind::Text,
             };
+            // Fail closed: without the listing, a tool that writes (an MCP
+            // server of the user's) would stay switched on.
             match adapter::run_tracked(&inv, cancel, &ctx.child) {
-                Ok(listing) => adapter::parse_auggie_tools(&listing),
+                Ok(listing) => {
+                    let tools = adapter::parse_auggie_tools(&listing);
+                    if tools.is_empty() {
+                        tracing::debug!("AI run: `auggie tools list` named no tools");
+                        return Err(TOOLS_UNLISTED.into());
+                    }
+                    tools
+                }
                 Err(adapter::AgentError::Cancelled) => return Err(super::CANCELLED.into()),
-                // The static list still applies.
-                Err(_) => Vec::new(),
+                Err(e) => {
+                    tracing::debug!("AI run: `auggie tools list` failed: {}", e.message());
+                    return Err(TOOLS_UNLISTED.into());
+                }
             }
         }
         _ => Vec::new(),
@@ -373,6 +384,11 @@ pub(crate) fn execute(
         ..output::filter(parsed, &paths, &known)
     })
 }
+
+/// Why an auggie run did not start: its tools could not be listed (the
+/// listing failed, timed out, or named none), so the ones that write cannot
+/// be removed.
+pub(crate) const TOOLS_UNLISTED: &str = "Could not list auggie's tools, so Argus can't switch off the ones that write; the run was not started";
 
 /// Most `auggie tools list` may take (it starts the user's MCP servers).
 const TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
