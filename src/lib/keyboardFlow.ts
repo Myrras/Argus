@@ -115,9 +115,9 @@ export function runFlowAction(
     case "prevItem":
       return focus.move(reviewId, action === "nextItem" ? 1 : -1);
     case "toggleThread": {
-      // A focused button or link handles its own Enter (bound here by a
-      // user); other keys (`t`) still act on the focused thread.
-      if (key === "Enter" && ownsEnter(target)) return false;
+      // A focused button or link handles its own Enter and Space (bound
+      // here by a user); other keys (`t`) still act on the focused thread.
+      if ((key === "Enter" || key === " ") && ownsEnter(target)) return false;
       const t = focusedThread(reviewId);
       if (!t) return false;
       focus.commandThread(t.threadId, "toggle");

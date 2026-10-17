@@ -195,6 +195,22 @@ describe("reviewStore", () => {
     ]);
   });
 
+  it("a record read that started before a list read never overwrites the newer list", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));
+    const one = useReviewStore.getState().applyChanged(a.id);
+    const list = useReviewStore.getState().reloadList();
+    answers[1]([{ ...a, title: "A, newest" }, b]);
+    await list;
+    // The record was read before the list: its answer is older.
+    answers[0]({ ...a, title: "A, older" });
+    await one;
+    expect(useReviewStore.getState().reviews.map((r) => r.title)).toEqual([
+      "A, newest",
+      "B",
+    ]);
+  });
+
   it("a list read still drops a review that left the list", async () => {
     const answers: ((v: unknown) => void)[] = [];
     mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));

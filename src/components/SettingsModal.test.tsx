@@ -21,7 +21,6 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
 import type { Settings } from "../ipc/types";
 import { useAiStore } from "../state/aiStore";
-import { aiRun } from "../test/aiFixtures";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import { useSettingsStore } from "../state/settingsStore";
@@ -276,21 +275,18 @@ describe("SettingsModal — AI tab", () => {
     );
   });
 
-  it("warns when the agent cannot be held to reading only (auggie)", async () => {
+  it("warns when the configured agent is auggie, with no run read yet", async () => {
     const warning =
       "Auggie can still use MCP tools from your own Auggie setup; Argus cannot guarantee this run only reads.";
     const initialAi = useAiStore.getState();
-    useAiStore.setState({ runs: { r1: aiRun({ reviewId: "r1" }) } });
+    useAiStore.setState({ runs: {} });
     await renderTab("AI");
     expect(screen.queryByText(warning)).toBeNull();
     act(() =>
-      useAiStore.setState({
-        runs: {
-          r1: aiRun({
-            reviewId: "r1",
-            adapter: "auggie",
-            readOnlyGuaranteed: false,
-          }),
+      useBackendSettingsStore.setState({
+        settings: {
+          ...settings(),
+          ai: { ...settings().ai, adapter: "auggie" },
         },
       }),
     );

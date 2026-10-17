@@ -85,9 +85,15 @@ function withNewer(
   current: ReviewRecord[],
   moved: (id: ReviewId) => boolean,
 ): ReviewRecord[] {
-  return listed.map((r) =>
+  const merged = listed.map((r) =>
     moved(r.id) ? (current.find((c) => c.id === r.id) ?? r) : r,
   );
+  // The listed records this answer applies were read after any per-review
+  // read still in flight from before the list began: number those ids so
+  // the older answers drop instead of overwriting these. (Ids re-read since
+  // the list began keep theirs.) After the merge: `moved` would see this.
+  for (const r of listed) if (!moved(r.id)) reads.begin(r.id);
+  return merged;
 }
 
 export const useReviewStore = create<ReviewStoreState>((set, get) => ({
@@ -116,8 +122,9 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
         }));
         return;
       }
+      const merged = withNewer(reviews, get().reviews, moved);
       set((s) => ({
-        reviews: withNewer(reviews, s.reviews, moved),
+        reviews: merged,
         loaded: true,
         // An event may have delivered a newer report while this was in flight.
         lastRefresh: newer(s.lastRefresh, report),
@@ -134,10 +141,10 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
     try {
       const reviews = await listReviews();
       if (current()) {
-        set((s) => ({
-          reviews: withNewer(reviews, s.reviews, moved),
+        set({
+          reviews: withNewer(reviews, get().reviews, moved),
           loaded: true,
-        }));
+        });
       }
     } catch (e) {
       toastError("Could not load the reviews", toIpcError(e).message);

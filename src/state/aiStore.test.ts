@@ -167,6 +167,20 @@ describe("aiStore", () => {
     off();
   });
 
+  it("re-reads the runs when the agent is switched in Settings", async () => {
+    const off = await subscribeAiEvents();
+    useBackendSettingsStore.setState({ settings: settings() });
+    await useAiStore.getState().load(ID);
+    mockInvoke.mockClear();
+    useBackendSettingsStore.setState({
+      settings: settings({
+        ai: { enabled: true, adapter: "auggie", args: [], binary: null },
+      }),
+    });
+    expect(mockInvoke).toHaveBeenCalledWith("ai_state", { reviewId: ID });
+    off();
+  });
+
   it("writes nothing on its own: loads and events are reads only", async () => {
     const off = await subscribeAiEvents();
     useReviewStore.setState({ reviews: [r] });

@@ -19,6 +19,7 @@ import { useSettingsStore } from "../state/settingsStore";
 import { useThreadStore } from "../state/threadStore";
 import { aiRun, finding } from "../test/aiFixtures";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
+import { runFlowAction } from "./keyboardFlow";
 import { useAppShortcuts } from "./useAppShortcuts";
 
 const r = review();
@@ -402,5 +403,20 @@ describe("Enter and the zone", () => {
     expect(useFocusStore.getState().zone).toBe("list");
     press({ key: "n", code: "KeyN" });
     expect(useFocusStore.getState().zone).toBe("page");
+  });
+
+  it("leaves Enter and Space to a focused button; other keys still toggle", () => {
+    act(() =>
+      useHistoryStore
+        .getState()
+        .focus({ threadId: onA.threadId, reviewId: r.id, mine: false }),
+    );
+    const button = document.createElement("button");
+    document.body.appendChild(button);
+    expect(runFlowAction("toggleThread", r.id, button, "Enter")).toBe(false);
+    expect(runFlowAction("toggleThread", r.id, button, " ")).toBe(false);
+    expect(runFlowAction("toggleThread", r.id, button, "t")).toBe(true);
+    expect(runFlowAction("toggleThread", r.id, window, " ")).toBe(true);
+    button.remove();
   });
 });
