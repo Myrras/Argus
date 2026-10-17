@@ -259,63 +259,195 @@ pub(crate) fn filter(
     run
 }
 
-/// Prefixes of tokens with a fixed shape: GitHub (classic, OAuth, user,
-/// server, refresh, fine-grained), GitLab (personal, deploy), Slack.
-const TOKEN_PREFIXES: &[&str] = &[
-    "github_pat_",
-    "ghp_",
-    "gho_",
-    "ghu_",
-    "ghs_",
-    "ghr_",
-    "glpat-",
-    "gldt-",
-    "xoxb-",
-    "xoxp-",
-];
-/// A prefix followed by fewer token characters is prose about the format.
-const MIN_TOKEN_TAIL: usize = 8;
-const REDACTED: &str = "[redacted]";
+/// A token with a fixed prefix: what may follow it, at least how much, and
+/// whether it is distinctive enough to match inside a word.
+struct TokenShape {
+    prefix: &'static str,
+    tail: fn(char) -> bool,
+    min_tail: usize,
+    /// Matched even right after a token character (`%3Aghp_…`, `x_glpat-…`).
+    /// Shapes with a short or common prefix need a boundary before them:
+    /// a `%XX` escape or a non-token character.
+    anywhere: bool,
+    /// The tail must hold a digit (random keys do; words do not).
+    digit: bool,
+}
+
+fn alnum(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+}
 
 fn token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '-'
 }
 
-/// `text` with every `secrets` occurrence and every token-shaped string
-/// replaced: the prefixes above, AWS access key ids (`AKIA` + 16), and PEM
-/// private key blocks.
+/// GitLab tokens may carry a `.`-separated routing part (`glpat-…​.01.…`).
+fn gitlab_char(c: char) -> bool {
+    token_char(c) || c == '.'
+}
+
+const fn shape(prefix: &'static str, tail: fn(char) -> bool, min_tail: usize) -> TokenShape {
+    TokenShape {
+        prefix,
+        tail,
+        min_tail,
+        anywhere: true,
+        digit: false,
+    }
+}
+
+const fn bounded(prefix: &'static str, tail: fn(char) -> bool, min_tail: usize) -> TokenShape {
+    TokenShape {
+        prefix,
+        tail,
+        min_tail,
+        anywhere: false,
+        digit: true,
+    }
+}
+
+/// Token shapes: GitHub (fine-grained, classic, OAuth, user, server,
+/// refresh), GitLab (personal, deploy, runner, pipeline trigger, CI job,
+/// OAuth app secret, feed), npm, Anthropic, OpenAI-style `sk-`, Slack.
+/// Longer prefixes first (`sk-ant-` before `sk-`).
+const TOKEN_SHAPES: &[TokenShape] = &[
+    shape("github_pat_", token_char, 22),
+    shape("ghp_", alnum, 30),
+    shape("gho_", alnum, 30),
+    shape("ghu_", alnum, 30),
+    shape("ghs_", alnum, 30),
+    shape("ghr_", alnum, 30),
+    shape("glpat-", gitlab_char, 16),
+    shape("gldt-", gitlab_char, 16),
+    shape("glrt-", gitlab_char, 16),
+    shape("glptt-", gitlab_char, 16),
+    shape("glcbt-", gitlab_char, 16),
+    shape("gloas-", gitlab_char, 16),
+    shape("glft-", gitlab_char, 16),
+    shape("npm_", alnum, 36),
+    shape("sk-ant-", token_char, 20),
+    bounded("sk-", token_char, 20),
+    bounded("xoxb-", token_char, 10),
+    bounded("xoxp-", token_char, 10),
+    bounded("xoxa-", token_char, 10),
+    bounded("xoxe-", token_char, 10),
+    bounded("xapp-", token_char, 10),
+];
+/// The shortest known secret that is replaced wherever it occurs.
+const MIN_SECRET: usize = 8;
+const REDACTED: &str = "[redacted]";
+
+/// Whether a token may start after `before` (the text so far): at its
+/// start, after a non-token character, or right after a `%XX` escape.
+fn at_boundary(before: &str) -> bool {
+    let Some(last) = before.chars().last() else {
+        return true;
+    };
+    if !token_char(last) {
+        return true;
+    }
+    let b = before.as_bytes();
+    b.len() >= 3
+        && b[b.len() - 3] == b'%'
+        && b[b.len() - 2].is_ascii_hexdigit()
+        && b[b.len() - 1].is_ascii_hexdigit()
+}
+
+/// Length of the token at the start of `rest`, if one starts there.
+fn token_at(rest: &str, boundary: bool) -> Option<usize> {
+    for s in TOKEN_SHAPES {
+        if !(boundary || s.anywhere) {
+            continue;
+        }
+        let Some(tail) = rest.strip_prefix(s.prefix) else {
+            continue;
+        };
+        let n = tail.chars().take_while(|c| (s.tail)(*c)).count();
+        let tail = &tail[..n];
+        if n >= s.min_tail && (!s.digit || tail.chars().any(|c| c.is_ascii_digit())) {
+            return Some(s.prefix.len() + n);
+        }
+    }
+    if boundary {
+        // AWS access key id: `AKIA` + 16 upper-case letters or digits.
+        if let Some(tail) = rest.strip_prefix("AKIA") {
+            let n = tail
+                .chars()
+                .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                .count();
+            if n == 16 {
+                return Some(4 + n);
+            }
+        }
+    }
+    None
+}
+
+/// Length of a URL's credentials at the start of `rest` (just after
+/// `://`): `user:password@` or a long bare user (a token as the user
+/// name, `https://<token>@host`), up to the `@`. `git@` and the like stay.
+fn userinfo_at(rest: &str) -> Option<usize> {
+    let end =
+        rest.find(|c: char| c == '@' || c == '/' || c == '?' || c == '#' || c.is_whitespace())?;
+    if !rest[end..].starts_with('@') || end == 0 {
+        return None;
+    }
+    let info = &rest[..end];
+    (info.contains(':') || info.len() >= 20).then_some(end)
+}
+
+/// Length of HTTP Basic credentials at the start of `rest` (just after
+/// `Basic `): base64 that decodes to printable `user:password`, so prose
+/// like "Basic authentication" stays.
+fn basic_auth_at(rest: &str) -> Option<usize> {
+    use base64::Engine as _;
+    let n = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
+        .count();
+    if n < 8 || n % 4 != 0 {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&rest[..n])
+        .ok()?;
+    let printable = decoded.iter().all(|b| (0x20..0x7f).contains(b));
+    (printable && decoded.contains(&b':')).then_some(n)
+}
+
+/// `text` with every `secrets` occurrence and every credential-shaped
+/// string replaced: the [`TOKEN_SHAPES`], AWS access key ids, URL
+/// credentials, HTTP Basic credentials, and PEM private key blocks.
 pub(crate) fn redact_text(text: &str, secrets: &[String]) -> String {
     let mut out = text.to_string();
-    for s in secrets.iter().filter(|s| s.len() >= MIN_TOKEN_TAIL) {
+    for s in secrets.iter().filter(|s| s.len() >= MIN_SECRET) {
         out = out.replace(s.as_str(), REDACTED);
     }
     out = redact_pem(&out);
     let mut result = String::with_capacity(out.len());
     let mut rest = out.as_str();
-    'scan: while !rest.is_empty() {
-        let at_boundary = !result.chars().last().is_some_and(token_char);
-        if at_boundary {
-            for p in TOKEN_PREFIXES {
-                if let Some(tail) = rest.strip_prefix(p) {
-                    let n = tail.chars().take_while(|c| token_char(*c)).count();
-                    if n >= MIN_TOKEN_TAIL {
-                        result.push_str(REDACTED);
-                        rest = &tail[n..];
-                        continue 'scan;
-                    }
-                }
-            }
-            if let Some(tail) = rest.strip_prefix("AKIA") {
-                let n = tail
-                    .chars()
-                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    .count();
-                if n == 16 {
-                    result.push_str(REDACTED);
-                    rest = &tail[n..];
-                    continue 'scan;
-                }
-            }
+    while !rest.is_empty() {
+        if let Some(n) = token_at(rest, at_boundary(&result)) {
+            result.push_str(REDACTED);
+            rest = &rest[n..];
+            continue;
+        }
+        let lead = if let Some(after) = rest.strip_prefix("://") {
+            userinfo_at(after).map(|n| (3, n))
+        } else if rest
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("basic "))
+            && at_boundary(&result)
+        {
+            basic_auth_at(&rest[6..]).map(|n| (6, n))
+        } else {
+            None
+        };
+        if let Some((keep, n)) = lead {
+            result.push_str(&rest[..keep]);
+            result.push_str(REDACTED);
+            rest = &rest[keep + n..];
+            continue;
         }
         let c = rest.chars().next().expect("not empty");
         result.push(c);
@@ -414,6 +546,82 @@ mod tests {
             redact_text("x -----BEGIN RSA PRIVATE KEY-----\nMIIE", &[]),
             "x [redacted]"
         );
+    }
+
+    #[test]
+    fn every_credential_shape_is_redacted() {
+        use base64::Engine as _;
+        // Fictitious values of each shape, each with the text around it
+        // that must stay.
+        let basic = base64::engine::general_purpose::STANDARD.encode("fixture-user:fixture-pass");
+        let cases = [
+            (
+                "https://oauth2:FixtureSecret1@gitlab.example.test/acme/widgets.git".to_string(),
+                "https://[redacted]@gitlab.example.test/acme/widgets.git",
+            ),
+            (
+                format!("remote https://{}@github.example.test/x", "Fx9".repeat(10)),
+                "remote https://[redacted]@github.example.test/x",
+            ),
+            (
+                format!("key sk-ant-api03-{}", "Fx9_".repeat(10)),
+                "key [redacted]",
+            ),
+            (
+                format!("OPENAI=sk-proj-{}", "Fx9".repeat(10)),
+                "OPENAI=[redacted]",
+            ),
+            (
+                format!("npm {}", format_args!("npm_{}", "Fx9".repeat(12))),
+                "npm [redacted]",
+            ),
+            (format!("glrt-{}", "Fx9".repeat(7)), "[redacted]"),
+            (format!("glptt-{}", "Fx9".repeat(7)), "[redacted]"),
+            (format!("glcbt-64_{}", "Fx9".repeat(7)), "[redacted]"),
+            (format!("gloas-{}", "Fx9".repeat(7)), "[redacted]"),
+            (format!("glft-{}", "Fx9".repeat(7)), "[redacted]"),
+            ("slack xoxa-2-1234567890-fixture".into(), "slack [redacted]"),
+            ("xoxe-1-fixture12345".into(), "[redacted]"),
+            ("app xapp-1-A0FIXTURE-123".into(), "app [redacted]"),
+            (
+                format!("Authorization: Basic {basic}\n"),
+                "Authorization: Basic [redacted]\n",
+            ),
+            // After a token character: a URL-encoded `:` or a joined name.
+            (
+                format!("u=x%3Aghp_{}&y", "Fx9".repeat(12)),
+                "u=x%3A[redacted]&y",
+            ),
+            (
+                format!("TOKEN_glpat-{}", "Fx9".repeat(7)),
+                "TOKEN_[redacted]",
+            ),
+            (format!("a%40sk-{}", "Fx9".repeat(8)), "a%40[redacted]"),
+        ];
+        for (text, want) in &cases {
+            assert_eq!(redact_text(text, &[]), *want, "{text}");
+        }
+    }
+
+    #[test]
+    fn ordinary_code_and_prose_are_not_redacted() {
+        for kept in [
+            "let task-sk-1 = 2;",
+            "the sk-learn-compatible-estimator-wrapper type",
+            "task_sk-12345678901234567890 is an id",
+            "Basic authentication is off; Basic auth too.",
+            "Basic dGVzdA== decodes to no pair",
+            "ssh://git@github.example.test/acme/widgets.git",
+            "https://gitlab.example.test/acme/widgets/-/merge_requests/1",
+            "email someone@example.test",
+            "run_npm_install_script_for_the_workspace",
+            "xapp-service-config-loader",
+            "myxoxb-handler",
+            "a ghp_ token, a glrt- token, an npm_ token",
+            "ghp_short1",
+        ] {
+            assert_eq!(redact_text(kept, &[]), kept);
+        }
     }
 
     #[test]
