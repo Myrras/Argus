@@ -13,7 +13,7 @@
 //! cached body and `X-Next-Page`. A 429 stops all calls until GitLab's
 //! `Retry-After` / `RateLimit-Reset`. Requests time out (connect and total).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,7 +25,8 @@ use super::conditional::{Cached, ConditionalCache};
 use super::github::check_sha;
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
-    ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
+    ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side,
+    Thread,
 };
 use super::rate_limit::{reset_at, Backoff};
 use super::{
@@ -50,6 +51,10 @@ const DISCUSSION_PAGES: u32 = 100;
 
 /// How many commented-on MRs the list fetches at the same time.
 const LIST_PARALLELISM: usize = 4;
+
+/// How long a commented-on MR seen merged or closed is left out of the
+/// list before it is read again (it may have been reopened).
+const FINAL_RECHECK: chrono::Duration = chrono::Duration::days(1);
 
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
@@ -125,26 +130,38 @@ pub fn url_host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-/// Trim and drop a trailing slash; `None` when not an https URL, or a
-/// plain http one off this machine: every request carries the token in a
-/// header, which plain http sends in cleartext. Local http (`localhost`,
-/// `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own machine.
+/// Trim, parse and drop a trailing slash; `None` when not an https URL,
+/// or a plain http one off this machine: every request carries the token
+/// in a header, which plain http sends in cleartext. Local http
+/// (`localhost`, `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own
+/// machine.
+///
+/// The host is the parsed one, what a request really connects to: in
+/// `http://127.0.0.1:80@gitlab.example.test` the part before `@` is
+/// userinfo, not the host. Userinfo, a query or a fragment have no place in
+/// an instance URL and are refused; the URL comes back in its parsed form,
+/// so [`url_host`] reads the same host.
 pub fn normalize_base_url(url: &str) -> Option<String> {
-    let url = url.trim().trim_end_matches('/');
-    let host = url_host(url);
-    let ok = !host.is_empty()
-        && (url.starts_with("https://") || (url.starts_with("http://") && is_local(host)));
-    ok.then(|| url.to_string())
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let host = parsed.host_str().filter(|h| !h.is_empty())?;
+    let ok = match parsed.scheme() {
+        "https" => true,
+        "http" => is_local(host),
+        _ => false,
+    };
+    ok.then(|| parsed.as_str().trim_end_matches('/').to_string())
 }
 
-/// `host[:port]` names this machine.
+/// A parsed host (no port; IPv6 in brackets) names this machine.
 fn is_local(host: &str) -> bool {
-    let name = match host.strip_prefix('[') {
-        // `[::1]:8080`
-        Some(rest) => rest.split_once(']').map_or(rest, |(h, _)| h),
-        None => host.split_once(':').map_or(host, |(h, _)| h),
-    };
-    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
 }
 
 /// The longest one request may take, start to end of body.
@@ -173,9 +190,14 @@ pub struct GitlabProvider {
     /// Conditional-request cache of GETs, keyed by path under `/api/v4`.
     cache: ConditionalCache,
     limit: Backoff,
-    /// Commented-on MRs (project id, iid) seen merged or closed: final, so
-    /// the list never fetches them again. Memory only.
-    done: Mutex<HashSet<(u64, u64)>>,
+    /// Commented-on MRs (project id, iid) seen merged or closed, and when:
+    /// the list skips them for [`FINAL_RECHECK`] (`final_recheck`), then
+    /// reads them once more in case one was reopened. Memory only.
+    done: Mutex<HashMap<(u64, u64), DateTime<Utc>>>,
+    final_recheck: chrono::Duration,
+    /// The last successful read of each commented-on open MR: what the list
+    /// shows when a read fails once (see `list_reviews`). Memory only.
+    commented: Mutex<HashMap<(u64, u64), ReviewRef>>,
 }
 
 impl GitlabProvider {
@@ -191,8 +213,17 @@ impl GitlabProvider {
             client: build_client(REQUEST_TIMEOUT),
             cache: ConditionalCache::default(),
             limit: Backoff::default(),
-            done: Mutex::new(HashSet::new()),
+            done: Mutex::new(HashMap::new()),
+            final_recheck: FINAL_RECHECK,
+            commented: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Read a commented-on MR seen merged or closed again after `after`
+    /// instead of [`FINAL_RECHECK`] (tests).
+    pub fn with_final_recheck(mut self, after: chrono::Duration) -> Self {
+        self.final_recheck = after;
+        self
     }
 
     /// Give up on a request after `timeout` instead of the default 30 s.
@@ -309,7 +340,9 @@ impl GitlabProvider {
     /// A full page without a next one is followed anyway: a 304 replays the
     /// header as it was when the page was cached, and a page that was the
     /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
-    /// more items arrive after it. An empty next page ends it.
+    /// more items arrive after it. An empty next page ends it, and so does
+    /// that unasked-for page failing (any error but a rate limit): the list
+    /// read so far is complete as far as GitLab said.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
         self.get_pages(path, MAX_PAGES)
     }
@@ -320,19 +353,41 @@ impl GitlabProvider {
         let sep = if path.contains('?') { '&' } else { '?' };
         let mut all = Vec::new();
         let mut page = 1;
+        let mut guessed = false;
         for _ in 0..max_pages {
-            let (body, next) = self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}"))?;
+            let (body, next) =
+                match self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}")) {
+                    Ok(reply) => reply,
+                    Err(e) if guessed && !super::is_rate_limited(&e) => {
+                        tracing::debug!("a GitLab list ends at a page it did not name: {e}");
+                        return Ok(all);
+                    }
+                    Err(e) => return Err(e),
+                };
             let items: Vec<T> = serde_json::from_str(&body).map_err(|_| unexpected())?;
             let full = items.len() >= PER_PAGE as usize;
             all.extend(items);
             match next {
-                Some(n) if n > page => page = n,
-                None if full => page += 1,
+                Some(n) if n > page => {
+                    page = n;
+                    guessed = false;
+                }
+                None if full => {
+                    page += 1;
+                    guessed = true;
+                }
                 _ => return Ok(all),
             }
         }
         tracing::warn!("a GitLab list was cut at {max_pages} pages");
         Ok(all)
+    }
+
+    fn forget_commented(&self, project: u64, iid: u64) {
+        self.commented
+            .lock()
+            .expect("commented lock poisoned")
+            .remove(&(project, iid));
     }
 
     fn me(&self) -> CoreResult<GlUser> {
@@ -424,6 +479,7 @@ impl GitlabProvider {
                 base_sha,
                 head_sha,
                 truncated,
+                base_approximate: false,
             });
         }
         Err(CoreError::Provider(
@@ -458,8 +514,10 @@ impl ReviewProvider for GitlabProvider {
     /// on a large instance for the user's notes is far too expensive, so the
     /// second half reads the user's own `commented` events of the last
     /// [`COMMENTED_DAYS`] days and fetches the MRs they point at, a few at
-    /// a time. One of those failing is skipped (a rate limit stops the
-    /// list), and one seen merged or closed is not fetched again.
+    /// a time. One of those failing stays listed as it was last read (or is
+    /// skipped when it never was; a rate limit stops the list): dropping it
+    /// would mark the stored review unlisted for a poll. One seen merged or
+    /// closed is not fetched again for [`FINAL_RECHECK`].
     fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
         let me = self.me()?;
         let reviewing: Vec<GlMr> = self.get_all(&format!(
@@ -477,7 +535,12 @@ impl ReviewProvider for GitlabProvider {
         let after = (Utc::now() - chrono::Duration::days(COMMENTED_DAYS)).format("%Y-%m-%d");
         let events: Vec<GlEvent> =
             self.get_all(&format!("/events?action=commented&after={after}"))?;
-        let done = self.done.lock().expect("done lock poisoned").clone();
+        let now = Utc::now();
+        let done: HashSet<(u64, u64)> = {
+            let mut done = self.done.lock().expect("done lock poisoned");
+            done.retain(|_, at| now - *at < self.final_recheck);
+            done.keys().copied().collect()
+        };
         let mut wanted: Vec<(u64, u64)> = Vec::new();
         for e in events {
             let Some(note) = e.note else { continue };
@@ -514,25 +577,41 @@ impl ReviewProvider for GitlabProvider {
                 // The whole provider is paused: so is the list.
                 Err(e) if super::is_rate_limited(&e) => return Err(e),
                 // Gone or no longer visible: just not listed.
-                Err(CoreError::NotFound) => continue,
-                // One MR failing never costs the rest of the list; the
-                // next poll tries it again.
+                Err(CoreError::NotFound) => {
+                    self.forget_commented(project, iid);
+                    continue;
+                }
+                // One MR failing never costs the rest of the list, nor
+                // that MR its place in it; the next poll tries it again.
                 Err(e) => {
-                    tracing::debug!("skipping commented MR {project}!{iid}: {e}");
+                    tracing::debug!("commented MR {project}!{iid} unreadable: {e}");
+                    let last = self
+                        .commented
+                        .lock()
+                        .expect("commented lock poisoned")
+                        .get(&(project, iid))
+                        .cloned();
+                    list.extend(last);
                     continue;
                 }
             };
             if mr.state != "opened" {
                 // Merged or closed is final for Argus (the poll treats it
-                // so too): not fetched again.
+                // so too): not fetched again for a while.
                 self.done
                     .lock()
                     .expect("done lock poisoned")
-                    .insert((project, iid));
+                    .insert((project, iid), now);
+                self.forget_commented(project, iid);
                 continue;
             }
             if !same_user(&mr.author.username, &me.username) {
-                list.push(self.to_ref(&mr));
+                let r = self.to_ref(&mr);
+                self.commented
+                    .lock()
+                    .expect("commented lock poisoned")
+                    .insert((project, iid), r.clone());
+                list.push(r);
             }
         }
         list.sort_by_key(|r| std::cmp::Reverse(r.updated_at));
@@ -577,6 +656,26 @@ impl ReviewProvider for GitlabProvider {
             reviewers,
             approved_by,
         ))
+    }
+
+    /// The MR and its commits: not `/reviewers` or `/approvals`.
+    fn fetch_head(&self, r: &ReviewRef) -> CoreResult<ReviewHead> {
+        let p = Self::mr_path(r);
+        let (mr, commits) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.get_json::<GlMr>(&p));
+            let b = s.spawn(|| self.get_all::<GlCommit>(&format!("{p}/commits")));
+            (join(a), join(b))
+        });
+        let mr = mr?;
+        Ok(ReviewHead {
+            head_sha: mr.head_sha(),
+            base_sha: mr
+                .diff_refs
+                .as_ref()
+                .and_then(|r| r.base_sha.clone())
+                .unwrap_or_default(),
+            commits: commit_infos(commits?),
+        })
     }
 
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
@@ -626,6 +725,7 @@ impl ReviewProvider for GitlabProvider {
                     base_sha: from.clone(),
                     head_sha: to.clone(),
                     truncated: cmp.compare_timeout,
+                    base_approximate: false,
                 })
             }
         }
@@ -728,6 +828,7 @@ impl ReviewProvider for GitlabProvider {
             head_sha: sha.to_string(),
             truncated: diffs.len() >= (PER_PAGE * MAX_PAGES) as usize,
             files: diffs.into_iter().map(|d| changed_file(d, sha)).collect(),
+            base_approximate: false,
         })
     }
 
@@ -899,17 +1000,7 @@ fn assemble_detail(
     };
     let head_sha = mr.head_sha();
     let refs = mr.diff_refs.clone();
-    let mut commits: Vec<CommitInfo> = commits
-        .into_iter()
-        .map(|c| CommitInfo {
-            title: c.title.unwrap_or_else(|| first_line(&c.message)),
-            author: c.author_name,
-            authored_at: c.authored_date,
-            sha: c.id,
-        })
-        .collect();
-    // GitLab lists commits newest first; the model is oldest first.
-    commits.reverse();
+    let commits = commit_infos(commits);
     let mut versions: Vec<DiffVersion> = versions
         .into_iter()
         .map(|v| DiffVersion {
@@ -937,6 +1028,21 @@ fn assemble_detail(
         requested_from_me,
         approved_by_me: i_approved && !requested_from_me,
     }
+}
+
+/// GitLab's commits (newest first) as the model's, oldest first.
+fn commit_infos(commits: Vec<GlCommit>) -> Vec<CommitInfo> {
+    let mut out: Vec<CommitInfo> = commits
+        .into_iter()
+        .map(|c| CommitInfo {
+            title: c.title.unwrap_or_else(|| first_line(&c.message)),
+            author: c.author_name,
+            authored_at: c.authored_date,
+            sha: c.id,
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// A discussion as a thread; `None` for one made only of system notes
@@ -1462,6 +1568,36 @@ mod tests {
             GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_err()
         );
         assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
+    }
+
+    #[test]
+    fn userinfo_never_passes_for_a_local_host() {
+        // The part before `@` is userinfo: the host is gitlab.example.test,
+        // over plain http, so the token would go out in cleartext.
+        for url in [
+            "http://127.0.0.1:80@gitlab.example.test",
+            "http://localhost@gitlab.example.test",
+            "http://[::1]@gitlab.example.test",
+            "http://[::1]:80@gitlab.example.test/api",
+            "http://localhost:x@gitlab.example.test",
+            // Userinfo has no place in the instance URL at all.
+            "https://someone@gitlab.example.test",
+            "http://someone@localhost:8080",
+            // Not a URL a GitLab can be at.
+            "http://localhost:99999",
+            "https://",
+        ] {
+            assert_eq!(normalize_base_url(url), None, "{url}");
+        }
+        for (url, host) in [
+            ("http://localhost:8080/", "localhost:8080"),
+            ("http://127.0.0.1:3000", "127.0.0.1:3000"),
+            ("http://[::1]:8080", "[::1]:8080"),
+            ("https://gitlab.example.test/sub", "gitlab.example.test"),
+        ] {
+            let ok = normalize_base_url(url).unwrap_or_else(|| panic!("{url}"));
+            assert_eq!(url_host(&ok), host);
+        }
     }
 
     #[test]

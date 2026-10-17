@@ -19,6 +19,7 @@ import type {
   DiffKind,
   FileStatus,
   Finding,
+  GitlabProblem,
   FindingPostResult,
   LineChange,
   LineStatus,
@@ -151,6 +152,7 @@ const files: ReviewFiles = {
   headSha: "c2",
   sinceLastReview: false,
   truncated: false,
+  baseApproximate: false,
   files: [
     {
       path: "src/cache.rs",
@@ -242,6 +244,7 @@ const status: ProviderStatus = {
     configured: true,
     baseUrl: "https://gitlab.example.test",
     tokenPresent: true,
+    problem: "invalidUrl",
   },
 };
 
@@ -420,6 +423,9 @@ const roundReasons = [
   "reRequested",
 ] as const satisfies readonly RoundReason[];
 const sides = ["old", "new"] as const satisfies readonly Side[];
+const gitlabProblems = [
+  "invalidUrl",
+] as const satisfies readonly GitlabProblem[];
 const fileStatuses = [
   "added",
   "modified",
@@ -492,6 +498,7 @@ const covered: true[] = [
   true satisfies Covers<ReviewStatus, typeof reviewStatuses>,
   true satisfies Covers<RoundReason, typeof roundReasons>,
   true satisfies Covers<Side, typeof sides>,
+  true satisfies Covers<GitlabProblem, typeof gitlabProblems>,
   true satisfies Covers<FileStatus, typeof fileStatuses>,
   true satisfies Covers<PostErrorKind, typeof postErrorKinds>,
   true satisfies Covers<LineStatus["kind"], typeof lineStatusKinds>,
@@ -510,6 +517,7 @@ const enums: Record<string, readonly string[]> = {
   ReviewStatus: reviewStatuses,
   RoundReason: roundReasons,
   Side: sides,
+  GitlabProblem: gitlabProblems,
   FileStatus: fileStatuses,
   PostErrorKind: postErrorKinds,
   "LineStatus.kind": lineStatusKinds,

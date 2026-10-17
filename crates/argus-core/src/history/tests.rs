@@ -151,6 +151,7 @@ fn diff(parent: &str, sha: &str, files: Vec<ChangedFile>) -> FileDiff {
         head_sha: sha.into(),
         files,
         truncated: false,
+        base_approximate: false,
     }
 }
 

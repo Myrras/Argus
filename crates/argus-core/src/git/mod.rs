@@ -10,7 +10,7 @@
 //! [`history::api`](crate::history::api).
 //!
 //! Read-only by construction: only object reads run (`rev-parse --verify`,
-//! `merge-base --is-ancestor`, `rev-list`, `diff-tree`, `cat-file --batch`;
+//! `merge-base` (`--is-ancestor` too), `rev-list`, `diff-tree`, `cat-file --batch`;
 //! no checkout, no fetch, no status), with `GIT_OPTIONAL_LOCKS=0` so no
 //! read takes the index lock, lazy fetches of a partial clone off, and no
 //! shell, a timeout, and an environment without tokens or `GIT_*`
@@ -430,6 +430,18 @@ impl LocalClone {
             .expect("commits lock")
             .insert(sha.to_string(), present);
         present
+    }
+
+    /// The merge base of commits `a` and `b` (`git merge-base`, an object
+    /// read like the others); `None` when either is no sha or not in the
+    /// clone, there is none, or git failed.
+    pub fn merge_base(&self, a: &str, b: &str) -> Option<String> {
+        if !self.has_commit(a) || !self.has_commit(b) {
+            return None;
+        }
+        let out = self.git_ok(&["merge-base", a, b]).ok()?;
+        let sha = String::from_utf8(out).ok()?.trim().to_string();
+        is_sha(&sha).then_some(sha)
     }
 
     /// The content of `path` at `sha`, read from the object database (not

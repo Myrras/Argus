@@ -234,6 +234,30 @@ mod tests {
     }
 
     #[test]
+    fn a_gitlab_url_validation_refuses_still_loads_the_rest() {
+        // Hand-edited: plain http. Loading keeps every other setting (the
+        // provider list leaves GitLab off and its status says why).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"gitlab":{"baseUrl":"http://gitlab.example.test"},"pollIntervalSecs":60,"github":{"account":"work"}}"#,
+        )
+        .unwrap();
+        let s = Settings::load(&path);
+        assert_eq!(s.gitlab.base_url, "http://gitlab.example.test");
+        assert_eq!(s.poll_interval_secs, 60);
+        assert_eq!(s.github.account.as_deref(), Some("work"));
+        // Saving it as is fails with the reason, until the URL is fixed.
+        assert!(s
+            .clone()
+            .validated()
+            .unwrap_err()
+            .to_string()
+            .contains("https://"));
+    }
+
+    #[test]
     fn validation_and_interval_floor() {
         let mut s = Settings::default();
         s.gitlab.base_url = " https://gitlab.example.test/ ".into();

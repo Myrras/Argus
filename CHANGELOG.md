@@ -76,8 +76,10 @@ when it merges.
 - Reviews refresh in the background every 3 minutes, or on demand with the
   refresh button or `⇧R`, with the time of the last refresh in the title bar.
   The sidebar's Providers section shows each provider's state and says when
-  `gh` is missing or logged out or GitLab is not set up, and a provider that
-  fails to refresh is reported there without blocking the other. Other
+  `gh` is missing or logged out or GitLab is not set up (or off because its
+  URL is not https), and a provider that fails to refresh is reported there
+  without blocking the other. A manual refresh while one is running waits for
+  it instead of running alongside. Other
   failures show as a notification. GitHub also works when Argus is launched
   from Finder or the Dock.
 - Settings, opened with `⌘,` (the app menu on macOS, the gear in the title
@@ -171,6 +173,9 @@ when it merges.
   for a refresh that is still talking to GitHub or GitLab.
 - GitLab over plain http is refused except on localhost, so your token never
   travels unencrypted.
+- On a pull request too large for GitHub to find its merge base, removed
+  lines take no comments (the file says why), unless a local clone supplies
+  the merge base.
 - Opening Argus a second time brings the running window to the front. If
   Argus cannot open its data at startup it says so, naming the folder.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and

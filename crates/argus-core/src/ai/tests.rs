@@ -93,6 +93,7 @@ impl ReviewProvider for FakeProvider {
             head_sha: "h1".into(),
             files: self.files.clone(),
             truncated: false,
+            base_approximate: false,
         })
     }
 }
@@ -956,6 +957,7 @@ impl ReviewProvider for Poster {
             head_sha: "h1".into(),
             files: vec![changed("src/a.rs")],
             truncated: false,
+            base_approximate: false,
         })
     }
     fn post_comment(
@@ -1600,6 +1602,7 @@ impl ReviewProvider for HistoryProvider {
             head_sha: "h1".into(),
             files: vec![changed("src/other.rs")],
             truncated: false,
+            base_approximate: false,
         })
     }
     fn commit_diff(&self, _: &ReviewRef, _: &str) -> CoreResult<FileDiff> {
@@ -1608,6 +1611,7 @@ impl ReviewProvider for HistoryProvider {
             head_sha: "h1".into(),
             files: vec![changed("src/other.rs")],
             truncated: false,
+            base_approximate: false,
         })
     }
 }
@@ -1874,6 +1878,7 @@ fn snapshot_paths_cannot_escape_the_temp_dir() {
         head_sha: "h".into(),
         files: vec![evil, changed("/abs/a.rs")],
         truncated: false,
+        base_approximate: false,
     };
     job::write_snapshot(&path, &diff, &[]).unwrap();
     assert!(path.join("diff/escape.rs.diff").is_file());
@@ -1980,6 +1985,7 @@ fn over_long_names_do_not_fail_the_snapshot() {
             changed(&format!("{}/x.rs", "d".repeat(300))),
         ],
         truncated: false,
+        base_approximate: false,
     };
     job::write_snapshot(dir.path(), &diff, &[]).unwrap();
     let hashed = |name: &str, suffix: &str| {

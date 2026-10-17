@@ -38,6 +38,10 @@ pub struct ReviewFiles {
     pub since_last_review: bool,
     /// The platform's file limit was hit.
     pub truncated: bool,
+    /// `base_sha` is a stand-in for the left side, not the commit the
+    /// patches are relative to (see [`FileDiff::base_approximate`]): the
+    /// old side may not line up, so it takes no comments.
+    pub base_approximate: bool,
     pub files: Vec<FileEntry>,
 }
 
@@ -124,6 +128,7 @@ pub(crate) fn assemble(
         head_sha: diff.head_sha,
         since_last_review,
         truncated: diff.truncated,
+        base_approximate: diff.base_approximate,
         files: diff
             .files
             .into_iter()

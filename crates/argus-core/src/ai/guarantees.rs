@@ -71,6 +71,7 @@ fn diff(from: &str, to: &str) -> FileDiff {
             too_large: false,
         }],
         truncated: false,
+        base_approximate: false,
     }
 }
 

@@ -611,6 +611,27 @@ describe("ReviewView", () => {
     );
     expect(editor).toHaveAttribute("data-comment-a", "");
   });
+  it("takes no comments on removed lines when GitHub had no merge base", async () => {
+    listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
+    render(<ReviewView review={r} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    expect(editor).toHaveAttribute("data-comment-a", "");
+    expect(
+      within(card("src/cache.rs")).getByText(
+        "Removed lines can't take comments for this file: GitHub could not compute its merge base.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing about removed lines when the left side is exact", async () => {
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByTestId("editor-src/cache.rs");
+    expect(screen.queryByText(/Removed lines can't take comments/)).toBeNull();
+  });
+
   it("lists the current threads of a file whose diff does not show", async () => {
     const on = (path: string, author: string) =>
       thread({

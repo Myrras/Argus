@@ -66,6 +66,7 @@ fn diff(base: &str, head: &str, files: Vec<ChangedFile>) -> FileDiff {
         head_sha: head.into(),
         files,
         truncated: false,
+        base_approximate: false,
     }
 }
 
@@ -927,8 +928,10 @@ fn a_poll_storing_while_the_watermark_moves_is_kept() {
         *h.borrow_mut() = Some(Box::new(move || {
             let threads = platform.threads.lock().unwrap().clone();
             *handle.lock().unwrap() = Some(std::thread::spawn(move || {
-                crate::poll::persist(&store, None, &renamed, &threads, ME, true, at(11, 12))
-                    .unwrap();
+                // Started after the post's own refresh (an older one is
+                // dropped, see `persist`).
+                let now = chrono::Utc::now();
+                crate::poll::persist(&store, None, &renamed, &threads, ME, true, now).unwrap();
                 let _ = done_tx.send(());
             }));
             let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));

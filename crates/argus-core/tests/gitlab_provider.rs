@@ -925,3 +925,120 @@ fn a_merged_commented_mr_is_not_fetched_again() {
     assert_eq!(count("/api/v4/projects/300/merge_requests/8"), 1);
     assert_eq!(count("/api/v4/projects/200/merge_requests/5"), 2);
 }
+
+#[test]
+fn a_failing_page_after_a_full_last_page_ends_the_list() {
+    // Exactly 100 discussions and no next page: page 2 is asked for in case
+    // more came in, and its failing does not fail the complete list.
+    let (base, seen) = serve(|path| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
+            return fixture_routes(path);
+        }
+        if query.ends_with("page=1") {
+            Reply {
+                status: "200 OK",
+                headers: "X-Next-Page: \r\n".into(),
+                body: discussions(0, 100),
+            }
+        } else {
+            status("500 Internal Server Error")
+        }
+    });
+    let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
+    assert_eq!(threads.len(), 100);
+    assert!(seen.lock().unwrap().iter().any(|l| l.contains("page=2")));
+
+    // A page the list names as next failing is a real gap.
+    let (base, _) = serve(|path| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
+            return fixture_routes(path);
+        }
+        if query.ends_with("page=1") {
+            Reply {
+                status: "200 OK",
+                headers: "X-Next-Page: 2\r\n".into(),
+                body: discussions(0, 100),
+            }
+        } else {
+            status("500 Internal Server Error")
+        }
+    });
+    assert!(provider(&base).fetch_threads(&mr_ref(&base, 21)).is_err());
+}
+
+#[test]
+fn the_head_and_commits_do_not_need_the_reviewer_state() {
+    // /reviewers and /approvals failing fail `fetch_review` (see above),
+    // not the head check before approving or the history's commit list.
+    let (base, seen) = serve_raw(mr21_with(
+        ("500 Internal Server Error", "{}"),
+        ("500 Internal Server Error", "{}"),
+    ));
+    let gl = provider(&base);
+    let r = mr_ref(&base, 21);
+    assert!(gl.fetch_review(&r).is_err());
+    let full = {
+        let (b, _) = serve(fixture_routes);
+        provider(&b).fetch_review(&mr_ref(&b, 21)).unwrap()
+    };
+    seen.lock().unwrap().clear();
+    let head = gl.fetch_head(&r).unwrap();
+    assert_eq!(head.head_sha, full.head_sha);
+    assert_eq!(head.base_sha, full.base_sha);
+    assert_eq!(head.commits, full.commits);
+    // Nor are they asked.
+    let calls = seen.lock().unwrap().join("\n");
+    assert!(
+        !calls.contains("/reviewers") && !calls.contains("/approvals"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn a_commented_mr_seen_closed_is_checked_again_later() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // !8 was merged... then a closed-and-reopened MR of the same kind: the
+    // list skips a final MR only for a while, not until Argus restarts.
+    let reopened = Arc::new(AtomicBool::new(false));
+    let flag = reopened.clone();
+    let (base, _) = serve_raw(move |path, _| {
+        if path == "/api/v4/projects/300/merge_requests/8" && flag.load(Ordering::SeqCst) {
+            let mr = fixture("mr_300_8.json").replace("\"merged\"", "\"opened\"");
+            return Reply {
+                status: "200 OK",
+                headers: String::new(),
+                body: mr,
+            };
+        }
+        fixture_routes(path)
+    });
+    let gl = provider(&base).with_final_recheck(chrono::Duration::zero());
+    let numbers = |list: Vec<ReviewRef>| list.iter().map(|r| r.number).collect::<Vec<_>>();
+    assert!(!numbers(gl.list_reviews().unwrap()).contains(&8));
+    reopened.store(true, Ordering::SeqCst);
+    assert!(numbers(gl.list_reviews().unwrap()).contains(&8));
+}
+
+#[test]
+fn a_commented_mr_failing_once_stays_listed() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // Listed once; then its read fails for a poll. Dropping it from the list
+    // would mark the stored review unlisted (gone from the active tabs)
+    // until the next poll: it stays listed as last seen instead.
+    let failing = Arc::new(AtomicBool::new(false));
+    let flag = failing.clone();
+    let (base, _) = serve_raw(move |path, _| {
+        if path == "/api/v4/projects/200/merge_requests/5" && flag.load(Ordering::SeqCst) {
+            return status("500 Internal Server Error");
+        }
+        fixture_routes(path)
+    });
+    let gl = provider(&base);
+    let first = gl.list_reviews().unwrap();
+    let five = first.iter().find(|r| r.number == 5).unwrap().clone();
+    failing.store(true, Ordering::SeqCst);
+    let second = gl.list_reviews().unwrap();
+    assert_eq!(second.iter().find(|r| r.number == 5), Some(&five));
+}

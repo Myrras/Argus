@@ -95,6 +95,14 @@
   min-width: 0;
 }
 
+/* A note above the diff (the old side takes no comments). */
+.sideNote {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
 .placeholder {
   margin: 0;
   display: flex;

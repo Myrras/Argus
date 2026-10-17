@@ -179,6 +179,28 @@ pub struct ReviewDetail {
     pub approved_by_me: bool,
 }
 
+/// A review's head, base and commits: what a head check and the history
+/// walk need, without the reviewer and approval state a [`ReviewDetail`]
+/// also reads (and fails on). See
+/// [`ReviewProvider::fetch_head`](super::ReviewProvider::fetch_head).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHead {
+    pub head_sha: String,
+    pub base_sha: String,
+    /// Oldest first.
+    pub commits: Vec<CommitInfo>,
+}
+
+impl From<ReviewDetail> for ReviewHead {
+    fn from(d: ReviewDetail) -> Self {
+        Self {
+            head_sha: d.head_sha,
+            base_sha: d.base_sha,
+            commits: d.commits,
+        }
+    }
+}
+
 /// Which side of the diff a line anchor is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -319,6 +341,13 @@ pub struct FileDiff {
     pub files: Vec<ChangedFile>,
     /// The platform's file limit was hit; more files changed than listed.
     pub truncated: bool,
+    /// `base_sha` is a stand-in, not the commit the patches are relative
+    /// to: GitHub could not compute a large PR's merge base, and the PR's
+    /// base branch commit took its place (see
+    /// [`ReviewProvider::fetch_files`](super::ReviewProvider::fetch_files)).
+    /// The old side read at it may not line up with the patches.
+    #[serde(default)]
+    pub base_approximate: bool,
 }
 
 #[cfg(test)]

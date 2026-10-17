@@ -56,7 +56,12 @@ describe("App", () => {
         case "provider_status":
           return Promise.resolve(
             status({
-              gitlab: { configured: false, baseUrl: "", tokenPresent: false },
+              gitlab: {
+                configured: false,
+                baseUrl: "",
+                tokenPresent: false,
+                problem: null,
+              },
             }),
           );
         case "gitlab_token_present":

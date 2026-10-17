@@ -259,6 +259,7 @@ fn old_database(path: &Path, version: usize) -> (ReviewRecord, ThreadId) {
     tx.commit().unwrap();
     let store = Store {
         conn: Mutex::new(conn),
+        refreshing: Mutex::new(()),
     };
     let mut r = record();
     r.last_reviewed_sha = Some("h0".into());
@@ -391,24 +392,33 @@ fn a_failed_migration_step_leaves_the_database_as_it_was() {
 }
 
 #[test]
-fn update_review_reads_and_writes_in_one_go() {
+fn a_transaction_reads_and_writes_in_one_go() {
+    // Read-modify-write goes through the transaction's connection, never
+    // the store's own methods (which would wait on the held lock).
     let store = Store::in_memory().unwrap();
     let r = record();
     store.upsert_review(&r).unwrap();
     store.set_watermark(r.id, "h1", at(11, 8)).unwrap();
     let next = store
-        .update_review(r.id, |mut cur| {
+        .transaction(|conn| {
+            let mut cur = read_review(conn, r.id)?.ok_or(CoreError::NotFound)?;
             // Sees what is stored now, not `r`.
             assert_eq!(cur.last_reviewed_sha.as_deref(), Some("h1"));
             cur.approved_at = Some(at(11, 9));
+            write_review(conn, &cur, WriteColumns::All)?;
             Ok(cur)
         })
         .unwrap();
-    assert_eq!(store.review(r.id).unwrap(), Some(next));
-    assert!(matches!(
-        store.update_review(crate::ids::ReviewId::new(), Ok),
+    assert_eq!(store.review(r.id).unwrap(), Some(next.clone()));
+    // A failure rolls the whole transaction back.
+    let failed: CoreResult<()> = store.transaction(|conn| {
+        let mut cur = read_review(conn, r.id)?.ok_or(CoreError::NotFound)?;
+        cur.approved_at = None;
+        write_review(conn, &cur, WriteColumns::All)?;
         Err(CoreError::NotFound)
-    ));
+    });
+    assert!(matches!(failed, Err(CoreError::NotFound)));
+    assert_eq!(store.review(r.id).unwrap(), Some(next));
     store.set_listed(r.id, false).unwrap();
     assert!(!store.review(r.id).unwrap().unwrap().listed);
 }

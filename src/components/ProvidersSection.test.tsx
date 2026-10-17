@@ -21,12 +21,44 @@ describe("ProvidersSection", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("says why a configured GitLab is off when its URL is unusable", () => {
+    const onOpenSettings = vi.fn();
+    render(
+      <ProvidersSection
+        status={status({
+          gitlab: {
+            configured: true,
+            baseUrl: "http://gitlab.example.test",
+            tokenPresent: false,
+            problem: "invalidUrl",
+          },
+        })}
+        errors={[]}
+        onOpenSettings={onOpenSettings}
+      />,
+    );
+    expect(screen.getByText("Invalid URL")).toBeInTheDocument();
+    // Not a missing token: the URL is what to fix.
+    expect(screen.queryByText(/has no token/)).not.toBeInTheDocument();
+    const item = screen.getByText(
+      /GitLab is off: its URL must start with https:\/\//,
+    );
+    expect(item).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(onOpenSettings).toHaveBeenCalledWith("gitlab");
+  });
+
   it("collapses to its title, counting the problems", () => {
     useLayoutStore.setState({ providersCollapsed: false });
     render(
       <ProvidersSection
         status={status({
-          gitlab: { configured: false, baseUrl: "", tokenPresent: false },
+          gitlab: {
+            configured: false,
+            baseUrl: "",
+            tokenPresent: false,
+            problem: null,
+          },
         })}
         errors={[]}
         onOpenSettings={vi.fn()}
@@ -48,7 +80,12 @@ describe("ProvidersSection", () => {
         installed: false,
         loggedIn: false,
       },
-      gitlab: { configured: false, baseUrl: "", tokenPresent: false },
+      gitlab: {
+        configured: false,
+        baseUrl: "",
+        tokenPresent: false,
+        problem: null,
+      },
     });
     const items = bannerItems(s, [
       {

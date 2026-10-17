@@ -62,7 +62,7 @@ pub use poll::{RefreshError, RefreshReport};
 pub use post::{
     CommentableLines, NewComment, PostError, PostErrorKind, PostResult, PostedComment, PostedNote,
 };
-pub use provider::{GithubStatus, GitlabStatus, ProviderStatus};
+pub use provider::{GithubStatus, GitlabProblem, GitlabStatus, ProviderStatus};
 pub use review::{ReviewStatus, RoundReason};
 pub use settings::Settings;
 pub use store::{ReviewRecord, StoredThread};
@@ -240,7 +240,8 @@ impl Core {
         self.store.threads(id)
     }
 
-    /// Refresh every provider once (blocking).
+    /// Refresh every provider once (blocking). A refresh already under way
+    /// (the poll's) is waited for first: refreshes run one at a time.
     pub fn refresh(&self) -> RefreshReport {
         poll::refresh_all(&self.providers(), &self.store, Utc::now())
     }
@@ -291,10 +292,25 @@ impl Core {
     /// own diff, or with `since_last_review` the diff from the commit last
     /// marked reviewed to head (an error when there is none, or it is the
     /// head).
+    ///
+    /// A left side the platform could only approximate (GitHub without a
+    /// merge base for a large PR) is replaced by the local clone's merge
+    /// base when one is configured and has both commits.
     pub fn list_files(&self, id: ReviewId, since_last_review: bool) -> CoreResult<ReviewFiles> {
         let record = self.review(id)?;
         let provider = self.provider_for(&record)?;
-        let (diff, keys) = files::fetch(provider.as_ref(), &record, since_last_review)?;
+        let (mut diff, keys) = files::fetch(provider.as_ref(), &record, since_last_review)?;
+        if diff.base_approximate {
+            let settings = self.settings();
+            let exact = settings
+                .clone_path(&record.review)
+                .and_then(git::LocalClone::open)
+                .and_then(|c| c.merge_base(&diff.base_sha, &diff.head_sha));
+            if let Some(sha) = exact {
+                diff.base_sha = sha;
+                diff.base_approximate = false;
+            }
+        }
         let marks = self.store.viewed(id)?;
         let out = files::assemble(id, diff, &keys, &marks, since_last_review);
         self.remember_keys(id, &record.head_sha, keys);

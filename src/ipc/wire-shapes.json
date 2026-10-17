@@ -18,6 +18,9 @@
       "removed",
       "renamed"
     ],
+    "GitlabProblem": [
+      "invalidUrl"
+    ],
     "LineChange.kind": [
       "modified",
       "deleted",
@@ -213,6 +216,7 @@
       "gitlab",
       "gitlab.baseUrl",
       "gitlab.configured",
+      "gitlab.problem",
       "gitlab.tokenPresent"
     ],
     "RefreshReport": [
@@ -226,6 +230,7 @@
       "refreshedAt"
     ],
     "ReviewFiles": [
+      "baseApproximate",
       "baseSha",
       "files",
       "files[].additions",

@@ -416,6 +416,7 @@ mod tests {
             head_sha: "head2".into(),
             files,
             truncated: false,
+            base_approximate: false,
         }
     }
 

@@ -163,6 +163,7 @@ fn parse_git_diff(out: &str) -> FileDiff {
         head_sha: String::new(),
         files,
         truncated: false,
+        base_approximate: false,
     }
 }
 

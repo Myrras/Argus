@@ -60,12 +60,14 @@ impl ReviewProvider for Fake {
                 head_sha: head,
                 files: self.review_files.lock().unwrap().clone(),
                 truncated: false,
+                base_approximate: false,
             },
             DiffRange::Compare { from, .. } => FileDiff {
                 base_sha: from.clone(),
                 head_sha: head,
                 files: self.compare_files.lock().unwrap().clone(),
                 truncated: false,
+                base_approximate: false,
             },
         })
     }

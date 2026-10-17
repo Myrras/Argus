@@ -162,6 +162,12 @@ export interface ReviewFiles {
   sinceLastReview: boolean;
   /** The platform's file limit was hit; more files changed. */
   truncated: boolean;
+  /**
+   * `baseSha` only stands in for the left side (GitHub could not compute a
+   * large PR's merge base, and no local clone could): removed lines may not
+   * line up, so they take no comments.
+   */
+  baseApproximate: boolean;
   files: FileEntry[];
 }
 
@@ -317,11 +323,16 @@ export interface GithubStatus {
   loggedIn: boolean;
 }
 
+/** `provider::GitlabProblem`: why a configured GitLab is off anyway. */
+export type GitlabProblem = "invalidUrl";
+
 /** `provider::GitlabStatus`. */
 export interface GitlabStatus {
   configured: boolean;
   baseUrl: string;
   tokenPresent: boolean;
+  /** `null` when nothing is wrong. */
+  problem: GitlabProblem | null;
 }
 
 /** `provider::ProviderStatus`. */

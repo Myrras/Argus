@@ -105,6 +105,7 @@ export function reviewFiles(overrides: Partial<ReviewFiles> = {}): ReviewFiles {
     headSha: "a".repeat(40),
     sinceLastReview: false,
     truncated: false,
+    baseApproximate: false,
     files: [file()],
     ...overrides,
   };
@@ -135,6 +136,7 @@ export function status(
       configured: true,
       baseUrl: "https://gitlab.example.test",
       tokenPresent: true,
+      problem: null,
     },
     ...overrides,
   };

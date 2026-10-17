@@ -83,6 +83,14 @@ pub fn refresh_all(
     store: &Store,
     now: DateTime<Utc>,
 ) -> RefreshReport {
+    // One refresh at a time per database: a manual refresh asked for while
+    // the poll is on the network waits for it, then reads afresh, instead of
+    // fetching alongside it and racing it to the store. A refresh that
+    // panicked holds no state worth refusing to go on with.
+    let _one_at_a_time = store
+        .refreshing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let results: Vec<(Vec<ReviewId>, Vec<RefreshError>)> = std::thread::scope(|s| {
         let handles: Vec<_> = providers
             .iter()
@@ -247,6 +255,13 @@ fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
 /// folded into, never overwritten by an older copy. The poll's own `prev`
 /// is therefore not used (kept for callers that still pass one). The
 /// watermark is never written here (see [`WriteColumns::Fetched`]).
+///
+/// A fetch that started before the stored one (`fetched_at`) is older
+/// than what is stored and is dropped (`Ok(false)`): a slow poll landing
+/// after a refresh that overtook it (after a post) would otherwise move the
+/// head back, start a false round and drop the threads posted meanwhile.
+/// An unchanged fetch still moves `fetched_at`, so it counts as the newest
+/// look at the review too.
 pub(crate) fn persist(
     store: &Store,
     _prev: Option<&ReviewRecord>,
@@ -259,6 +274,9 @@ pub(crate) fn persist(
     let id = detail.review.id();
     store.transaction(|conn| {
         let prev = store::read_review(conn, id)?;
+        if prev.as_ref().is_some_and(|p| p.fetched_at > now) {
+            return Ok(false);
+        }
         // The cached line walks at this head sharpen the untouched count;
         // none (or a failed read) falls back to the approximation.
         let touches = read_line_touches(conn, id, &detail.head_sha).ok();
@@ -283,9 +301,10 @@ pub(crate) fn persist(
         if changed {
             store::write_review(conn, &next, WriteColumns::Fetched)?;
             store::write_threads(conn, id, threads, me)?;
-        } else if !listed {
-            // An unlisted review is fetched daily (see `unlisted_due`),
-            // timed from its last fetch, changed or not.
+        } else {
+            // The newest look at the review, changed or not: what a slower
+            // fetch is checked against, and what an unlisted review's daily
+            // fetch is timed from (see `unlisted_due`).
             store::touch_fetched(conn, id, now)?;
         }
         Ok(changed)

@@ -325,6 +325,8 @@ struct Platform {
     repo: LocalClone,
     detail: ReviewDetail,
     threads: Vec<Thread>,
+    /// What `fetch_files` answers; `None` is a not-found.
+    files: std::sync::Mutex<Option<FileDiff>>,
     file_calls: AtomicUsize,
     diff_calls: AtomicUsize,
 }
@@ -355,7 +357,11 @@ impl ReviewProvider for Platform {
             .unwrap_or(Err(CoreError::NotFound))
     }
     fn fetch_files(&self, _: &ReviewRef, _: &DiffRange) -> CoreResult<FileDiff> {
-        Err(CoreError::NotFound)
+        self.files
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(CoreError::NotFound)
     }
     fn commit_diff(&self, _: &ReviewRef, sha: &str) -> CoreResult<FileDiff> {
         self.diff_calls.fetch_add(1, Ordering::SeqCst);
@@ -396,6 +402,7 @@ fn platform(fx: &Fixture, shas: &[String]) -> Arc<Platform> {
         repo: LocalClone::open(&fx.path).unwrap(),
         detail: d,
         threads: vec![mine],
+        files: std::sync::Mutex::new(None),
         file_calls: AtomicUsize::new(0),
         diff_calls: AtomicUsize::new(0),
     })
@@ -593,4 +600,62 @@ fn a_clone_made_partial_since_it_was_checked_is_checked_again() {
         .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000))
         .unwrap();
     assert!(LocalClone::open_with(&git, old, &fx.path, TIMEOUT).is_none());
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_merge_base_of_two_commits() {
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    let base = fx.commit("a.txt", "a\n", "c1");
+    git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
+    let head = fx.commit("b.txt", "b\n", "feature");
+    git_in(&fx.path, &["checkout", "-q", "main"]);
+    let tip = fx.commit("a.txt", "a2\n", "main moves on");
+    let clone = LocalClone::open(&fx.path).unwrap();
+    assert_eq!(
+        clone.merge_base(&tip, &head).as_deref(),
+        Some(base.as_str())
+    );
+    // A commit the clone lacks, or no sha at all: no answer.
+    assert_eq!(clone.merge_base(&"ab".repeat(20), &head), None);
+    assert_eq!(clone.merge_base("main", &head), None);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_pr_without_a_merge_base_gets_it_from_the_clone() {
+    // GitHub could not compare a large PR, so its files came with the base
+    // branch tip as a stand-in left side. The clone knows the real one.
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    let base = fx.commit("src/cache.rs", &file_of(10), "c1");
+    git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
+    let head = fx.commit("src/cache.rs", &file_of(12), "feature");
+    git_in(&fx.path, &["checkout", "-q", "main"]);
+    let tip = fx.commit("src/other.rs", "x\n", "main moves on");
+    let p = platform(&fx, std::slice::from_ref(&head));
+    let approximate = FileDiff {
+        base_sha: tip.clone(),
+        head_sha: head.clone(),
+        files: Vec::new(),
+        truncated: false,
+        base_approximate: true,
+    };
+    *p.files.lock().unwrap() = Some(approximate);
+
+    let core = core_with(&p, &fx.path);
+    let id = core.reviews().unwrap()[0].id;
+    let files = core.list_files(id, false).unwrap();
+    assert_eq!(files.base_sha, base);
+    assert!(!files.base_approximate);
+
+    // No usable clone: the stand-in stays, and says so.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let core = core_with(&p, elsewhere.path());
+    let files = core.list_files(id, false).unwrap();
+    assert_eq!(files.base_sha, tip);
+    assert!(files.base_approximate);
 }
