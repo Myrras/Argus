@@ -63,6 +63,9 @@ pub(crate) struct RunDirs<'a> {
     pub clone: Option<&'a Path>,
     /// Claude's `--settings` file (see [`claude_settings`]).
     pub settings: Option<&'a Path>,
+    /// Auggie: the tools `auggie tools list` named for this run (see
+    /// [`auggie_removed_tools`]); empty when it could not say.
+    pub listed_tools: &'a [String],
 }
 
 /// Claude Code. `--print` + `stream-json` (`--verbose` is required with it
@@ -108,12 +111,15 @@ pub(crate) const CLAUDE: Adapter = Adapter {
 /// the argv limit.
 ///
 /// Not guaranteed read-only: `--ask` only adds an instruction to the prompt
-/// (auggie 0.37), and auggie has no switch to drop the user's MCP servers,
-/// whose tools are named by the user's config. Per run Argus removes every
-/// built-in tool that writes, runs a process, reaches the web or starts a
-/// sub-agent ([`AUGGIE_REMOVED_TOOLS`]); the workspace root is the temp dir
-/// (so no `.augment/` settings of the clone load) and the clone is an extra
-/// workspace.
+/// (auggie 0.37), and auggie has no allow-list: `--permission` and
+/// `--remove-tool` both match one exact tool name (no wildcard), and a tool
+/// without a rule is allowed. So per run Argus removes every tool but
+/// [`AUGGIE_READ_TOOLS`]: the ones `auggie tools list` names for this user
+/// (their MCP tools included) plus [`AUGGIE_REMOVED_TOOLS`], in case the
+/// list fails or leaves out an integration that is not configured yet. A
+/// tool the list cannot name stays reachable. The workspace root is the
+/// temp dir (so no `.augment/` settings of the clone load) and the clone
+/// is an extra workspace.
 pub(crate) const AUGGIE: Adapter = Adapter {
     id: "auggie",
     binary: "auggie",
@@ -123,34 +129,131 @@ pub(crate) const AUGGIE: Adapter = Adapter {
     read_only_guaranteed: false,
 };
 
-/// Auggie's built-in tools (`auggie tools list`, 0.37) that write files,
-/// run or drive processes, reach the web, start sub-agents or edit its task
-/// list; each goes out with `--remove-tool` (an unknown name is ignored).
+/// The auggie tools a run keeps: viewing and searching the workspace and
+/// its history, rendering a diagram, viewing its task list.
+pub(crate) const AUGGIE_READ_TOOLS: &[&str] = &[
+    "view",
+    "view-range-untruncated",
+    "grep-search",
+    "search-untruncated",
+    "codebase-retrieval",
+    "git-commit-retrieval",
+    "render-mermaid",
+    "view_tasklist",
+];
+
+/// Every other built-in auggie tool (0.37: `auggie tools list`, and the
+/// names in its bundle: the integrations, which only list once
+/// configured, the alternate tool set, tool search). Removed on every run
+/// whatever `auggie tools list` says; an unknown name is ignored.
 pub(crate) const AUGGIE_REMOVED_TOOLS: &[&str] = &[
+    // Files.
     "remove-files",
     "save-file",
     "apply_patch",
+    "apply-patch",
     "str-replace-editor",
+    "edit",
+    "write",
+    // Processes and shells.
     "launch-process",
     "kill-process",
     "read-process",
     "write-process",
     "list-processes",
+    "read-terminal",
+    "shell",
+    "bash",
+    "setup-script",
+    // The web and the integrations (`github-api` takes a method: it writes).
     "web-search",
     "web-fetch",
+    "open-browser",
+    "github-api",
+    "linear",
+    "jira",
+    "confluence",
+    "notion",
+    "supabase",
+    "glean",
+    // Sub-agents (user-defined ones are `sub-agent-<name>`: listed).
+    "sub-agent",
     "sub-agent-explore",
     "sub-agent-plan",
+    "sub-agent-auggie-guide",
     "sub-agent-general-purpose",
     "sub-agent-research",
     "sub-agent-code",
     "sub-agent-validate",
+    "report-to-parent",
+    "finish-subagent-context-gathering",
+    // Tool search can run a tool the run does not list.
+    "find-tool",
+    "execute-tool",
+    // Task list edits, prompts, plan mode.
     "reorganize_tasklist",
     "update_tasks",
     "add_tasks",
     "ask-user",
     "enter-plan-mode",
     "exit-plan-mode",
+    // Reads outside the read set: other sessions, raw retrieval, the
+    // alternate tool set, diagnostics.
+    "conversation-retrieval",
+    "view-session",
+    "codebase-retrieval-raw",
+    "read",
+    "grep",
+    "find",
+    "ls",
+    "diagnostics",
 ];
+
+/// The tool names in `auggie tools list` output (`  ✓ name   enabled`, or
+/// `✗ … disabled`), enabled or not: a disabled one is removed again, in
+/// case the user's settings change before the run.
+pub(crate) fn parse_auggie_tools(listing: &str) -> Vec<String> {
+    strip_ansi(listing)
+        .lines()
+        .filter_map(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            match words.as_slice() {
+                [.., name, "enabled" | "disabled"] if words.len() >= 3 => Some(name.to_string()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// `s` without ANSI CSI sequences (`ESC [ … final byte`): the listing is
+/// coloured when auggie thinks it writes to a terminal.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The tools a run removes: [`AUGGIE_REMOVED_TOOLS`] and every `listed`
+/// one, minus [`AUGGIE_READ_TOOLS`]. Sorted, each once.
+pub(crate) fn auggie_removed_tools(listed: &[String]) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> =
+        AUGGIE_REMOVED_TOOLS.iter().map(|t| t.to_string()).collect();
+    out.extend(listed.iter().filter(|t| !t.is_empty()).cloned());
+    out.retain(|t| !AUGGIE_READ_TOOLS.contains(&t.as_str()));
+    out.into_iter().collect()
+}
 
 /// Whether runs of the adapter `id` are guaranteed read-only (an unknown
 /// id never runs, so it is not a risk).
@@ -214,8 +317,10 @@ impl Adapter {
                 if let Some(clone) = dirs.clone {
                     out.extend(["--add-workspace".into(), path(clone)]);
                 }
-                for tool in AUGGIE_REMOVED_TOOLS {
-                    out.extend(["--remove-tool".into(), tool.to_string()]);
+                // `=`-joined: a listed name that starts with `-` stays a
+                // value, never a flag of its own.
+                for tool in auggie_removed_tools(dirs.listed_tools) {
+                    out.push(format!("--remove-tool={tool}"));
                 }
             }
             _ => {}
@@ -229,12 +334,16 @@ impl Adapter {
     }
 }
 
-/// Claude's `--settings` for one run: hooks off, and `Read` deny rules for
-/// every path outside `allowed` (the temp dir and the clone, absolute and
-/// canonical). Read rules cover Grep and Glob too. Reads outside the
-/// working directories are refused in print mode anyway; the rules make
-/// that hold against allow rules in the user's own settings as well.
-pub(crate) fn claude_settings(allowed: &[PathBuf]) -> serde_json::Value {
+/// Claude's `--settings` for one run: hooks off, reads outside the
+/// working directories blocked (`blockReadsOutsideWorkingDirectories`,
+/// Claude Code 2.1.301+, which also covers what a walk of the tree cannot
+/// see: entries made later, unlistable dirs, names a rule cannot spell),
+/// and `Read` deny rules for every path outside `allowed` (the temp dir
+/// and the clone, absolute and canonical) for a Claude that predates the
+/// switch, plus the clone's secret-holding files ([`clone_secret_rules`]).
+/// Read rules cover Grep and Glob too. Deny rules win over allow rules in
+/// the user's own settings.
+pub(crate) fn claude_settings(allowed: &[PathBuf], clone: Option<&Path>) -> serde_json::Value {
     let mut deny = deny_outside(
         allowed,
         |dir| {
@@ -259,10 +368,53 @@ pub(crate) fn claude_settings(allowed: &[PathBuf]) -> serde_json::Value {
             "Read(~/AppData/**)".into(),
         ];
     }
+    if let Some(clone) = clone {
+        deny.extend(clone_secret_rules(clone));
+    }
     serde_json::json!({
         "disableAllHooks": true,
-        "permissions": { "deny": deny }
+        "permissions": {
+            "blockReadsOutsideWorkingDirectories": true,
+            "deny": deny
+        }
     })
+}
+
+/// Deny rules for the files of a clone that hold credentials rather than
+/// code: all of `.git` (its `config` keeps the remote URL, a token in it
+/// included, and `FETCH_HEAD` and the reflog repeat that URL), git and
+/// package-registry credential files, and every `.env*` file. A character
+/// of the clone's path the rule syntax would read becomes `?`. Unix paths
+/// only, as in [`deny_outside`].
+pub(crate) fn clone_secret_rules(clone: &Path) -> Vec<String> {
+    if !clone.is_absolute() || cfg!(windows) {
+        return Vec::new();
+    }
+    let base: String = clone
+        .to_string_lossy()
+        .trim_end_matches('/')
+        .chars()
+        .map(|c| {
+            if c.is_control() || "*?[]{}()!\\".contains(c) {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect();
+    [
+        ".git",
+        ".git/**",
+        "**/.git-credentials",
+        "**/.netrc",
+        "**/.npmrc",
+        "**/.pypirc",
+        "**/.env*",
+        "**/.env*/**",
+    ]
+    .iter()
+    .map(|p| format!("Read(/{base}/{p})"))
+    .collect()
 }
 
 /// Deny rules that leave only `allowed` readable: walking down from the
@@ -384,15 +536,38 @@ pub(crate) fn is_token_var(name: &OsStr) -> bool {
     provider && (n.contains("TOKEN") || n.contains("PAT") || n.contains("SECRET"))
 }
 
-/// The agent's environment: Argus' own minus every token variable, with the
-/// login shell's `PATH` when there is one.
+/// Claude Code variables that load files Argus keeps out: the `CLAUDE.md`
+/// of `--add-dir` directories (the clone's, a PR branch can write it),
+/// plugin folders (hooks, MCP servers, skills), a remote MCP config, and
+/// the post-turn memory pass, which writes memory files. Checked in
+/// Claude Code 2.1.301.
+const AGENT_CONFIG_VARS: &[&str] = &[
+    "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
+    "CLAUDE_CODE_PLUGIN_DIRS",
+    "CLAUDE_CODE_PLUGIN_SEED_DIR",
+    "CLAUDE_CODE_USE_COWORK_PLUGINS",
+    "CLAUDE_CODE_REMOTE_MCP_CONFIG",
+    "CLAUDE_CODE_POST_TURN_MEMORY",
+    "CLAUDE_CODE_POST_TURN_MEMORY_CONFIG",
+    "CLAUDE_CODE_POST_TURN_MEMORY_SYNC",
+];
+
+/// Whether `name` is one of [`AGENT_CONFIG_VARS`].
+pub(crate) fn is_agent_config_var(name: &OsStr) -> bool {
+    let n = name.to_string_lossy().to_ascii_uppercase();
+    AGENT_CONFIG_VARS.contains(&n.as_str())
+}
+
+/// The agent's environment: Argus' own minus every token variable and
+/// every [`AGENT_CONFIG_VARS`] one, with the login shell's `PATH` when
+/// there is one.
 pub(crate) fn sanitized_env(
     vars: impl IntoIterator<Item = (OsString, OsString)>,
     login_path: Option<&str>,
 ) -> Vec<(OsString, OsString)> {
     let mut out: Vec<(OsString, OsString)> = vars
         .into_iter()
-        .filter(|(k, _)| !is_token_var(k))
+        .filter(|(k, _)| !is_token_var(k) && !is_agent_config_var(k))
         .filter(|(k, _)| login_path.is_none() || !k.eq_ignore_ascii_case("PATH"))
         .collect();
     if let Some(p) = login_path {
@@ -664,6 +839,7 @@ mod tests {
             temp: Path::new("/tmp/argus-ai-x"),
             clone,
             settings,
+            listed_tools: &[],
         }
     }
 
@@ -698,8 +874,12 @@ mod tests {
 
     #[test]
     fn auggie_reads_its_prompt_from_a_file_with_its_writing_tools_removed() {
+        let listed = vec!["add_todo_fixture".to_string(), "-x".to_string()];
         let args = AUGGIE.args(
-            &dirs(Some(Path::new("/src/widgets")), None),
+            &RunDirs {
+                listed_tools: &listed,
+                ..dirs(Some(Path::new("/src/widgets")), None)
+            },
             Some(Path::new("/tmp/x/prompt.md")),
             &[],
         );
@@ -716,22 +896,99 @@ mod tests {
                 "/src/widgets",
             ]
         );
-        let joined = args.join(" ");
         for tool in [
             "save-file",
             "launch-process",
             "web-fetch",
-            "web-search",
+            "github-api",
             "sub-agent-code",
+            // Listed for this user (an MCP tool), and one that looks like
+            // a flag: still a value.
+            "add_todo_fixture",
+            "-x",
         ] {
-            assert!(joined.contains(&format!("--remove-tool {tool}")), "{tool}");
+            assert!(args.contains(&format!("--remove-tool={tool}")), "{tool}");
         }
-        assert!(joined.ends_with("--instruction-file /tmp/x/prompt.md"));
+        for tool in AUGGIE_READ_TOOLS {
+            assert!(!args.contains(&format!("--remove-tool={tool}")), "{tool}");
+        }
+        assert!(args
+            .join(" ")
+            .ends_with("--instruction-file /tmp/x/prompt.md"));
         assert_eq!(adapter(" auggie ").unwrap().id, "auggie");
         assert!(adapter("copilot").is_none());
         // MCP tools of the user's own config cannot be turned off.
         assert!(!read_only_guaranteed("auggie"));
         assert!(read_only_guaranteed("copilot"));
+    }
+
+    /// `auggie tools list` of auggie 0.37 (one user's MCP server's tools
+    /// cut to two), in colour as on a terminal.
+    const AUGGIE_TOOLS_LIST: &str = "\nAvailable Tools:\n\n\u{1b}[36mCore Tools:\u{1b}[39m\n  \
+\u{1b}[32m\u{2713}\u{1b}[39m codebase-retrieval               \u{1b}[32menabled\u{1b}[39m\n  \
+\u{2713} remove-files                     enabled\n  \u{2713} save-file                        enabled\n  \
+\u{2713} apply_patch                      enabled\n  \u{2713} str-replace-editor               enabled\n  \
+\u{2713} view                             enabled\n\nProcess Tools:\n  \
+\u{2713} launch-process                   enabled\n  \u{2713} kill-process                     enabled\n  \
+\u{2713} read-process                     enabled\n  \u{2713} write-process                    enabled\n  \
+\u{2713} list-processes                   enabled\n\nIntegration Tools:\n  \
+\u{2713} add_todo_fixture                 enabled\n  \u{2713} spawn_agent_fixture              enabled\n  \
+\u{2713} web-search                       enabled\n  \u{2713} web-fetch                        enabled\n  \
+\u{2713} view-session                     enabled\n  \u{2713} codebase-retrieval-raw           enabled\n  \
+\u{2713} sub-agent-explore                enabled\n  \u{2713} sub-agent-plan                   enabled\n  \
+\u{2713} sub-agent-auggie-guide           enabled\n  \u{2713} sub-agent-general-purpose        enabled\n  \
+\u{2713} sub-agent-research               enabled\n  \u{2713} sub-agent-code                   enabled\n  \
+\u{2713} sub-agent-validate               enabled\n  \u{2713} sub-agent-fixture-reviewer       enabled\n  \
+\u{2713} ask-user                         enabled\n  \u{2713} exit-plan-mode                   enabled\n  \
+\u{2713} enter-plan-mode                  enabled\n\nTask Management:\n  \
+\u{2713} view_tasklist                    enabled\n  \u{2713} reorganize_tasklist              enabled\n  \
+\u{2713} update_tasks                     enabled\n  \u{2713} add_tasks                        enabled\n\n\
+Advanced Tools:\n  \u{2713} grep-search                      enabled\n  \
+\u{2713} view-range-untruncated           enabled\n  \u{2717} search-untruncated               disabled\n\n\
+Total: 35 tools (34 enabled, 1 disabled)\n";
+
+    #[test]
+    fn auggie_keeps_only_its_read_tools() {
+        let listed = parse_auggie_tools(AUGGIE_TOOLS_LIST);
+        assert_eq!(listed.len(), 35, "{listed:?}");
+        assert!(listed.iter().any(|t| t == "codebase-retrieval"));
+        assert!(listed.iter().any(|t| t == "search-untruncated"));
+        let removed = auggie_removed_tools(&listed);
+        // Every listed tool outside the read set goes, and with no list at
+        // all every built-in one still does.
+        for tool in &listed {
+            let read = AUGGIE_READ_TOOLS.contains(&tool.as_str());
+            assert_eq!(removed.contains(tool), !read, "{tool}");
+        }
+        let fallback = auggie_removed_tools(&[]);
+        // (The user's own tools, `*fixture*`, only the listing can name.)
+        for tool in listed.iter().filter(|t| !t.contains("fixture")) {
+            let read = AUGGIE_READ_TOOLS.contains(&tool.as_str());
+            assert!(read || fallback.contains(tool), "{tool}");
+        }
+        for tool in [
+            "github-api",
+            "open-browser",
+            "linear",
+            "jira",
+            "confluence",
+            "notion",
+            "supabase",
+            "glean",
+            "shell",
+            "bash",
+            "execute-tool",
+            "read-terminal",
+        ] {
+            assert!(fallback.iter().any(|t| t == tool), "{tool}");
+        }
+        for tool in AUGGIE_READ_TOOLS {
+            assert!(!AUGGIE_REMOVED_TOOLS.contains(tool), "{tool}");
+            assert!(!removed.iter().any(|t| t == tool), "{tool}");
+        }
+        assert!(
+            parse_auggie_tools("no tools here\nTotal: 0 tools (0 enabled, 0 disabled)").is_empty()
+        );
     }
 
     #[test]
@@ -815,11 +1072,36 @@ mod tests {
         // `widget?` as a pattern would match `widgets`: left out.
         assert!(!rules.iter().any(|r| r.contains("widget?")), "{rules:?}");
 
-        let settings = claude_settings(&[]);
+        let settings = claude_settings(&[], None);
         assert_eq!(settings["disableAllHooks"], true);
+        assert_eq!(
+            settings["permissions"]["blockReadsOutsideWorkingDirectories"],
+            true
+        );
         assert!(settings["permissions"]["deny"]
             .as_array()
             .is_some_and(|d| !d.is_empty()));
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore)]
+    fn the_clones_secret_files_are_denied() {
+        let rules = clone_secret_rules(Path::new("/src/w(1)/widgets/"));
+        for rule in [
+            "Read(//src/w?1?/widgets/.git)",
+            "Read(//src/w?1?/widgets/.git/**)",
+            "Read(//src/w?1?/widgets/**/.git-credentials)",
+            "Read(//src/w?1?/widgets/**/.netrc)",
+            "Read(//src/w?1?/widgets/**/.env*)",
+        ] {
+            assert!(rules.iter().any(|r| r == rule), "{rule}: {rules:?}");
+        }
+        // The clone itself stays readable.
+        assert!(!rules.iter().any(|r| r == "Read(//src/w?1?/widgets/**)"));
+        assert!(clone_secret_rules(Path::new("relative")).is_empty());
+        let settings = claude_settings(&[], Some(Path::new("/src/widgets")));
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.iter().any(|r| r == "Read(//src/widgets/.git/**)"));
     }
 
     #[test]
@@ -834,6 +1116,9 @@ mod tests {
             ("gitlab_private_token", "fixture-gl2"),
             ("MY_GITLAB_TOKEN", "fixture-gl3"),
             ("CI_JOB_TOKEN", "fixture-ci"),
+            ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1"),
+            ("CLAUDE_CODE_PLUGIN_DIRS", "/fixture/plugins"),
+            ("claude_code_post_turn_memory", "1"),
             ("ANTHROPIC_API_KEY", "fixture-agent-key"),
         ]
         .map(|(k, v)| (OsString::from(k), OsString::from(v)));
@@ -850,6 +1135,9 @@ mod tests {
             .any(|(k, v)| k == "PATH" && v == "/usr/bin"));
         assert!(!is_token_var(OsStr::new("GHOSTTY_RESOURCES_DIR")));
         assert!(!is_token_var(OsStr::new("TOKENIZERS_PARALLELISM")));
+        // Agent settings that are not about loading files stay.
+        assert!(!is_agent_config_var(OsStr::new("CLAUDE_CODE_USE_BEDROCK")));
+        assert!(!is_agent_config_var(OsStr::new("CLAUDE_CONFIG_DIR")));
     }
 
     #[test]

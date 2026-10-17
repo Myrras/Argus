@@ -1369,13 +1369,25 @@ fn claude_runs_in_the_clone_with_its_conventions_in_a_later_round() {
         .iter()
         .map(|r| r.as_str().unwrap().to_string())
         .collect();
-    // The clone and the run's dir stay readable, their surroundings not.
+    // The clone and the run's dir stay readable, their surroundings not,
+    // and neither do the clone's git dir and `.env` files.
+    assert_eq!(
+        settings["permissions"]["blockReadsOutsideWorkingDirectories"],
+        true
+    );
     for open in [&canonical_clone, &cwd] {
-        let rule = format!("Read(/{})", open.display());
-        assert!(
-            !deny.iter().any(|r| r.starts_with(&rule)),
-            "{rule} in {deny:?}"
-        );
+        for rule in [
+            format!("Read(/{})", open.display()),
+            format!("Read(/{}/**)", open.display()),
+        ] {
+            assert!(!deny.contains(&rule), "{rule} in {deny:?}");
+        }
+    }
+    let run_dir = format!("Read(/{}/", cwd.display());
+    assert!(!deny.iter().any(|r| r.starts_with(&run_dir)), "{deny:?}");
+    for secret in [".git/**", "**/.env*"] {
+        let rule = format!("Read(/{}/{secret})", canonical_clone.display());
+        assert!(deny.contains(&rule), "{rule} not in {deny:?}");
     }
     #[cfg(unix)]
     assert!(
@@ -1656,6 +1668,11 @@ fn auggie_takes_an_instruction_file_and_answers_in_text() {
         "auggie",
         r#"#!/bin/sh
 dir="$(dirname "$0")"
+if [ "$1" = "tools" ]; then
+  pwd -P > "$dir/tools-cwd.txt"
+  printf 'Integration Tools:\n  \342\234\223 add_todo_fixture   enabled\n  \342\234\223 view   enabled\n'
+  exit 0
+fi
 printf '%s\n' "$@" > "$dir/argv.txt"
 while [ $# -gt 0 ]; do
   if [ "$1" = "--instruction-file" ]; then cp "$2" "$dir/prompt.txt"; fi
@@ -1675,7 +1692,13 @@ printf 'Sure.\n```json\n{"findings":[],"checklist":[{"text":"Check the rollout"}
     assert_eq!(out.checklist, vec!["Check the rollout"]);
     let argv = std::fs::read_to_string(bin.path().join("argv.txt")).unwrap();
     assert!(argv.starts_with("--print\n--quiet\n--ask\n--dont-save-session\n--workspace-root\n"));
-    assert!(argv.contains("--remove-tool\nlaunch-process\n"), "{argv}");
+    assert!(argv.contains("--remove-tool=launch-process\n"), "{argv}");
+    // What `auggie tools list` named, in the run's own dir, goes too; the
+    // read tools stay.
+    assert!(argv.contains("--remove-tool=add_todo_fixture\n"), "{argv}");
+    assert!(!argv.contains("--remove-tool=view\n"), "{argv}");
+    let tools_cwd = std::fs::read_to_string(bin.path().join("tools-cwd.txt")).unwrap();
+    assert!(tools_cwd.contains("argus-ai-"), "{tools_cwd}");
     assert!(argv.contains("--instruction-file\n"), "{argv}");
     assert!(!argv.contains("--add-workspace"), "{argv}");
     let prompt = std::fs::read_to_string(bin.path().join("prompt.txt")).unwrap();
