@@ -185,9 +185,9 @@ impl Core {
     pub fn commentable_lines(&self, id: ReviewId, path: &str) -> CoreResult<CommentableLines> {
         let record = self.review(id)?;
         let mut cache = self.commentable.lock().expect("commentable lock poisoned");
-        let fresh = cache
-            .as_ref()
-            .is_some_and(|c| c.review == id && c.stored_head == record.head_sha);
+        let fresh = cache.as_ref().is_some_and(|c| {
+            c.review == id && c.stored_head == record.head_sha && c.stored_base == record.base_sha
+        });
         if !fresh {
             let mut diff = self
                 .provider_for(&record)?
@@ -196,6 +196,7 @@ impl Core {
             *cache = Some(CommentableCache {
                 review: id,
                 stored_head: record.head_sha.clone(),
+                stored_base: record.base_sha.clone(),
                 files: diff
                     .files
                     .iter()

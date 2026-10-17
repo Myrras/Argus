@@ -876,6 +876,24 @@ fn commentable_lines_read_the_diff_once_per_head() {
 }
 
 #[test]
+fn commentable_lines_are_read_again_when_the_base_moves() {
+    // A retarget changes the diff but not the head.
+    let (core, fake, id) = setup();
+    let before = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(before.hunks[1].new, [11, 12, 13]);
+    let reads = || *fake.file_reads.lock().unwrap();
+    let after_first = reads();
+
+    fake.detail.lock().unwrap().base_sha = "retargeted".into();
+    *fake.files.lock().unwrap() = vec![changed("src/cache.rs", PATCH_H2)];
+    core.refresh();
+    assert_eq!(core.review(id).unwrap().head_sha, "h1");
+    let lines = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(reads(), after_first + 1);
+    assert_eq!(lines.hunks[1].new, [13, 14, 15]);
+}
+
+#[test]
 fn the_watermark_rule_after_a_write() {
     use super::api::advance_after_write;
     let (core, _fake, id) = setup();

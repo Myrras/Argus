@@ -156,8 +156,10 @@ pub(crate) struct CommentableCache {
     pub review: ReviewId,
     pub base_sha: String,
     pub head_sha: String,
-    /// The head the review was stored at when read (the cache key).
+    /// The head and base the review was stored at when read (the cache key):
+    /// a retarget leaves the head alone but changes the diff.
     pub stored_head: String,
+    pub stored_base: String,
     pub files: std::collections::HashMap<String, Vec<CommentableHunk>>,
 }
 
