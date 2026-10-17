@@ -72,7 +72,9 @@ sibling app Iris (`../Iris`).
     lines from `file_contents` at the anchor's commit, else `diff_hunk`)
     rendered by `SuggestedChange`; never applied. Core: `fetch_files`
     (`DiffRange::Review` / `Compare`) per provider; left side = GitHub merge
-    base (compare API), GitLab latest version `base_sha`; since-last-review
+    base (compare API; a PR too large for it: the local clone's merge base,
+    else its base commit flagged `baseApproximate`, whose old side takes no
+    comments), GitLab latest version `base_sha`; since-last-review
     = GitHub `compare/last...head` (left: its merge base), GitLab
     `compare?straight=true` (left: last). Viewed marks: `viewed_files`
     (migration 2), keyed path + `content_sha` (GitHub blob sha, GitLab diff

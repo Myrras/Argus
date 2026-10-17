@@ -479,6 +479,7 @@ impl GitlabProvider {
                 base_sha,
                 head_sha,
                 truncated,
+                base_approximate: false,
             });
         }
         Err(CoreError::Provider(
@@ -724,6 +725,7 @@ impl ReviewProvider for GitlabProvider {
                     base_sha: from.clone(),
                     head_sha: to.clone(),
                     truncated: cmp.compare_timeout,
+                    base_approximate: false,
                 })
             }
         }
@@ -826,6 +828,7 @@ impl ReviewProvider for GitlabProvider {
             head_sha: sha.to_string(),
             truncated: diffs.len() >= (PER_PAGE * MAX_PAGES) as usize,
             files: diffs.into_iter().map(|d| changed_file(d, sha)).collect(),
+            base_approximate: false,
         })
     }
 

@@ -274,6 +274,7 @@ impl Platform {
                 vec![changed(patch.trim_end(), &format!("blob-{to}"))]
             },
             truncated: false,
+            base_approximate: false,
         }
     }
 }

@@ -816,6 +816,7 @@ fn the_review_diff_names_the_head_it_was_taken_at() {
         .unwrap();
     assert_eq!(diff.head_sha, HEAD);
     assert_eq!(diff.base_sha, "b".repeat(40));
+    assert!(!diff.base_approximate);
     assert_eq!(diff.files.len(), 6);
     // The merge base is taken against the PR's own base and head.
     assert!(fake.calls().contains(&format!(
@@ -838,8 +839,10 @@ fn a_pr_too_large_to_compare_still_lists_its_files() {
             },
         )
         .unwrap();
-    // No merge base to be had: the PR's base stands in for it.
+    // No merge base to be had: the PR's base stands in for it, flagged so
+    // the old side is not taken as exact.
     assert_eq!(diff.base_sha, BASE);
+    assert!(diff.base_approximate);
     assert_eq!(diff.head_sha, HEAD);
     assert_eq!(diff.files.len(), 6);
 }

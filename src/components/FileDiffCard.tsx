@@ -13,7 +13,9 @@
  * Commenting: once the diff shows, the file's commentable lines are fetched
  * (`commentable_lines`, cached) and get the gutter's "+"; a click opens the
  * composer under the line (`commentStore`). Pending comments show under
- * their lines (or at the top, when their line is not in this view).
+ * their lines (or at the top, when their line is not in this view). The old
+ * side takes none in "since" mode or when `list_files` says its left side
+ * is approximate (`baseApproximate`, with a note above the diff).
  *
  * AI findings (`aiStore`) sit under their line like threads
  * (`FindingBlock`), or under "AI findings on this file" when their line is
@@ -277,16 +279,16 @@ export const FileDiffCard = memo(function FileDiffCard({
     [allDrafts, f.path],
   );
 
+  // In "since" mode the left side is the last-reviewed commit, not the
+  // base old-side lines refer to; with an approximate base (GitHub had no
+  // merge base) the old side shown may not line up with the patch.
+  const oldSideOff = review.sinceLastReview || review.baseApproximate;
   const lines = useMemo(
     () => ({
-      // In "since" mode the left side is the last-reviewed commit, not the
-      // base old-side lines refer to.
-      a: review.sinceLastReview
-        ? new Set<number>()
-        : commentableSet(usable, "old"),
+      a: oldSideOff ? new Set<number>() : commentableSet(usable, "old"),
       b: commentableSet(usable, "new"),
     }),
-    [usable, review.sinceLastReview],
+    [usable, oldSideOff],
   );
 
   const targetAt = (
@@ -373,7 +375,7 @@ export const FileDiffCard = memo(function FileDiffCard({
     const rest: string[] = [];
     for (const d of drafts) {
       const side = diffSideOf(d.side);
-      if ((side === "a" && review.sinceLastReview) || d.line > docLines[side]) {
+      if ((side === "a" && oldSideOff) || d.line > docLines[side]) {
         rest.push(d.id);
         continue;
       }
@@ -398,7 +400,7 @@ export const FileDiffCard = memo(function FileDiffCard({
   }, [
     drafts,
     reviewId,
-    review.sinceLastReview,
+    oldSideOff,
     docLines.a,
     docLines.b,
     composer?.side,
@@ -594,6 +596,12 @@ export const FileDiffCard = memo(function FileDiffCard({
             <Suspense
               fallback={<p className={styles.placeholder}>Loading the diff…</p>}
             >
+              {review.baseApproximate && !review.sinceLastReview && (
+                <p className={styles.sideNote} role="note">
+                  Removed lines can&apos;t take comments for this file: GitHub
+                  could not compute its merge base.
+                </p>
+              )}
               <DiffEditor
                 path={f.path}
                 original={contents.original}

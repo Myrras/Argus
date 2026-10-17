@@ -341,6 +341,13 @@ pub struct FileDiff {
     pub files: Vec<ChangedFile>,
     /// The platform's file limit was hit; more files changed than listed.
     pub truncated: bool,
+    /// `base_sha` is a stand-in, not the commit the patches are relative
+    /// to: GitHub could not compute a large PR's merge base, and the PR's
+    /// base branch commit took its place (see
+    /// [`ReviewProvider::fetch_files`](super::ReviewProvider::fetch_files)).
+    /// The old side read at it may not line up with the patches.
+    #[serde(default)]
+    pub base_approximate: bool,
 }
 
 #[cfg(test)]

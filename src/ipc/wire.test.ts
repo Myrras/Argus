@@ -152,6 +152,7 @@ const files: ReviewFiles = {
   headSha: "c2",
   sinceLastReview: false,
   truncated: false,
+  baseApproximate: false,
   files: [
     {
       path: "src/cache.rs",

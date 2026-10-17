@@ -162,5 +162,6 @@ pub(crate) fn assemble(
         head_sha: head.to_string(),
         files,
         truncated: false,
+        base_approximate: false,
     })
 }

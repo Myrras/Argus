@@ -230,6 +230,7 @@
       "refreshedAt"
     ],
     "ReviewFiles": [
+      "baseApproximate",
       "baseSha",
       "files",
       "files[].additions",

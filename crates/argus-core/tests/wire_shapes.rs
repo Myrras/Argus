@@ -314,6 +314,7 @@ fn current() -> Value {
         head_sha: "c2".into(),
         since_last_review: false,
         truncated: false,
+        base_approximate: false,
         files: vec![FileEntry {
             file: ChangedFile {
                 path: "src/cache.rs".into(),

@@ -537,20 +537,22 @@ impl GithubProvider {
                 (join(a), join(b))
             });
             let files = files?;
-            let merge_base = match merge_base {
+            let (merge_base, base_approximate) = match merge_base {
                 Ok(page) => {
                     let sha = page.body.trim().to_string();
                     check_sha(&sha).map_err(|_| unexpected())?;
-                    sha
+                    (sha, false)
                 }
                 // GitHub gives up comparing a very large PR (a server
                 // error or a timeout) while its files still list. The
                 // base branch commit the PR reports is the closest left
-                // side then: the merge base itself while the branch is
-                // up to date with its base.
+                // side then (the merge base itself while the branch is up
+                // to date with its base), flagged: once the base branch
+                // moved on, its old side does not line up with the
+                // patches. The core asks a local clone for the real one.
                 Err(e @ CoreError::Provider(_)) if !super::is_rate_limited(&e) => {
                     tracing::debug!("no merge base for a large PR; using its base commit");
-                    base.clone()
+                    (base.clone(), true)
                 }
                 Err(e) => return Err(e),
             };
@@ -563,6 +565,7 @@ impl GithubProvider {
                 head_sha: head,
                 truncated: files.len() >= PULL_FILES_LIMIT,
                 files: files.into_iter().map(changed_file).collect(),
+                base_approximate,
             });
         }
         Err(CoreError::Provider(
@@ -827,6 +830,7 @@ impl ReviewProvider for GithubProvider {
                     head_sha: to.clone(),
                     truncated: cmp.files.len() >= COMPARE_FILES_LIMIT,
                     files: cmp.files.into_iter().map(changed_file).collect(),
+                    base_approximate: false,
                 })
             }
         }
@@ -905,6 +909,7 @@ impl ReviewProvider for GithubProvider {
             head_sha: sha.to_string(),
             truncated: files.len() >= PULL_FILES_LIMIT,
             files: files.into_iter().map(changed_file).collect(),
+            base_approximate: false,
         })
     }
 

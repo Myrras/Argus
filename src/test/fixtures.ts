@@ -105,6 +105,7 @@ export function reviewFiles(overrides: Partial<ReviewFiles> = {}): ReviewFiles {
     headSha: "a".repeat(40),
     sinceLastReview: false,
     truncated: false,
+    baseApproximate: false,
     files: [file()],
     ...overrides,
   };
