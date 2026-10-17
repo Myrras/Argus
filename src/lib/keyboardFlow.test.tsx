@@ -293,6 +293,40 @@ describe("keys on the focused item", () => {
   });
 });
 
+describe("since my last review", () => {
+  it("c still opens a composer on a new line", async () => {
+    // The compare's left side is the watermark; the commentable lines are
+    // the review's own diff, at its base.
+    const base = useCodeViewStore.getState().byReview[r.id]!;
+    useCodeViewStore.setState({
+      byReview: {
+        [r.id]: {
+          ...base,
+          since: true,
+          files: {
+            ...base.files!,
+            sinceLastReview: true,
+            baseSha: "c".repeat(40),
+            reviewBaseSha: r.baseSha,
+          },
+        },
+      },
+    });
+    renderHook(() => useAppShortcuts());
+    press({ key: "n", code: "KeyN" });
+    press({ key: "n", code: "KeyN" });
+    expect(press({ key: "c", code: "KeyC" }).defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(useCommentStore.getState().composer).toMatchObject({
+        path: "src/a.rs",
+        line: 3,
+        side: "new",
+        baseSha: null,
+      }),
+    );
+  });
+});
+
 describe("guards", () => {
   it("c opens nothing once another review is open", async () => {
     let answer: (v: unknown) => void = () => {};

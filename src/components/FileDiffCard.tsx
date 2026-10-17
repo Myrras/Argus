@@ -253,7 +253,7 @@ export const FileDiffCard = memo(function FileDiffCard({
     loadCommentable(
       review.reviewId,
       review.headSha,
-      review.baseSha,
+      review.reviewBaseSha,
       f.path,
     ).then(
       (c) => {
@@ -267,13 +267,14 @@ export const FileDiffCard = memo(function FileDiffCard({
     return () => {
       cancelled = true;
     };
-  }, [ready, review.reviewId, review.headSha, review.baseSha, f.path]);
-  // Lines read at another head or base than the diff shown would point
-  // elsewhere.
+  }, [ready, review.reviewId, review.headSha, review.reviewBaseSha, f.path]);
+  // Lines read at another head or base than the review's diff would point
+  // elsewhere. Compared with `reviewBaseSha`, not `baseSha`: comments go on
+  // the review's own diff, also when "since" mode shows a compare.
   const usable =
     commentable &&
     commentable.headSha === review.headSha &&
-    commentable.baseSha === review.baseSha
+    commentable.baseSha === review.reviewBaseSha
       ? commentable
       : null;
 

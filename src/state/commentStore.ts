@@ -701,17 +701,19 @@ export function usePostableCount(reviewId: ReviewId): number {
 const commentable = new Map<string, Promise<CommentableLines>>();
 
 /**
- * A file's commentable lines, fetched once per (review, head, base, path);
- * a retarget moves the base under an unchanged head, and the lines follow
- * the diff. A failed fetch is forgotten so the next view retries.
+ * A file's commentable lines, fetched once per (review, head, review base,
+ * path); `reviewBaseSha` is the left side of the review's own diff (see
+ * `ReviewFiles`): a retarget, or a fetched clone resolving a stand-in,
+ * moves it under an unchanged head, and the lines follow. A failed fetch is
+ * forgotten so the next view retries.
  */
 export function loadCommentable(
   reviewId: ReviewId,
   headSha: string,
-  baseSha: string,
+  reviewBaseSha: string,
   path: string,
 ): Promise<CommentableLines> {
-  const key = `${reviewId}|${headSha}|${baseSha}|${path}`;
+  const key = `${reviewId}|${headSha}|${reviewBaseSha}|${path}`;
   let p = commentable.get(key);
   if (!p) {
     p = commentableLines(reviewId, path);

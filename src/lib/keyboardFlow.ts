@@ -41,11 +41,20 @@ export async function lineTarget(
   }
   let lines;
   try {
-    lines = await loadCommentable(reviewId, files.headSha, files.baseSha, path);
+    lines = await loadCommentable(
+      reviewId,
+      files.headSha,
+      files.reviewBaseSha,
+      path,
+    );
   } catch {
     return null;
   }
-  if (lines.headSha !== files.headSha || lines.baseSha !== files.baseSha) {
+  // The review's own diff, as in the code view (see FileDiffCard).
+  if (
+    lines.headSha !== files.headSha ||
+    lines.baseSha !== files.reviewBaseSha
+  ) {
     return null;
   }
   if (!commentableSet(lines, side).has(line)) return null;

@@ -193,6 +193,9 @@ const threads = [
 
 let listed: ReviewFiles;
 
+/** The commit last marked reviewed, in the since-mode tests. */
+const WATERMARK = "c".repeat(40);
+
 function backend(cmd: string, args?: unknown) {
   const a = (args ?? {}) as Record<string, unknown>;
   switch (cmd) {
@@ -204,6 +207,9 @@ function backend(cmd: string, args?: unknown) {
           ? {
               ...listed,
               sinceLastReview: true,
+              // The compare's left side is the watermark; the review's own
+              // diff (where comments go) keeps its base.
+              baseSha: WATERMARK,
               files: listed.files.slice(0, 1),
             }
           : listed,
@@ -216,10 +222,11 @@ function backend(cmd: string, args?: unknown) {
     case "set_file_viewed":
       return Promise.resolve(a.viewed ? [a.path] : []);
     case "commentable_lines":
+      // Always the review's own diff, also in since mode.
       return Promise.resolve({
         reviewId: r.id,
         path: a.path,
-        baseSha: listed.baseSha,
+        baseSha: listed.reviewBaseSha,
         headSha: listed.headSha,
         hunks: [{ old: [1, 2], new: [1, 2, 3] }],
       });
@@ -631,8 +638,8 @@ describe("ReviewView", () => {
     expect(reads()).toHaveLength(2);
   });
 
-  it("shows no old-side + in since-my-last-review mode", async () => {
-    const later = { ...r, lastReviewedSha: "c".repeat(40), round: 2 };
+  it("comments on new lines, not old ones, in since-my-last-review mode", async () => {
+    const later = { ...r, lastReviewedSha: WATERMARK, round: 2 };
     useCodeViewStore.setState({
       byReview: {
         [r.id]: {
@@ -647,10 +654,57 @@ describe("ReviewView", () => {
     });
     render(<ReviewView review={later} now={NOW} />);
     const editor = await screen.findByTestId("editor-src/cache.rs");
+    // The compare is shown; the lines come from the review's own diff.
+    const shown = useCodeViewStore.getState().byReview[r.id]?.files;
+    expect(shown?.baseSha).toBe(WATERMARK);
+    expect(shown?.reviewBaseSha).not.toBe(WATERMARK);
     await waitFor(() =>
       expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
     );
     expect(editor).toHaveAttribute("data-comment-a", "");
+  });
+
+  it("takes comments on removed lines once the fetched clone finds the merge base", async () => {
+    // The clone lacked the base tip: the review's left side is a stand-in.
+    listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
+    const standIn = listed.reviewBaseSha;
+    const lines = (baseSha: string) =>
+      ((cmd: string, args?: unknown) =>
+        cmd === "commentable_lines"
+          ? Promise.resolve({
+              reviewId: r.id,
+              path: (args as { path: string }).path,
+              baseSha,
+              headSha: listed.headSha,
+              hunks: [{ old: [1, 2], new: [1, 2, 3] }],
+            })
+          : backend(cmd, args)) as typeof invoke;
+    mockInvoke.mockImplementation(lines(standIn));
+    render(<ReviewView review={r} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    expect(editor).toHaveAttribute("data-comment-a", "");
+
+    // Fetched: the file list and the commentable lines now report the
+    // merge base, under the same head.
+    const mergeBase = "e".repeat(40);
+    listed = reviewFiles({ reviewId: r.id, files, baseSha: mergeBase });
+    expect(listed.reviewBaseSha).toBe(mergeBase);
+    mockInvoke.mockImplementation(lines(mergeBase));
+    await act(() => useCodeViewStore.getState().applyChanged(r.id));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+        "data-comment-a",
+        "1,2",
+      ),
+    );
+    expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+      "data-comment-b",
+      "1,2,3",
+    );
   });
   it("takes no comments on removed lines when GitHub had no merge base", async () => {
     listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
