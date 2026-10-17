@@ -159,14 +159,18 @@ when it merges.
   run only reads.
 - AI findings post on the code the AI actually read; a finding from a later
   round's "since last review" diff on a removed line is refused instead of
-  landing on another line. Re-running the AI pass drops stale verdicts,
+  landing on another line, with a hint to re-run the AI pass on the full
+  diff. Re-running the AI pass drops stale verdicts,
   never offers an already posted finding again, and keeps your own verdict
   label on a thread in later rounds.
 - Posting or approving when new commits arrived in between is refused and
   shows the new commits right away. A multi-line comment is refused rather
   than moved when lines inside it changed.
 - Quitting Argus stops running AI passes and removes their temporary files;
-  files left by a crash are cleaned up on the next start.
+  files left by a crash are cleaned up on the next start. It no longer waits
+  for a refresh that is still talking to GitHub or GitLab.
+- GitLab over plain http is refused except on localhost, so your token never
+  travels unencrypted.
 - Opening Argus a second time brings the running window to the front. If
   Argus cannot open its data at startup it says so, naming the folder.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and
