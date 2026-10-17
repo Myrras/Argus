@@ -250,7 +250,12 @@ export const FileDiffCard = memo(function FileDiffCard({
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
-    loadCommentable(review.reviewId, review.headSha, f.path).then(
+    loadCommentable(
+      review.reviewId,
+      review.headSha,
+      review.baseSha,
+      f.path,
+    ).then(
       (c) => {
         if (!cancelled) setCommentable(c);
       },
@@ -262,10 +267,15 @@ export const FileDiffCard = memo(function FileDiffCard({
     return () => {
       cancelled = true;
     };
-  }, [ready, review.reviewId, review.headSha, f.path]);
-  // Lines read at another head than the one shown would point elsewhere.
+  }, [ready, review.reviewId, review.headSha, review.baseSha, f.path]);
+  // Lines read at another head or base than the diff shown would point
+  // elsewhere.
   const usable =
-    commentable && commentable.headSha === review.headSha ? commentable : null;
+    commentable &&
+    commentable.headSha === review.headSha &&
+    commentable.baseSha === review.baseSha
+      ? commentable
+      : null;
 
   const reviewId = review.reviewId;
   const composer = useCommentStore((s) =>
@@ -603,7 +613,8 @@ export const FileDiffCard = memo(function FileDiffCard({
                 <p className={styles.sideNote} role="note">
                   Removed lines can&apos;t take comments for this file: GitHub
                   could not compute its merge base.
-                  {hasClone && " Fetch your local clone to enable them."}
+                  {hasClone &&
+                    " If your local clone is behind, fetch it to enable them."}
                 </p>
               )}
               <DiffEditor

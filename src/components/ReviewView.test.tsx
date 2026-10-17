@@ -593,6 +593,44 @@ describe("ReviewView", () => {
     expect(writes).toEqual([]);
   });
 
+  it("reads the commentable lines again when only the base changes", async () => {
+    render(<ReviewView review={r} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    const reads = () =>
+      mockInvoke.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === "commentable_lines" &&
+          (args as { path: string }).path === "src/cache.rs",
+      );
+    expect(reads()).toHaveLength(1);
+
+    // Retargeted: same head, another base, so another diff.
+    const newBase = "d".repeat(40);
+    listed = reviewFiles({ reviewId: r.id, files, baseSha: newBase });
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "commentable_lines"
+        ? Promise.resolve({
+            reviewId: r.id,
+            path: (args as { path: string }).path,
+            baseSha: newBase,
+            headSha: listed.headSha,
+            hunks: [{ old: [4], new: [4, 5] }],
+          })
+        : backend(cmd, args)) as typeof invoke);
+    await act(() => useCodeViewStore.getState().applyChanged(r.id));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("editor-src/cache.rs")).toHaveAttribute(
+        "data-comment-b",
+        "4,5",
+      ),
+    );
+    expect(reads()).toHaveLength(2);
+  });
+
   it("shows no old-side + in since-my-last-review mode", async () => {
     const later = { ...r, lastReviewedSha: "c".repeat(40), round: 2 };
     useCodeViewStore.setState({
@@ -639,7 +677,7 @@ describe("ReviewView", () => {
     const { unmount } = render(<ReviewView review={r} now={NOW} />);
     await screen.findByTestId("editor-src/cache.rs");
     expect(
-      within(card("src/cache.rs")).getByText(/Fetch your local clone/),
+      within(card("src/cache.rs")).getByText(/fetch it to enable them/),
     ).toBeInTheDocument();
     unmount();
 
@@ -648,7 +686,7 @@ describe("ReviewView", () => {
     });
     render(<ReviewView review={r} now={NOW} />);
     await screen.findByTestId("editor-src/cache.rs");
-    expect(screen.queryByText(/Fetch your local clone/)).toBeNull();
+    expect(screen.queryByText(/fetch it to enable them/)).toBeNull();
   });
 
   it("says nothing about removed lines when the left side is exact", async () => {

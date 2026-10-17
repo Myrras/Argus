@@ -41,11 +41,13 @@ export async function lineTarget(
   }
   let lines;
   try {
-    lines = await loadCommentable(reviewId, files.headSha, path);
+    lines = await loadCommentable(reviewId, files.headSha, files.baseSha, path);
   } catch {
     return null;
   }
-  if (lines.headSha !== files.headSha) return null;
+  if (lines.headSha !== files.headSha || lines.baseSha !== files.baseSha) {
+    return null;
+  }
   if (!commentableSet(lines, side).has(line)) return null;
   const range = clampRange(lines, side, line, line);
   if (!range) return null;
