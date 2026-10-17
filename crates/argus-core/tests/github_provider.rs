@@ -968,6 +968,27 @@ fn a_failing_page_after_a_full_last_page_ends_the_list() {
 
 #[test]
 #[cfg_attr(windows, ignore)]
+fn a_failing_page_after_a_full_last_page_fails_the_list() {
+    // A server error on the unasked-for page: whether more files came is
+    // unknown, so the list is not cut there silently.
+    let fake = files_pages_fake();
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    let body = std::fs::read_to_string(&fake.gh)
+        .unwrap()
+        .replace(
+            "HTTP/2.0 422 Unprocessable Entity",
+            "HTTP/2.0 502 Bad Gateway",
+        )
+        .replace("gh: HTTP 422", "gh: HTTP 502");
+    std::fs::write(&fake.gh, body).unwrap();
+    std::fs::write(dir.join("files1.json"), files_json(0, 100)).unwrap();
+    let gh = fake.provider("github.com", None);
+    assert!(gh.fetch_files(&widgets_12(), &review_range()).is_err());
+    assert!(fake.calls().contains("missing files page 2"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
 fn a_list_at_the_3000_file_cap_is_not_followed_past_it() {
     let fake = files_pages_fake();
     let dir = fake.log.parent().unwrap().to_path_buf();

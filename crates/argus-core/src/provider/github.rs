@@ -343,6 +343,7 @@ impl GithubProvider {
                 reset_at(|h| reply.header(h), Utc::now()),
             )),
             404 => Err(CoreError::NotFound),
+            422 => Err(super::unprocessable("GitHub")),
             status => {
                 tracing::debug!("gh api answered HTTP {status}");
                 Err(CoreError::Provider("gh could not fetch from GitHub".into()))
@@ -363,8 +364,9 @@ impl GithubProvider {
     /// followed anyway: a 304 replays the link as it was when the page was
     /// cached, and a last page of exactly [`PER_PAGE`] stays unchanged (a
     /// 304) when more items arrive after it. An empty next page ends it, and
-    /// so does that unasked-for page failing (any error but a rate limit):
-    /// the list read so far is complete as far as GitHub said. Not at
+    /// so does that unasked-for page not existing (a 404 or 422, see
+    /// [`super::ends_list`]): the list read so far is complete as far as
+    /// GitHub said. Any other failure of it fails the list. Not at
     /// [`PULL_FILES_LIMIT`] items: GitHub serves no page past its cap (a
     /// 422), and the cap is where a cut list ends anyway.
     fn pages(&self, path: &str) -> CoreResult<Vec<String>> {
@@ -382,7 +384,7 @@ impl GithubProvider {
         for _ in 0..MAX_PAGES {
             let page = match self.get(&url, None) {
                 Ok(p) => p,
-                Err(e) if guessed && !super::is_rate_limited(&e) => {
+                Err(e) if guessed && super::ends_list(&e) => {
                     tracing::debug!("a GitHub list ends at a page it did not link: {e}");
                     break;
                 }

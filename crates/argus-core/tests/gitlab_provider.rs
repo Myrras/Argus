@@ -926,11 +926,10 @@ fn a_merged_commented_mr_is_not_fetched_again() {
     assert_eq!(count("/api/v4/projects/200/merge_requests/5"), 2);
 }
 
-#[test]
-fn a_failing_page_after_a_full_last_page_ends_the_list() {
-    // Exactly 100 discussions and no next page: page 2 is asked for in case
-    // more came in, and its failing does not fail the complete list.
-    let (base, seen) = serve(|path| {
+/// Exactly 100 discussions on page 1 and no next page; page 2 answers
+/// `page2`.
+fn full_last_page_then(page2: fn() -> Reply) -> impl Fn(&str, &str) -> Reply {
+    move |path, _| {
         let (route, query) = path.split_once('?').unwrap_or((path, ""));
         if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
             return fixture_routes(path);
@@ -942,12 +941,36 @@ fn a_failing_page_after_a_full_last_page_ends_the_list() {
                 body: discussions(0, 100),
             }
         } else {
-            status("500 Internal Server Error")
+            page2()
         }
-    });
-    let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
-    assert_eq!(threads.len(), 100);
-    assert!(seen.lock().unwrap().iter().any(|l| l.contains("page=2")));
+    }
+}
+
+#[test]
+fn a_page_past_the_end_after_a_full_last_page_ends_the_list() {
+    // Page 2 is asked for in case more came in; a 404 or 422 there (no
+    // such page) does not fail the complete list.
+    for page2 in [(|| status("404 Not Found")) as fn() -> Reply, || {
+        status("422 Unprocessable Entity")
+    }] {
+        let (base, seen) = serve_raw(full_last_page_then(page2));
+        let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
+        assert_eq!(threads.len(), 100);
+        assert!(seen.lock().unwrap().iter().any(|l| l.contains("page=2")));
+    }
+}
+
+#[test]
+fn a_failing_page_after_a_full_last_page_fails_the_list() {
+    // A server error, an auth failure: whether more came is unknown, so the
+    // list is not cut there silently.
+    for page2 in [
+        (|| status("500 Internal Server Error")) as fn() -> Reply,
+        || status("401 Unauthorized"),
+    ] {
+        let (base, _) = serve_raw(full_last_page_then(page2));
+        assert!(provider(&base).fetch_threads(&mr_ref(&base, 21)).is_err());
+    }
 
     // A page the list names as next failing is a real gap.
     let (base, _) = serve(|path| {

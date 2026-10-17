@@ -324,6 +324,7 @@ impl GitlabProvider {
             )),
             401 | 403 => Err(CoreError::GitlabAuth),
             404 => Err(CoreError::NotFound),
+            422 => Err(super::unprocessable("GitLab")),
             _ => Err(CoreError::Provider(
                 "GitLab could not fetch the merge request".into(),
             )),
@@ -341,8 +342,9 @@ impl GitlabProvider {
     /// header as it was when the page was cached, and a page that was the
     /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
     /// more items arrive after it. An empty next page ends it, and so does
-    /// that unasked-for page failing (any error but a rate limit): the list
-    /// read so far is complete as far as GitLab said.
+    /// that unasked-for page not existing (a 404 or 422, see
+    /// [`super::ends_list`]): the list read so far is complete as far as
+    /// GitLab said. Any other failure of it fails the list.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
         self.get_pages(path, MAX_PAGES)
     }
@@ -358,7 +360,7 @@ impl GitlabProvider {
             let (body, next) =
                 match self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}")) {
                     Ok(reply) => reply,
-                    Err(e) if guessed && !super::is_rate_limited(&e) => {
+                    Err(e) if guessed && super::ends_list(&e) => {
                         tracing::debug!("a GitLab list ends at a page it did not name: {e}");
                         return Ok(all);
                     }

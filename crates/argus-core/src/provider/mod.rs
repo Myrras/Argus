@@ -29,7 +29,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::error::CoreResult;
+use crate::error::{CoreError, CoreResult};
 use crate::post::{PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
 use crate::settings::Settings;
 
@@ -152,6 +152,28 @@ pub trait ReviewProvider: Send + Sync {
 }
 
 pub(crate) use rate_limit::{is_rate_limited, rate_limited};
+
+/// Ends every "could not process" (HTTP 422) error's message: a message
+/// check, as for rate limits, because the error has no variant of its own.
+const UNPROCESSABLE: &str = "could not process the request (HTTP 422)";
+
+/// `platform`'s HTTP 422: on a list page, one past what it serves (GitHub's
+/// pagination cap).
+pub(crate) fn unprocessable(platform: &str) -> CoreError {
+    CoreError::Provider(format!("{platform} {UNPROCESSABLE}"))
+}
+
+/// Whether `e` says a list page does not exist (a 404, or a 422 past the
+/// platform's cap), so a page asked for without a next link ends the list
+/// there. Any other failure (a timeout, a 5xx, auth) leaves it unknown
+/// whether more came, and fails the list rather than cutting it silently.
+pub(crate) fn ends_list(e: &CoreError) -> bool {
+    match e {
+        CoreError::NotFound => true,
+        CoreError::Provider(m) => m.ends_with(UNPROCESSABLE),
+        _ => false,
+    }
+}
 
 /// The result of a provider write.
 pub type PostResultOf<T> = Result<T, PostError>;
