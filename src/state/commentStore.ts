@@ -303,6 +303,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
     // The stored text at send time: a posted draft whose text changed since
     // was not posted with that text, so it stays.
     const storedBody = new Map(draftsOf(reviewId).map((d) => [d.id, d.body]));
+    const sentBody = new Map(drafts.map((d) => [d.id, d.body]));
     set((s) => ({ posting: { ...s.posting, [reviewId]: true } }));
     try {
       const results = await postComments(reviewId, drafts.map(toNewComment));
@@ -325,6 +326,19 @@ export const useCommentStore = create<CommentState>((set, get) => {
         return [{ ...d, id, error: null }];
       });
       setDrafts(reviewId, next);
+      // An edit of a draft that went out, still holding what was sent (opened
+      // before or during the post), is done with: Save would post it twice.
+      // Text typed since stays open (Save keeps it as a new draft).
+      const open = get().composer;
+      if (
+        open?.draftId &&
+        open.reviewId === reviewId &&
+        posted.has(open.draftId) &&
+        !renamed.has(open.draftId) &&
+        open.body === sentBody.get(open.draftId)
+      ) {
+        set({ composer: null });
+      }
       if (renamed.size > 0) {
         // An edit still open on one follows it to its new id.
         const c = get().composer;
@@ -571,17 +585,6 @@ export const useCommentStore = create<CommentState>((set, get) => {
       }
       if (drafts.length === 0) return;
       const r = await post(reviewId, drafts);
-      // The edit it posted is done with; text typed into it meanwhile stays
-      // open (Save keeps it as a new draft).
-      const after = get().composer;
-      if (
-        editing &&
-        after?.draftId === editing.draftId &&
-        !draftsOf(reviewId).some((d) => d.id === editing.draftId) &&
-        after.body === editing.body
-      ) {
-        set({ composer: null });
-      }
       if (r.error) {
         toastError("Could not post the comments", r.error.message);
       } else if (r.failed === 0) {

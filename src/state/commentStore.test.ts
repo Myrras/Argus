@@ -370,6 +370,19 @@ describe("never posts text the user is not seeing", () => {
     expect(drafts().map((d) => d.body)).toEqual(["a edited"]);
   });
 
+  it("an edit opened during Post all and left as sent closes when the draft posts", async () => {
+    addDraft(3, "a");
+    const id = drafts()[0].id;
+    const finish = holdPost();
+    const p = useCommentStore.getState().postAll(REVIEW);
+    useCommentStore.getState().editDraft(REVIEW, id);
+    finish([posted(3)]);
+    await p;
+    // Its text went out as it was: Save here would post it twice.
+    expect(useCommentStore.getState().composer).toBeNull();
+    expect(drafts()).toEqual([]);
+  });
+
   it("a posted draft whose text changed meanwhile stays as a new draft", async () => {
     addDraft(3, "sent text");
     const id = drafts()[0].id;
