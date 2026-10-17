@@ -103,6 +103,7 @@ export const FileDiffCard = memo(function FileDiffCard({
   file: f,
   threads,
   provider,
+  hasClone,
   layout,
   selected,
   onSelect: select,
@@ -113,6 +114,8 @@ export const FileDiffCard = memo(function FileDiffCard({
   file: FileEntry;
   threads: readonly StoredThread[];
   provider: ProviderId;
+  /** A local clone is set for the review's repository. */
+  hasClone: boolean;
   layout: DiffLayout;
   selected: boolean;
   onSelect: (path: string) => void;
@@ -600,6 +603,7 @@ export const FileDiffCard = memo(function FileDiffCard({
                 <p className={styles.sideNote} role="note">
                   Removed lines can&apos;t take comments for this file: GitHub
                   could not compute its merge base.
+                  {hasClone && " Fetch your local clone to enable them."}
                 </p>
               )}
               <DiffEditor

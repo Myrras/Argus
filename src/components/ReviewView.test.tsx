@@ -64,18 +64,20 @@ import {
   CONVERSATION,
   useCodeViewStore,
 } from "../state/codeViewStore";
+import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useHistoryStore } from "../state/historyStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useNowStore } from "../state/nowStore";
 import { useReviewStore } from "../state/reviewStore";
 import { clearCommentableCache, useCommentStore } from "../state/commentStore";
 import { useThreadStore } from "../state/threadStore";
-import { file, review, reviewFiles, thread } from "../test/fixtures";
+import { file, review, reviewFiles, settings, thread } from "../test/fixtures";
 import { ReviewView } from "./ReviewView";
 
 const mockInvoke = vi.mocked(invoke);
 const initialCode = useCodeViewStore.getState();
 const initialThreads = useThreadStore.getState();
+const initialSettings = useBackendSettingsStore.getState();
 const initialReviews = useReviewStore.getState();
 const NOW = Date.parse("2026-10-16T12:00:00Z");
 
@@ -241,6 +243,7 @@ beforeEach(() => {
   mockInvoke.mockImplementation(backend as typeof invoke);
   useCodeViewStore.setState({ ...initialCode, byReview: {} }, true);
   useThreadStore.setState({ ...initialThreads, byReview: {} }, true);
+  useBackendSettingsStore.setState({ ...initialSettings }, true);
   useReviewStore.setState(
     { ...initialReviews, reviews: [r], selectedId: r.id },
     true,
@@ -624,6 +627,28 @@ describe("ReviewView", () => {
         "Removed lines can't take comments for this file: GitHub could not compute its merge base.",
       ),
     ).toBeInTheDocument();
+  });
+
+  it("suggests fetching the clone only when one is set for the repository", async () => {
+    listed = reviewFiles({ reviewId: r.id, files, baseApproximate: true });
+    useBackendSettingsStore.setState({
+      settings: settings({
+        clonePaths: { [`${r.host}/${r.repo}`]: "/work/widgets" },
+      }),
+    });
+    const { unmount } = render(<ReviewView review={r} now={NOW} />);
+    await screen.findByTestId("editor-src/cache.rs");
+    expect(
+      within(card("src/cache.rs")).getByText(/Fetch your local clone/),
+    ).toBeInTheDocument();
+    unmount();
+
+    useBackendSettingsStore.setState({
+      settings: settings({ clonePaths: { "github.com/other/repo": "/x" } }),
+    });
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByTestId("editor-src/cache.rs");
+    expect(screen.queryByText(/Fetch your local clone/)).toBeNull();
   });
 
   it("says nothing about removed lines when the left side is exact", async () => {

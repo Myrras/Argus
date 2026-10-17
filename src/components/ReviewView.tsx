@@ -28,6 +28,7 @@ import { useKeymap } from "../lib/useKeymap";
 import { usePageFocus } from "../lib/usePageFocus";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
+import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useHistoryStore } from "../state/historyStore";
 import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
 import { useThreadStore } from "../state/threadStore";
@@ -61,6 +62,9 @@ export function ReviewView({
   const threadEntry = useThreadStore((s) => s.byReview[r.id]);
   const threads = threadEntry?.threads ?? EMPTY_THREADS;
   const loadThreads = useThreadStore((s) => s.load);
+  const hasClone = useBackendSettingsStore(
+    (s) => `${r.host}/${r.repo}` in (s.settings?.clonePaths ?? {}),
+  );
   const keymap = useKeymap();
 
   const [query, setQuery] = useState("");
@@ -310,6 +314,7 @@ export function ReviewView({
                 file={f}
                 threads={byFile.get(f.path) ?? EMPTY_THREADS}
                 provider={r.provider}
+                hasClone={hasClone}
                 layout={layout}
                 selected={selected === f.path}
                 onSelect={selectFile}

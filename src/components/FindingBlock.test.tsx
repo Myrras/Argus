@@ -139,6 +139,7 @@ function renderCard() {
       file={f}
       threads={[]}
       provider="github"
+      hasClone={false}
       layout="unified"
       selected
       onSelect={() => undefined}
