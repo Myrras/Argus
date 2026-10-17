@@ -343,7 +343,7 @@ impl Core {
 
     /// [`exact_base`] with this core's settings.
     pub(crate) fn exact_base(&self, record: &ReviewRecord, diff: &mut provider::FileDiff) {
-        exact_base(&self.settings(), &record.review, diff);
+        exact_base(&self.settings(), record, diff);
     }
 
     fn remember_keys(&self, id: ReviewId, head: &str, keys: files::ContentKeys) {
@@ -448,18 +448,40 @@ impl Core {
 /// posts old-side lines (the code view, the commentable lines, posting, an
 /// AI run) goes through it, so they agree on the left side: a comment read
 /// against one and posted against the other would be refused.
+///
+/// The stand-in is the platform's base branch tip (T2). When the clone does
+/// not have it (the base branch moved on since the clone was fetched), the
+/// base tip stored with the review (T1) is used instead, but only when it
+/// was read together with this very head. Why that gives the same merge
+/// base: base branches move forward, so T1 is an ancestor of T2, and every
+/// common ancestor of T1 and the head is one of T2 and the head. A newer
+/// one would have to be a commit the base gained after T1 that the head
+/// already had, which an unchanged head only has when part of the PR itself
+/// was merged into the base. A head pushed since T1 was read may have
+/// merged newer base commits, so then the stand-in stays. Left over: a
+/// force-pushed base branch, or that partial merge, which are what the
+/// stand-in already risks.
 pub(crate) fn exact_base(
     settings: &Settings,
-    review: &provider::ReviewRef,
+    record: &ReviewRecord,
     diff: &mut provider::FileDiff,
 ) {
     if !diff.base_approximate {
         return;
     }
-    let exact = settings
-        .clone_path(review)
+    let Some(clone) = settings
+        .clone_path(&record.review)
         .and_then(git::LocalClone::open)
-        .and_then(|c| c.merge_base(&diff.base_sha, &diff.head_sha));
+    else {
+        return;
+    };
+    let exact = if clone.has_commit(&diff.base_sha) {
+        clone.merge_base(&diff.base_sha, &diff.head_sha)
+    } else if diff.head_sha == record.head_sha {
+        clone.merge_base(&record.base_sha, &diff.head_sha)
+    } else {
+        None
+    };
     if let Some(sha) = exact {
         diff.base_sha = sha;
         diff.base_approximate = false;
