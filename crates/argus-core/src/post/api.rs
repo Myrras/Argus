@@ -189,10 +189,10 @@ impl Core {
             c.review == id && c.stored_head == record.head_sha && c.stored_base == record.base_sha
         });
         if !fresh {
-            let mut diff = self
+            // The left side is resolved below, on a hit as well.
+            let diff = self
                 .provider_for(&record)?
                 .fetch_files(&record.review, &files::review_range(&record))?;
-            self.exact_base(&record, &mut diff);
             *cache = Some(CommentableCache {
                 review: id,
                 stored_head: record.head_sha.clone(),
@@ -211,9 +211,29 @@ impl Core {
                     .collect(),
                 base_sha: diff.base_sha,
                 head_sha: diff.head_sha,
+                base_approximate: diff.base_approximate,
             });
         }
-        let c = cache.as_ref().expect("filled above");
+        let c = cache.as_mut().expect("filled above");
+        if c.base_approximate {
+            // A stand-in left side is asked of the local clone on every
+            // read, not only when the diff was: after the user fetches the
+            // clone, `list_files` reports its merge base, and this must too
+            // or the lines no longer match the diff shown. Only the label
+            // changes: the patches were relative to that merge base all
+            // along (the hunks stay). Once found it stays: the merge base
+            // of two fixed commits never changes.
+            let mut sides = FileDiff {
+                base_sha: c.base_sha.clone(),
+                head_sha: c.head_sha.clone(),
+                files: Vec::new(),
+                truncated: false,
+                base_approximate: true,
+            };
+            self.exact_base(&record, &mut sides);
+            c.base_sha = sides.base_sha;
+            c.base_approximate = sides.base_approximate;
+        }
         let hunks = c
             .files
             .get(path)

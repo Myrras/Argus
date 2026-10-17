@@ -329,6 +329,7 @@ struct Platform {
     files: std::sync::Mutex<Option<FileDiff>>,
     file_calls: AtomicUsize,
     diff_calls: AtomicUsize,
+    fetch_files_calls: AtomicUsize,
     /// What `post_comment` was asked to post.
     posted: std::sync::Mutex<Vec<crate::post::PlacedComment>>,
 }
@@ -359,6 +360,7 @@ impl ReviewProvider for Platform {
             .unwrap_or(Err(CoreError::NotFound))
     }
     fn fetch_files(&self, _: &ReviewRef, _: &DiffRange) -> CoreResult<FileDiff> {
+        self.fetch_files_calls.fetch_add(1, Ordering::SeqCst);
         self.files
             .lock()
             .unwrap()
@@ -430,6 +432,7 @@ fn platform_on(fx: &Fixture, shas: &[String], base: &str) -> Arc<Platform> {
         files: std::sync::Mutex::new(None),
         file_calls: AtomicUsize::new(0),
         diff_calls: AtomicUsize::new(0),
+        fetch_files_calls: AtomicUsize::new(0),
         posted: std::sync::Mutex::new(Vec::new()),
     })
 }
@@ -716,6 +719,68 @@ fn a_base_branch_newer_than_the_clone_keeps_the_stand_in() {
     let files = core.list_files(id, false).unwrap();
     assert_eq!(files.base_sha, platform_tip);
     assert!(files.base_approximate);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn fetching_the_clone_makes_the_commentable_left_side_exact() {
+    // The clone lacked the platform's base tip, so the commentable lines
+    // were read with the stand-in. After the user fetches it, `list_files`
+    // finds the merge base; the cached commentable lines must report it
+    // too (without reading the diff again), or the file stays uncommentable
+    // in the code view.
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    let base = fx.commit("src/cache.rs", &file_of(10), "c1");
+    git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
+    let head = fx.commit(
+        "src/cache.rs",
+        &file_of(10).replace("line 10\n", "line ten\n"),
+        "feature",
+    );
+    git_in(&fx.path, &["checkout", "-q", "main"]);
+    let local = fx.clone_now();
+    let tip = fx.commit("src/other.rs", "x\n", "main moves on");
+    let p = platform(&fx, std::slice::from_ref(&head));
+    let file = crate::provider::ChangedFile {
+        path: "src/cache.rs".into(),
+        old_path: None,
+        status: crate::provider::FileStatus::Modified,
+        additions: 1,
+        deletions: 1,
+        patch: Some("@@ -9,2 +9,2 @@\n line 9\n-line 10\n+line ten\n".into()),
+        content_sha: "c1".into(),
+        binary: false,
+        too_large: false,
+    };
+    *p.files.lock().unwrap() = Some(FileDiff {
+        base_sha: tip.clone(),
+        head_sha: head.clone(),
+        files: vec![file],
+        truncated: false,
+        base_approximate: true,
+    });
+    let core = core_with(&p, &local);
+    let id = core.reviews().unwrap()[0].id;
+
+    let files = core.list_files(id, false).unwrap();
+    assert_eq!(files.review_base_sha, tip);
+    let before = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(before.base_sha, tip);
+    let reads = p.fetch_files_calls.load(Ordering::SeqCst);
+
+    git_in(&local, &["fetch", "-q"]);
+    let files = core.list_files(id, false).unwrap();
+    assert_eq!(files.base_sha, base);
+    assert!(!files.base_approximate);
+    assert_eq!(files.review_base_sha, base);
+    let reads = reads + 1; // that list_files
+    let after = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(after.base_sha, base);
+    assert_eq!(after.head_sha, head);
+    assert_eq!(after.hunks, before.hunks);
+    assert_eq!(p.fetch_files_calls.load(Ordering::SeqCst), reads);
 }
 
 #[test]

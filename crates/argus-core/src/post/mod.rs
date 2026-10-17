@@ -156,6 +156,9 @@ pub(crate) struct CommentableCache {
     pub review: ReviewId,
     pub base_sha: String,
     pub head_sha: String,
+    /// `base_sha` is still the platform's stand-in: the local clone lacked
+    /// a commit when last asked, and may have it after a fetch.
+    pub base_approximate: bool,
     /// The head and base the review was stored at when read (the cache key):
     /// a retarget leaves the head alone but changes the diff.
     pub stored_head: String,
