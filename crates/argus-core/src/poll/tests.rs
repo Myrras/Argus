@@ -630,6 +630,67 @@ fn quitting_does_not_wait_for_a_refresh_under_way() {
 }
 
 #[test]
+fn two_quick_saves_leave_the_poll_on_the_last_ones_providers() {
+    let a = Arc::new(Fake::new(ProviderId::Github, "a.example.test"));
+    let b = Arc::new(Fake::new(ProviderId::Github, "b.example.test"));
+    let mut core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&a)),
+    );
+    let (fa, fb) = (a.clone(), b.clone());
+    core.build_providers = Box::new(move |s: &crate::Settings| {
+        let f = if s.github.host == "b.example.test" {
+            &fb
+        } else {
+            &fa
+        };
+        vec![f.clone() as Arc<dyn ReviewProvider>]
+    });
+    let core = Arc::new(core);
+    core.start_polling(|_| {});
+    let save = |host: &str| {
+        let mut s = core.settings();
+        s.github.host = host.into();
+        s
+    };
+    let (first, second) = (save("a.example.test"), save("b.example.test"));
+    // The first save has read its providers for the new loop and not yet
+    // put the loop in place when the second one comes in. The second is
+    // given a moment to finish; serialized, it waits for the first instead.
+    let (done_tx, done_rx) = mpsc::channel();
+    let later = core.clone();
+    let handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+    let slot = handle.clone();
+    crate::AFTER_PROVIDERS_READ.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            *slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                later.update_settings(second).unwrap();
+                let _ = done_tx.send(());
+            }));
+            let _ = done_rx.recv_timeout(Duration::from_millis(300));
+        }));
+    });
+    core.update_settings(first).unwrap();
+    let second_save = handle.lock().unwrap().take().expect("the second save ran");
+    second_save.join().unwrap();
+
+    assert_eq!(core.settings().github.host, "b.example.test");
+    let hosts: Vec<String> = core
+        .poller
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("polling")
+        .0
+        .providers
+        .iter()
+        .map(|p| p.host().to_string())
+        .collect();
+    assert_eq!(hosts, ["b.example.test"]);
+    core.shutdown();
+}
+
+#[test]
 fn saving_settings_does_not_wait_for_a_refresh_under_way() {
     let gh = github();
     gh.serve(detail_n(12, "h1"), vec![]);

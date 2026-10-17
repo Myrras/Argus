@@ -398,6 +398,9 @@ pub struct Poller {
     /// Set on stop: a refresh still under way then ends without reporting.
     stopped: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    /// The providers the loop refreshes (tests: which ones it got).
+    #[cfg(test)]
+    pub(crate) providers: Vec<Arc<dyn ReviewProvider>>,
 }
 
 impl Poller {
@@ -416,6 +419,8 @@ impl Poller {
         let (tx, rx) = mpsc::channel();
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = stopped.clone();
+        #[cfg(test)]
+        let polled = providers.clone();
         let handle = std::thread::Builder::new()
             .name("argus-poll".into())
             .spawn(move || loop {
@@ -445,6 +450,8 @@ impl Poller {
             tx,
             stopped,
             handle: Some(handle),
+            #[cfg(test)]
+            providers: polled,
         }
     }
 

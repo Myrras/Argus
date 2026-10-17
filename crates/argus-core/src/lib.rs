@@ -78,6 +78,10 @@ pub const POLL_STOP_GRACE: std::time::Duration = std::time::Duration::from_milli
 /// What [`Core::start_polling`] calls after every refresh.
 pub type RefreshCallback = Arc<dyn Fn(&RefreshReport) + Send + Sync>;
 
+/// How a core turns settings into providers ([`provider::from_settings`];
+/// tests swap in their own).
+type ProviderBuilder = Box<dyn Fn(&Settings) -> Vec<Arc<dyn ReviewProvider>> + Send + Sync>;
+
 /// The application's single entry point.
 ///
 /// Cheap to share: hold it behind an `Arc` in the shell and clone the handle
@@ -94,7 +98,12 @@ pub struct Core {
     settings_path: Option<PathBuf>,
     settings: Mutex<Settings>,
     providers: Mutex<Vec<Arc<dyn ReviewProvider>>>,
+    /// What a settings save builds its providers with.
+    build_providers: ProviderBuilder,
     poller: Mutex<Option<(poll::Poller, RefreshCallback)>>,
+    /// Held by a settings save and a poll start from reading the providers
+    /// to putting the loop in place (see [`update_settings`](Self::update_settings)).
+    settings_update: Mutex<()>,
     /// Per review: the head its content keys were read at, and the keys
     /// (path → content sha) — what a viewed mark is stored with. Memory
     /// only; refetched when the head moved.
@@ -161,7 +170,9 @@ impl Core {
             settings_path,
             settings: Mutex::new(settings),
             providers: Mutex::new(providers),
+            build_providers: Box::new(provider::from_settings),
             poller: Mutex::new(None),
+            settings_update: Mutex::new(()),
             content_keys: Mutex::new(HashMap::new()),
             commentable: Mutex::new(None),
             ai,
@@ -185,8 +196,18 @@ impl Core {
 
     /// Validate, persist and apply new settings; returns what was stored.
     /// The providers are rebuilt and a running poll loop restarts with them.
+    ///
+    /// Saves run one at a time, from writing the file to putting the new
+    /// loop in place: two quick saves interleaved could otherwise store one
+    /// save's settings and leave the loop on the other's providers (one
+    /// reads the providers for its new loop, the other swaps them and finds
+    /// no loop to restart, then the first puts its stale loop in place).
     pub fn update_settings(&self, settings: Settings) -> CoreResult<Settings> {
         let settings = settings.validated()?;
+        let one_at_a_time = self
+            .settings_update
+            .lock()
+            .expect("settings update lock poisoned");
         if let Some(path) = &self.settings_path {
             settings.save(path)?;
         }
@@ -194,18 +215,22 @@ impl Core {
         self.ai.set_enabled(settings.ai.enabled);
         self.ai.set_adapter(&settings.ai.adapter);
         *self.providers.lock().expect("providers lock poisoned") =
-            provider::from_settings(&settings);
+            (self.build_providers)(&settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();
-        if let Some((poller, callback)) = running {
-            // The old loop is told to stop, not waited for: a refresh it has
-            // on the network (up to a minute) would hold up the save. It
-            // ends on its own and reports nothing; the new loop's first
-            // refresh queues behind it on the refresh lock.
-            poller.request_stop();
-            self.start_polling_with(callback);
-            if !poller.stop_within(POLL_STOP_GRACE) {
-                tracing::debug!("a refresh was still under way when the settings changed");
-            }
+        let Some((poller, callback)) = running else {
+            return Ok(settings);
+        };
+        // The old loop is told to stop, not waited for: a refresh it has on
+        // the network (up to a minute) would hold up the save. It ends on
+        // its own and reports nothing; the new loop's first refresh queues
+        // behind it on the refresh lock.
+        poller.request_stop();
+        self.start_polling_with(callback);
+        // The next save may go ahead while this one gives the old loop its
+        // grace.
+        drop(one_at_a_time);
+        if !poller.stop_within(POLL_STOP_GRACE) {
+            tracing::debug!("a refresh was still under way when the settings changed");
         }
         Ok(settings)
     }
@@ -377,12 +402,22 @@ impl Core {
     /// a running one). `on_refresh` runs on the poll thread after every
     /// refresh.
     pub fn start_polling(&self, on_refresh: impl Fn(&RefreshReport) + Send + Sync + 'static) {
+        // Like a save: a save swapping the providers in between this start
+        // reading them and putting its loop in place would leave it stale.
+        let _one_at_a_time = self
+            .settings_update
+            .lock()
+            .expect("settings update lock poisoned");
         self.start_polling_with(Arc::new(on_refresh));
     }
 
+    /// Start a loop over the current providers. Callers hold
+    /// `settings_update`.
     fn start_polling_with(&self, callback: RefreshCallback) {
         self.stop_polling();
         let providers = self.providers();
+        #[cfg(test)]
+        AFTER_PROVIDERS_READ.with(|h| h.borrow_mut().take().map(|f| f()));
         let interval = self.settings().poll_interval();
         let mut slot = self.poller.lock().expect("poller lock poisoned");
         // Checked under the lock `shutdown` sets it under: a start racing a
@@ -440,6 +475,15 @@ impl Core {
             p.refresh_now();
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run once inside `start_polling_with` right after it read the
+    /// providers for the new loop (tests only): where another settings save
+    /// would come in.
+    pub(crate) static AFTER_PROVIDERS_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Replace a stand-in left side ([`provider::FileDiff::base_approximate`])
