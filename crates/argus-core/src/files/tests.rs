@@ -100,6 +100,7 @@ fn viewed_marks_persist_and_reset_when_the_file_changes() {
     let (core, fake, id) = setup();
     let files = core.list_files(id, false).unwrap();
     assert_eq!(files.base_sha, "mergebase");
+    assert_eq!(files.review_base_sha, "mergebase");
     assert_eq!(files.head_sha, "h1");
     assert!(!files.since_last_review);
     assert!(viewed(&files).is_empty());
@@ -150,6 +151,13 @@ fn since_last_review_diffs_from_the_watermark_with_the_review_keys() {
     let files = core.list_files(id, true).unwrap();
     assert!(files.since_last_review);
     assert_eq!(files.base_sha, "h1");
+    // Comments still go on the review's own diff: its left side, not the
+    // compare's, is what the commentable lines are read against.
+    assert_eq!(files.review_base_sha, "mergebase");
+    assert_eq!(
+        core.commentable_lines(id, "b.rs").unwrap().base_sha,
+        files.review_base_sha
+    );
     assert_eq!(files.files.len(), 1);
     assert_eq!(viewed(&files), ["b.rs"]);
     let asked = fake.asked.lock().unwrap().clone();

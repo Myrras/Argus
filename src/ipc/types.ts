@@ -168,6 +168,13 @@ export interface ReviewFiles {
    * line up, so they take no comments.
    */
   baseApproximate: boolean;
+  /**
+   * The left side of the review's own diff (the local clone's merge base
+   * when it replaced a stand-in): what `commentable_lines` reports, since
+   * comments always go on that diff. Equals `baseSha` unless
+   * `sinceLastReview`, where `baseSha` is the compare's left side.
+   */
+  reviewBaseSha: string;
   files: FileEntry[];
 }
 

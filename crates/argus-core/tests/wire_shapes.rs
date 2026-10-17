@@ -315,6 +315,7 @@ fn current() -> Value {
         since_last_review: false,
         truncated: false,
         base_approximate: false,
+        review_base_sha: "b0".into(),
         files: vec![FileEntry {
             file: ChangedFile {
                 path: "src/cache.rs".into(),

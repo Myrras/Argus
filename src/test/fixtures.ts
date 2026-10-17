@@ -99,13 +99,16 @@ export function file(overrides: Partial<FileEntry> = {}): FileEntry {
 }
 
 export function reviewFiles(overrides: Partial<ReviewFiles> = {}): ReviewFiles {
+  const baseSha = overrides.baseSha ?? "b".repeat(40);
   return {
     reviewId: uuid(1),
-    baseSha: "b".repeat(40),
+    baseSha,
     headSha: "a".repeat(40),
     sinceLastReview: false,
     truncated: false,
     baseApproximate: false,
+    // Outside since mode the diff shown is the review's own.
+    reviewBaseSha: baseSha,
     files: [file()],
     ...overrides,
   };

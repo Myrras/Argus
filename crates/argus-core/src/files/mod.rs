@@ -42,6 +42,11 @@ pub struct ReviewFiles {
     /// patches are relative to (see [`FileDiff::base_approximate`]): the
     /// old side may not line up, so it takes no comments.
     pub base_approximate: bool,
+    /// The left side of the review's own diff (after the local clone's
+    /// merge base replaced a stand-in): what `commentable_lines` reports,
+    /// since comments always go on that diff. Equals `base_sha` unless
+    /// `since_last_review`, where `base_sha` is the compare's left side.
+    pub review_base_sha: String,
     pub files: Vec<FileEntry>,
 }
 
@@ -77,19 +82,24 @@ pub(crate) fn since_range(record: &ReviewRecord) -> CoreResult<DiffRange> {
     }
 }
 
+/// What [`fetch`] read: the diff shown, the content keys and, in since
+/// mode, the review's own diff with its files dropped (only its sides are
+/// needed: comments go on it). `None` when the diff shown is that diff.
+pub(crate) type Fetched = (FileDiff, ContentKeys, Option<FileDiff>);
+
 /// Fetch what `list_files` shows and the review's content keys. In since
 /// mode both diffs are fetched at once: the compare for the files, the
-/// review's own for the keys.
+/// review's own for the keys and its left side.
 pub(crate) fn fetch(
     provider: &dyn ReviewProvider,
     record: &ReviewRecord,
     since_last_review: bool,
-) -> CoreResult<(FileDiff, ContentKeys)> {
+) -> CoreResult<Fetched> {
     let own = review_range(record);
     if !since_last_review {
         let diff = provider.fetch_files(&record.review, &own)?;
         let keys = content_keys(&diff);
-        return Ok((diff, keys));
+        return Ok((diff, keys, None));
     }
     let since = since_range(record)?;
     let (compare, review) = std::thread::scope(|s| {
@@ -98,14 +108,16 @@ pub(crate) fn fetch(
         (join(a), join(b))
     });
     let compare = compare?;
-    let mut keys = content_keys(&review?);
+    let mut review = review?;
+    let mut keys = content_keys(&review);
     // A file the compare has but the review's diff does not (it changed and
     // changed back) is keyed by the compare's own sha.
     for f in &compare.files {
         keys.entry(f.path.clone())
             .or_insert_with(|| f.content_sha.clone());
     }
-    Ok((compare, keys))
+    review.files.clear();
+    Ok((compare, keys, Some(review)))
 }
 
 fn join<T>(h: std::thread::ScopedJoinHandle<'_, CoreResult<T>>) -> CoreResult<T> {
@@ -117,6 +129,7 @@ fn join<T>(h: std::thread::ScopedJoinHandle<'_, CoreResult<T>>) -> CoreResult<T>
 pub(crate) fn assemble(
     id: ReviewId,
     diff: FileDiff,
+    review_base_sha: String,
     keys: &ContentKeys,
     marks: &HashMap<String, String>,
     since_last_review: bool,
@@ -129,6 +142,7 @@ pub(crate) fn assemble(
         since_last_review,
         truncated: diff.truncated,
         base_approximate: diff.base_approximate,
+        review_base_sha,
         files: diff
             .files
             .into_iter()

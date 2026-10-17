@@ -336,10 +336,19 @@ impl Core {
     pub fn list_files(&self, id: ReviewId, since_last_review: bool) -> CoreResult<ReviewFiles> {
         let record = self.review(id)?;
         let provider = self.provider_for(&record)?;
-        let (mut diff, keys) = files::fetch(provider.as_ref(), &record, since_last_review)?;
+        let (mut diff, keys, own) = files::fetch(provider.as_ref(), &record, since_last_review)?;
         self.exact_base(&record, &mut diff);
+        // The left side comments go on, resolved the same way
+        // `commentable_lines` resolves it.
+        let review_base_sha = match own {
+            Some(mut own) => {
+                self.exact_base(&record, &mut own);
+                own.base_sha
+            }
+            None => diff.base_sha.clone(),
+        };
         let marks = self.store.viewed(id)?;
-        let out = files::assemble(id, diff, &keys, &marks, since_last_review);
+        let out = files::assemble(id, diff, review_base_sha, &keys, &marks, since_last_review);
         self.remember_keys(id, &record.head_sha, keys);
         Ok(out)
     }

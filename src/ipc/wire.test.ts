@@ -153,6 +153,7 @@ const files: ReviewFiles = {
   sinceLastReview: false,
   truncated: false,
   baseApproximate: false,
+  reviewBaseSha: "b0",
   files: [
     {
       path: "src/cache.rs",

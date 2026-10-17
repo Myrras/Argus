@@ -244,6 +244,7 @@
       "files[].tooLarge",
       "files[].viewed",
       "headSha",
+      "reviewBaseSha",
       "reviewId",
       "sinceLastReview",
       "truncated"
