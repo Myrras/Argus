@@ -125,26 +125,38 @@ pub fn url_host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-/// Trim and drop a trailing slash; `None` when not an https URL, or a
-/// plain http one off this machine: every request carries the token in a
-/// header, which plain http sends in cleartext. Local http (`localhost`,
-/// `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own machine.
+/// Trim, parse and drop a trailing slash; `None` when not an https URL,
+/// or a plain http one off this machine: every request carries the token
+/// in a header, which plain http sends in cleartext. Local http
+/// (`localhost`, `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own
+/// machine.
+///
+/// The host is the parsed one, what a request really connects to: in
+/// `http://127.0.0.1:80@gitlab.example.test` the part before `@` is
+/// userinfo, not the host. Userinfo, a query or a fragment have no place in
+/// an instance URL and are refused; the URL comes back in its parsed form,
+/// so [`url_host`] reads the same host.
 pub fn normalize_base_url(url: &str) -> Option<String> {
-    let url = url.trim().trim_end_matches('/');
-    let host = url_host(url);
-    let ok = !host.is_empty()
-        && (url.starts_with("https://") || (url.starts_with("http://") && is_local(host)));
-    ok.then(|| url.to_string())
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    let host = parsed.host_str().filter(|h| !h.is_empty())?;
+    let ok = match parsed.scheme() {
+        "https" => true,
+        "http" => is_local(host),
+        _ => false,
+    };
+    ok.then(|| parsed.as_str().trim_end_matches('/').to_string())
 }
 
-/// `host[:port]` names this machine.
+/// A parsed host (no port; IPv6 in brackets) names this machine.
 fn is_local(host: &str) -> bool {
-    let name = match host.strip_prefix('[') {
-        // `[::1]:8080`
-        Some(rest) => rest.split_once(']').map_or(rest, |(h, _)| h),
-        None => host.split_once(':').map_or(host, |(h, _)| h),
-    };
-    name.eq_ignore_ascii_case("localhost") || name == "127.0.0.1" || name == "::1"
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
 }
 
 /// The longest one request may take, start to end of body.
@@ -1462,6 +1474,36 @@ mod tests {
             GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_err()
         );
         assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
+    }
+
+    #[test]
+    fn userinfo_never_passes_for_a_local_host() {
+        // The part before `@` is userinfo: the host is gitlab.example.test,
+        // over plain http, so the token would go out in cleartext.
+        for url in [
+            "http://127.0.0.1:80@gitlab.example.test",
+            "http://localhost@gitlab.example.test",
+            "http://[::1]@gitlab.example.test",
+            "http://[::1]:80@gitlab.example.test/api",
+            "http://localhost:x@gitlab.example.test",
+            // Userinfo has no place in the instance URL at all.
+            "https://someone@gitlab.example.test",
+            "http://someone@localhost:8080",
+            // Not a URL a GitLab can be at.
+            "http://localhost:99999",
+            "https://",
+        ] {
+            assert_eq!(normalize_base_url(url), None, "{url}");
+        }
+        for (url, host) in [
+            ("http://localhost:8080/", "localhost:8080"),
+            ("http://127.0.0.1:3000", "127.0.0.1:3000"),
+            ("http://[::1]:8080", "[::1]:8080"),
+            ("https://gitlab.example.test/sub", "gitlab.example.test"),
+        ] {
+            let ok = normalize_base_url(url).unwrap_or_else(|| panic!("{url}"));
+            assert_eq!(url_host(&ok), host);
+        }
     }
 
     #[test]
