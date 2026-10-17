@@ -405,7 +405,13 @@ fn platform_repo(fx: &Fixture) -> Vec<String> {
 }
 
 fn platform(fx: &Fixture, shas: &[String]) -> Arc<Platform> {
+    platform_on(fx, shas, "base")
+}
+
+/// [`platform`] with `base` as the review's base branch commit.
+fn platform_on(fx: &Fixture, shas: &[String], base: &str) -> Arc<Platform> {
     let mut d = detail(shas.last().unwrap());
+    d.base_sha = base.into();
     d.commits = shas
         .iter()
         .enumerate()
@@ -678,6 +684,34 @@ fn a_pr_without_a_merge_base_gets_it_from_the_clone() {
     let files = core.list_files(id, false).unwrap();
     assert_eq!(files.base_sha, tip);
     assert!(files.base_approximate);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn an_exact_left_side_is_never_replaced_by_the_clone() {
+    // The platform computed the left side itself: the clone's view (here
+    // another merge base than the one served) never overrides it.
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    fx.commit("src/cache.rs", &file_of(10), "c1");
+    git_in(&fx.path, &["checkout", "-q", "-b", "feature"]);
+    let head = fx.commit("src/cache.rs", &file_of(12), "feature");
+    git_in(&fx.path, &["checkout", "-q", "main"]);
+    let tip = fx.commit("src/other.rs", "x\n", "main moves on");
+    let p = platform_on(&fx, std::slice::from_ref(&head), &tip);
+    *p.files.lock().unwrap() = Some(FileDiff {
+        base_sha: tip.clone(),
+        head_sha: head.clone(),
+        files: Vec::new(),
+        truncated: false,
+        base_approximate: false,
+    });
+    let core = core_with(&p, &fx.path);
+    let id = core.reviews().unwrap()[0].id;
+    let files = core.list_files(id, false).unwrap();
+    assert_eq!(files.base_sha, tip);
+    assert!(!files.base_approximate);
 }
 
 #[test]
