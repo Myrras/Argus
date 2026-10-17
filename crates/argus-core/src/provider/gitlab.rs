@@ -56,6 +56,12 @@ const LIST_PARALLELISM: usize = 4;
 /// list before it is read again (it may have been reopened).
 const FINAL_RECHECK: chrono::Duration = chrono::Duration::days(1);
 
+/// How many polls in a row a commented-on MR whose read fails stays listed
+/// as last seen: a blip costs it nothing, a read that keeps failing (a
+/// permanent error on that MR) drops it instead of keeping it for as long
+/// as its comment event stays in the feed.
+const COMMENTED_FAILURES_KEPT: u32 = 3;
+
 /// How far back the user's own comment events are read to find MRs they
 /// commented on.
 const COMMENTED_DAYS: i64 = 30;
@@ -262,9 +268,10 @@ pub struct GitlabProvider {
     /// reads them once more in case one was reopened. Memory only.
     done: Mutex<HashMap<(u64, u64), DateTime<Utc>>>,
     final_recheck: chrono::Duration,
-    /// The last successful read of each commented-on open MR: what the list
-    /// shows when a read fails once (see `list_reviews`). Memory only.
-    commented: Mutex<HashMap<(u64, u64), ReviewRef>>,
+    /// The last successful read of each commented-on open MR and how many
+    /// reads failed since: what the list shows while a read fails (see
+    /// `list_reviews`). Memory only.
+    commented: Mutex<HashMap<(u64, u64), (ReviewRef, u32)>>,
 }
 
 impl GitlabProvider {
@@ -651,16 +658,19 @@ impl ReviewProvider for GitlabProvider {
                     continue;
                 }
                 // One MR failing never costs the rest of the list, nor
-                // that MR its place in it; the next poll tries it again.
+                // that MR its place in it for a few polls; the next poll
+                // tries it again.
                 Err(e) => {
                     tracing::debug!("commented MR {project}!{iid} unreadable: {e}");
-                    let last = self
-                        .commented
-                        .lock()
-                        .expect("commented lock poisoned")
-                        .get(&(project, iid))
-                        .cloned();
-                    list.extend(last);
+                    let mut commented = self.commented.lock().expect("commented lock poisoned");
+                    if let Some((last, failures)) = commented.get_mut(&(project, iid)) {
+                        *failures += 1;
+                        if *failures <= COMMENTED_FAILURES_KEPT {
+                            list.push(last.clone());
+                        } else {
+                            commented.remove(&(project, iid));
+                        }
+                    }
                     continue;
                 }
             };
@@ -679,7 +689,7 @@ impl ReviewProvider for GitlabProvider {
                 self.commented
                     .lock()
                     .expect("commented lock poisoned")
-                    .insert((project, iid), r.clone());
+                    .insert((project, iid), (r.clone(), 0));
                 list.push(r);
             }
         }

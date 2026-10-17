@@ -1065,3 +1065,32 @@ fn a_commented_mr_failing_once_stays_listed() {
     let second = gl.list_reviews().unwrap();
     assert_eq!(second.iter().find(|r| r.number == 5), Some(&five));
 }
+
+#[test]
+fn a_commented_mr_that_keeps_failing_drops_off_the_list() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // A read that fails every poll (a permanent 500 on that MR) keeps it
+    // listed as last seen for a few polls only, not for the whole 30 days
+    // its comment event stays in the feed.
+    let failing = Arc::new(AtomicBool::new(false));
+    let flag = failing.clone();
+    let (base, _) = serve_raw(move |path, _| {
+        if path == "/api/v4/projects/200/merge_requests/5" && flag.load(Ordering::SeqCst) {
+            return status("500 Internal Server Error");
+        }
+        fixture_routes(path)
+    });
+    let gl = provider(&base);
+    let listed = |gl: &GitlabProvider| gl.list_reviews().unwrap().iter().any(|r| r.number == 5);
+    assert!(listed(&gl));
+    failing.store(true, Ordering::SeqCst);
+    for poll in 1..=3 {
+        assert!(listed(&gl), "failing poll {poll}");
+    }
+    assert!(!listed(&gl), "still listed after 4 failing polls");
+    // Readable again: listed again, and the count starts over.
+    failing.store(false, Ordering::SeqCst);
+    assert!(listed(&gl));
+    failing.store(true, Ordering::SeqCst);
+    assert!(listed(&gl));
+}
