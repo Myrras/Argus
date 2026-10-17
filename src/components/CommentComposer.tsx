@@ -28,6 +28,8 @@ export interface ComposerAction {
   busyLabel?: string;
   onClick: () => void;
   title?: string;
+  /** Not available right now (the button greys out, ⌘↩ does nothing). */
+  disabled?: boolean;
 }
 
 export function CommentComposer({
@@ -97,7 +99,7 @@ export function CommentComposer({
     if (map.submitComment.some((b) => matches(e, b))) {
       e.preventDefault();
       e.stopPropagation();
-      if (!busy && !empty) primary.onClick();
+      if (!busy && !empty && !primary.disabled) primary.onClick();
     }
   };
 
@@ -181,7 +183,7 @@ export function CommentComposer({
         <button
           type="button"
           className="primary"
-          disabled={busy || empty}
+          disabled={busy || empty || primary.disabled}
           title={primary.title}
           onClick={primary.onClick}
         >

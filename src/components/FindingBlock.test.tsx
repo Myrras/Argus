@@ -259,6 +259,23 @@ describe("findings in the code view", () => {
     expect(within(block).getByRole("checkbox")).toBeChecked();
   });
 
+  it("cannot Save edit while Post selected runs", async () => {
+    renderCard();
+    const id = findings[0].id;
+    useAiStore.setState({
+      ui: {
+        [id]: { selected: true, edit: null, editor: "Rewrite", error: null },
+      },
+      posting: { [ID]: true },
+    });
+    const block = await screen.findByRole("article", {
+      name: "AI finding: Unbounded cache",
+    });
+    expect(
+      within(block).getByRole("button", { name: "Save edit" }),
+    ).toBeDisabled();
+  });
+
   it("are absent with the AI pass off", async () => {
     seed(false);
     renderCard();

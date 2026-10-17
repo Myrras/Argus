@@ -26,6 +26,9 @@ export function InlineComposer({ onResize }: { onResize?: () => void }) {
   const close = useCommentStore((s) => s.closeComposer);
   const save = useCommentStore((s) => s.saveComposer);
   const commentNow = useCommentStore((s) => s.commentNow);
+  // A draft's Save waits while its review posts: the draft may be on its
+  // way with its old text.
+  const posting = useCommentStore((s) => (c ? !!s.posting[c.reviewId] : false));
   if (!c) return null;
   const where = rangeLabel(c.side, c);
   return (
@@ -43,7 +46,12 @@ export function InlineComposer({ onResize }: { onResize?: () => void }) {
         focusKey={FOCUS.composer}
         primary={
           c.draftId
-            ? { label: "Save", onClick: save }
+            ? {
+                label: "Save",
+                onClick: save,
+                disabled: posting,
+                title: posting ? "Wait for the post to finish" : undefined,
+              }
             : {
                 label: "Add to review",
                 title:

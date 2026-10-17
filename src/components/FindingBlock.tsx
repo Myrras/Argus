@@ -174,8 +174,11 @@ export function FindingBlock({
             focusKey={FOCUS.finding(f.id)}
             primary={{
               label: "Save edit",
-              title: "Keep this text for posting; nothing is posted yet",
+              title: posting
+                ? "Wait for the post to finish"
+                : "Keep this text for posting; nothing is posted yet",
               onClick: () => saveEditor(f),
+              disabled: posting,
             }}
             secondary={
               ui.edit !== null

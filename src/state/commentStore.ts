@@ -11,9 +11,12 @@
  * real thread through `review:changed` (the shell emits it after a write).
  *
  * What posts is what the user sees: "Post all" with a draft's edit open
- * posts the edit's text (an emptied edit is left out). Cancel (or Esc) on a
- * composer or reply with text keeps it recoverable: the toast's Undo brings
- * it back.
+ * posts the edit's text (an emptied edit is left out, with a notice). The
+ * edit's text reaches the stored draft only by Save, so a refused post
+ * keeps the draft's own text. While a review posts, Save on one of its
+ * drafts' edits waits; a posted draft whose stored text changed meanwhile
+ * stays as a new draft. Cancel (or Esc) on a composer or reply with text
+ * keeps it recoverable: the toast's Undo brings it back.
  *
  * Also caches each file's commentable lines (`commentable_lines`) per
  * (review, head, path), like the file contents.
@@ -242,6 +245,35 @@ function asPostError(e: unknown): PostError {
 const plural = (n: number, one: string, many = `${one}s`) =>
   `${n} ${n === 1 ? one : many}`;
 
+/** The open composer when it edits one of `reviewId`'s drafts. */
+function editOf(
+  s: Pick<CommentState, "composer">,
+  reviewId: ReviewId,
+): (Composer & { draftId: string }) | null {
+  const c = s.composer;
+  return c && c.reviewId === reviewId && c.draftId && !c.busy
+    ? (c as Composer & { draftId: string })
+    : null;
+}
+
+/**
+ * What "Post all" sends for the review: each draft as the user sees it, an
+ * open edit's text in place of its draft's, and a draft whose open edit was
+ * emptied left out.
+ */
+export function postableDrafts(
+  s: Pick<CommentState, "drafts" | "composer">,
+  reviewId: ReviewId,
+): Draft[] {
+  const list = s.drafts[reviewId] ?? [];
+  const edit = editOf(s, reviewId);
+  if (!edit) return list;
+  return list.flatMap((d) => {
+    if (d.id !== edit.draftId) return [d];
+    return edit.body.trim() === "" ? [] : [{ ...d, body: edit.body }];
+  });
+}
+
 // -- Store ----------------------------------------------------------------------
 
 export const useCommentStore = create<CommentState>((set, get) => {
@@ -268,6 +300,9 @@ export const useCommentStore = create<CommentState>((set, get) => {
   /** Post `drafts` (in order); apply each result; returns the counts. */
   const post = async (reviewId: ReviewId, drafts: Draft[]) => {
     const ids = drafts.map((d) => d.id);
+    // The stored text at send time: a posted draft whose text changed since
+    // was not posted with that text, so it stays.
+    const storedBody = new Map(draftsOf(reviewId).map((d) => [d.id, d.body]));
     set((s) => ({ posting: { ...s.posting, [reviewId]: true } }));
     try {
       const results = await postComments(reviewId, drafts.map(toNewComment));
@@ -280,14 +315,28 @@ export const useCommentStore = create<CommentState>((set, get) => {
         else failed.set(id, { kind: r.kind, message: r.message });
       });
       // By id: a draft edited or deleted meanwhile keeps that change.
-      setDrafts(
-        reviewId,
-        draftsOf(reviewId)
-          .filter((d) => !posted.has(d.id))
-          .map((d) =>
-            failed.has(d.id) ? { ...d, error: failed.get(d.id)! } : d,
-          ),
-      );
+      const renamed = new Map<string, string>();
+      const next = draftsOf(reviewId).flatMap((d): Draft[] => {
+        if (failed.has(d.id)) return [{ ...d, error: failed.get(d.id)! }];
+        if (!posted.has(d.id)) return [d];
+        if (d.body === storedBody.get(d.id)) return [];
+        const id = draftId();
+        renamed.set(d.id, id);
+        return [{ ...d, id, error: null }];
+      });
+      setDrafts(reviewId, next);
+      if (renamed.size > 0) {
+        // An edit still open on one follows it to its new id.
+        const c = get().composer;
+        const to = c?.draftId ? renamed.get(c.draftId) : undefined;
+        if (to) patchComposer({ draftId: to });
+        toastInfo(
+          renamed.size === 1
+            ? "Saved as a new pending comment"
+            : `Saved ${renamed.size} as new pending comments`,
+          "Their text changed while posting; the earlier text was posted.",
+        );
+      }
       return { posted: posted.size, failed: failed.size, error: null };
     } catch (e) {
       // Nothing was tried: every draft stays as it was.
@@ -402,7 +451,14 @@ export const useCommentStore = create<CommentState>((set, get) => {
       const c = get().composer;
       if (!c || c.busy || c.body.trim() === "") return;
       const list = draftsOf(c.reviewId);
-      if (c.draftId && list.some((d) => d.id === c.draftId)) {
+      const own = !!c.draftId && list.some((d) => d.id === c.draftId);
+      if (own && get().posting[c.reviewId]) {
+        // The draft may be on its way with its old text; saving now would
+        // land in a draft about to be dropped. The text stays here.
+        toastInfo("Wait for the post to finish", "Then save; your text stays.");
+        return;
+      }
+      if (own) {
         setDrafts(
           c.reviewId,
           list.map((d) =>
@@ -498,24 +554,21 @@ export const useCommentStore = create<CommentState>((set, get) => {
 
     postAll: async (reviewId) => {
       if (get().posting[reviewId]) return;
-      // A draft's open edit is what the user sees of it: post that text, or
-      // leave the draft out when the edit was emptied.
-      const c = get().composer;
-      const editing =
-        c && c.reviewId === reviewId && c.draftId && !c.busy ? c : null;
-      if (editing && editing.body.trim() !== "") {
-        setDrafts(
-          reviewId,
-          draftsOf(reviewId).map((d) =>
-            d.id === editing.draftId
-              ? { ...d, body: editing.body, error: null }
-              : d,
-          ),
+      // A draft's open edit is what the user sees of it: post that text
+      // (the stored draft keeps its own until it posts), or leave the draft
+      // out when the edit was emptied.
+      const editing = editOf(get(), reviewId);
+      const drafts = postableDrafts(get(), reviewId);
+      if (
+        editing &&
+        editing.body.trim() === "" &&
+        draftsOf(reviewId).some((d) => d.id === editing.draftId)
+      ) {
+        toastInfo(
+          "1 comment with empty text not posted",
+          "Write something in its edit or cancel it.",
         );
       }
-      const drafts = draftsOf(reviewId).filter(
-        (d) => !(editing?.draftId === d.id && editing.body.trim() === ""),
-      );
       if (drafts.length === 0) return;
       const r = await post(reviewId, drafts);
       // The edit it posted is done with; text typed into it meanwhile stays
@@ -633,6 +686,11 @@ export const useCommentStore = create<CommentState>((set, get) => {
 const NO_DRAFTS: Draft[] = [];
 export function useDrafts(reviewId: ReviewId): Draft[] {
   return useCommentStore((s) => s.drafts[reviewId] ?? NO_DRAFTS);
+}
+
+/** How many comments "Post all" would send now (`postableDrafts`). */
+export function usePostableCount(reviewId: ReviewId): number {
+  return useCommentStore((s) => postableDrafts(s, reviewId).length);
 }
 
 // -- Commentable lines ------------------------------------------------------

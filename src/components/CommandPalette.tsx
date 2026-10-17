@@ -36,7 +36,11 @@ import { PROVIDER_LABEL, STATUS_LABEL, TABS, reviewRef } from "../lib/reviews";
 import { runShortcut } from "../lib/useAppShortcuts";
 import { useKeymap } from "../lib/useKeymap";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
-import { useCommentStore, useDrafts } from "../state/commentStore";
+import {
+  useCommentStore,
+  useDrafts,
+  usePostableCount,
+} from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
@@ -66,7 +70,7 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
   const order = useCodeViewStore((s) =>
     review ? s.byReview[review.id]?.order : undefined,
   );
-  const drafts = useDrafts(review?.id ?? "");
+  const postable = usePostableCount(review?.id ?? "");
   const posting = useCommentStore((s) =>
     review ? !!s.posting[review.id] : false,
   );
@@ -113,12 +117,12 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
           run: () => ask({ kind: "approve", reviewId: id }),
         });
       }
-      if (drafts.length > 0 && !posting) {
+      if (postable > 0 && !posting) {
         out.push({
           id: "review:postAll",
           section: "Commands",
           label: "Post all pending comments…",
-          detail: `${drafts.length} pending; asks first`,
+          detail: `${postable} pending; asks first`,
           run: () => ask({ kind: "postAll", reviewId: id }),
         });
       }
@@ -189,7 +193,7 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
       }
     }
     return out;
-  }, [keymap, reviews, review, order, drafts.length, posting, ask, setMode]);
+  }, [keymap, reviews, review, order, postable, posting, ask, setMode]);
 }
 
 function Highlighted({ text, indices }: { text: string; indices: number[] }) {
@@ -390,9 +394,9 @@ function PostAllModal({
   const review = useReviewStore((s) =>
     s.reviews.find((r) => r.id === reviewId),
   );
-  const drafts = useDrafts(reviewId);
+  // What Post all sends: an emptied edit's draft is left out.
+  const n = usePostableCount(reviewId);
   const postAll = useCommentStore((s) => s.postAll);
-  const n = drafts.length;
   return (
     <Modal
       open

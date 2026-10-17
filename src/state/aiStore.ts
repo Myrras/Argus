@@ -11,7 +11,9 @@
  * button: selecting, editing, dismissing, ticking the checklist and
  * overriding a verdict are local (the last three stored by Argus, never on
  * GitHub/GitLab). It posts what each finding shows: an open editor's text,
- * else the saved edit, else its own text.
+ * else the saved edit, else its own text. While a review posts, Save edit
+ * waits; text that changed meanwhile on a posted finding stays in its
+ * editor.
  *
  * With the AI pass off (`AiRunState.enabled` false) the core returns no
  * output and the UI shows none of it.
@@ -317,6 +319,12 @@ export const useAiStore = create<AiStoreState>((set, get) => {
     saveEditor: (f) => {
       const text = get().ui[f.id]?.editor;
       if (text == null || text.trim() === "") return;
+      if (get().posting[f.reviewId]) {
+        // The finding may be on its way with its old text; a saved edit
+        // would be wiped when it posts. The text stays in the editor.
+        toastInfo("Wait for the post to finish", "Then save; your text stays.");
+        return;
+      }
       // The default text unchanged is no edit.
       patchUi(f.id, {
         edit: text === defaultBody(f) ? null : text,
@@ -383,18 +391,23 @@ export const useAiStore = create<AiStoreState>((set, get) => {
         let posted = 0;
         let lastUrl: string | null = null;
         let failed = 0;
+        let keptEdits = 0;
         for (const r of results) {
           if (r.status === "posted") {
             posted += 1;
             lastUrl = r.postedUrl;
             // An editor opened (or changed) while it posted is not what was
-            // posted: it stays.
-            const sent = ui[r.findingId]?.editor ?? null;
-            const now = get().ui[r.findingId]?.editor ?? null;
-            patchUi(r.findingId, {
-              ...NO_UI,
-              editor: now === sent ? null : now,
-            });
+            // posted: it stays. So does a saved edit that changed: back in
+            // the editor, the only place a posted finding shows it.
+            const sent = ui[r.findingId];
+            const now = get().ui[r.findingId];
+            const openNow = now?.editor ?? null;
+            const editNow = now?.edit ?? null;
+            const openKept =
+              openNow !== (sent?.editor ?? null) ? openNow : null;
+            const editKept = editNow !== (sent?.edit ?? null) ? editNow : null;
+            if (openKept === null && editKept !== null) keptEdits += 1;
+            patchUi(r.findingId, { ...NO_UI, editor: openKept ?? editKept });
           } else {
             failed += 1;
             patchUi(r.findingId, {
@@ -402,6 +415,12 @@ export const useAiStore = create<AiStoreState>((set, get) => {
               error: { kind: r.kind, message: r.message },
             });
           }
+        }
+        if (keptEdits > 0) {
+          toastInfo(
+            "Your newer edit stays in its editor",
+            "The finding was posted with the text it had when you pressed Post selected.",
+          );
         }
         if (failed === 0) {
           const url = posted === 1 ? lastUrl : null;

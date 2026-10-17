@@ -66,3 +66,33 @@ describe("composer focus", () => {
     other.remove();
   });
 });
+
+describe("a draft's edit while its review posts", () => {
+  it("cannot Save until the post finishes", () => {
+    useCommentStore.setState({
+      drafts: {
+        [REVIEW]: [
+          {
+            id: "draft-fixture-1",
+            path: "src/cache.rs",
+            side: "new",
+            line: 4,
+            startLine: null,
+            body: "sent text",
+            headSha: "a".repeat(40),
+            baseSha: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            error: null,
+          },
+        ],
+      },
+    });
+    useCommentStore.getState().editDraft(REVIEW, "draft-fixture-1");
+    useCommentStore.setState({ posting: { [REVIEW]: true } });
+    const view = render(<InlineComposer />);
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    useCommentStore.setState({ posting: {} });
+    view.rerender(<InlineComposer />);
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+});

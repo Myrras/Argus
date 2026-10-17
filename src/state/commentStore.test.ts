@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { PostResult } from "../ipc/types";
 import {
+  postableDrafts,
   readStoredDrafts,
   useCommentStore,
   type CommentTarget,
@@ -321,6 +322,130 @@ describe("never posts text the user is not seeing", () => {
         .getState()
         .toasts.some((t) => t.message.includes("new pending comment")),
     ).toBe(true);
+  });
+
+  /** The next postComments call waits until `finish` is called. */
+  function holdPost() {
+    let finish: (v: PostResult[]) => void = () => {};
+    mockInvoke.mockImplementationOnce(
+      () => new Promise((r) => (finish = r as (v: PostResult[]) => void)),
+    );
+    return (v: PostResult[]) => finish(v);
+  }
+  const toasted = (text: string) =>
+    useToastStore.getState().toasts.some((t) => t.message.includes(text));
+
+  it("Save on a draft's edit waits while Post all runs; the newer text stays", async () => {
+    addDraft(3, "first");
+    const id = drafts()[0].id;
+    useCommentStore.getState().editDraft(REVIEW, id);
+    const finish = holdPost();
+    const p = useCommentStore.getState().postAll(REVIEW);
+    useCommentStore.getState().setComposerBody("first, and more");
+    useCommentStore.getState().saveComposer();
+    // Refused while posting: the composer keeps the text, the draft is
+    // what was sent.
+    expect(useCommentStore.getState().composer?.body).toBe("first, and more");
+    expect(drafts().map((d) => d.body)).toEqual(["first"]);
+    expect(toasted("post to finish")).toBe(true);
+    finish([posted(3)]);
+    await p;
+    expect(useCommentStore.getState().composer?.body).toBe("first, and more");
+    useCommentStore.getState().saveComposer();
+    expect(drafts().map((d) => d.body)).toEqual(["first, and more"]);
+    expect(drafts()[0].id).not.toBe(id);
+  });
+
+  it("an edit opened during Post all cannot Save into the draft being posted", async () => {
+    addDraft(3, "a");
+    const id = drafts()[0].id;
+    const finish = holdPost();
+    const p = useCommentStore.getState().postAll(REVIEW);
+    useCommentStore.getState().editDraft(REVIEW, id);
+    useCommentStore.getState().setComposerBody("a edited");
+    useCommentStore.getState().saveComposer();
+    finish([posted(3)]);
+    await p;
+    useCommentStore.getState().saveComposer();
+    expect(drafts().map((d) => d.body)).toEqual(["a edited"]);
+  });
+
+  it("a posted draft whose text changed meanwhile stays as a new draft", async () => {
+    addDraft(3, "sent text");
+    const id = drafts()[0].id;
+    const finish = holdPost();
+    const p = useCommentStore.getState().postAll(REVIEW);
+    // Changed by a path other than Save (belt and braces).
+    useCommentStore.setState((s) => ({
+      drafts: {
+        [REVIEW]: s.drafts[REVIEW].map((d) => ({ ...d, body: "newer text" })),
+      },
+    }));
+    finish([posted(3)]);
+    await p;
+    expect(drafts().map((d) => d.body)).toEqual(["newer text"]);
+    expect(drafts()[0].id).not.toBe(id);
+    expect(readStoredDrafts()[REVIEW].map((d) => d.body)).toEqual([
+      "newer text",
+    ]);
+    expect(toasted("new pending comment")).toBe(true);
+  });
+
+  it("a refused Post all keeps the draft's own text; the edit stays open", async () => {
+    addDraft(3, "original");
+    const id = drafts()[0].id;
+    useCommentStore.getState().editDraft(REVIEW, id);
+    useCommentStore.getState().setComposerBody("edited");
+    mockInvoke.mockResolvedValueOnce([
+      { status: "failed", kind: "postRejected", message: "Line gone." },
+    ]);
+    await useCommentStore.getState().postAll(REVIEW);
+    const [, args] = mockInvoke.mock.calls[0];
+    const sent = (args as { comments: { body: string }[] }).comments;
+    expect(sent.map((c) => c.body)).toEqual(["edited"]);
+    expect(drafts().map((d) => [d.body, d.error?.message])).toEqual([
+      ["original", "Line gone."],
+    ]);
+    expect(readStoredDrafts()[REVIEW][0].body).toBe("original");
+    expect(useCommentStore.getState().composer?.body).toBe("edited");
+    // Cancel: the original is still there.
+    useCommentStore.getState().closeComposer();
+    expect(drafts().map((d) => d.body)).toEqual(["original"]);
+  });
+
+  it("a rejected Post all keeps the draft's own text too", async () => {
+    addDraft(3, "original");
+    useCommentStore.getState().editDraft(REVIEW, drafts()[0].id);
+    useCommentStore.getState().setComposerBody("edited");
+    mockInvoke.mockRejectedValueOnce({ kind: "io", message: "Offline." });
+    await useCommentStore.getState().postAll(REVIEW);
+    expect(drafts().map((d) => d.body)).toEqual(["original"]);
+    expect(useCommentStore.getState().composer?.body).toBe("edited");
+  });
+
+  it("Post all with only an emptied edit says so and posts nothing", async () => {
+    addDraft(3, "keep me");
+    useCommentStore.getState().editDraft(REVIEW, drafts()[0].id);
+    useCommentStore.getState().setComposerBody("  ");
+    expect(postableDrafts(useCommentStore.getState(), REVIEW)).toHaveLength(0);
+    await useCommentStore.getState().postAll(REVIEW);
+    expect(mockInvoke).not.toHaveBeenCalled();
+    expect(toasted("1 comment with empty text not posted")).toBe(true);
+    expect(drafts().map((d) => d.body)).toEqual(["keep me"]);
+  });
+
+  it("Post all names the emptied edit it left out", async () => {
+    addDraft(3, "keep me");
+    addDraft(4, "post me");
+    useCommentStore.getState().editDraft(REVIEW, drafts()[0].id);
+    useCommentStore.getState().setComposerBody("");
+    expect(
+      postableDrafts(useCommentStore.getState(), REVIEW).map((d) => d.body),
+    ).toEqual(["post me"]);
+    mockInvoke.mockResolvedValueOnce([posted(4)]);
+    await useCommentStore.getState().postAll(REVIEW);
+    expect(toasted("1 comment with empty text not posted")).toBe(true);
+    expect(toasted("Posted 1 comment")).toBe(true);
   });
 
   it("Cancel keeps a written comment recoverable", () => {

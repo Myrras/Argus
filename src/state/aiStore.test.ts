@@ -347,6 +347,75 @@ describe("aiStore", () => {
     });
     expect(ui[low.id]).toMatchObject({ selected: true, editor: "  " });
   });
+  it("Save edit waits while Post selected runs; the newer text stays", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    useAiStore.getState().setSelected(low.id, true);
+    let finish: (v: FindingPostResult[]) => void = () => {};
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "post_findings"
+        ? new Promise((r) => (finish = r as typeof finish))
+        : backend(cmd, args)) as typeof invoke);
+    const p = useAiStore.getState().postSelected(ID);
+    useAiStore.getState().openEditor(low);
+    useAiStore.getState().setEditorText(low.id, "Second thoughts");
+    useAiStore.getState().saveEditor(low);
+    // Refused while posting: the editor keeps the text.
+    expect(useAiStore.getState().ui[low.id]).toMatchObject({
+      edit: null,
+      editor: "Second thoughts",
+    });
+    expect(
+      useToastStore
+        .getState()
+        .toasts.some((t) => t.message.includes("post to finish")),
+    ).toBe(true);
+    finish([
+      {
+        findingId: low.id,
+        status: "posted",
+        postedUrl: "https://github.com/acme-fixture/widgets/pull/1#c4",
+        postedAt: "2026-10-16T12:00:00Z",
+      },
+    ]);
+    await p;
+    expect(useAiStore.getState().ui[low.id]?.editor).toBe("Second thoughts");
+  });
+
+  it("a saved edit that changed during Post selected stays in its editor", async () => {
+    await useAiStore.getState().load(ID);
+    const [low] = findings;
+    useAiStore.getState().setSelected(low.id, true);
+    let finish: (v: FindingPostResult[]) => void = () => {};
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "post_findings"
+        ? new Promise((r) => (finish = r as typeof finish))
+        : backend(cmd, args)) as typeof invoke);
+    const p = useAiStore.getState().postSelected(ID);
+    // Changed by a path other than Save edit (belt and braces).
+    useAiStore.setState((s) => ({
+      ui: { ...s.ui, [low.id]: { ...s.ui[low.id], edit: "Newer edit" } },
+    }));
+    finish([
+      {
+        findingId: low.id,
+        status: "posted",
+        postedUrl: "https://github.com/acme-fixture/widgets/pull/1#c5",
+        postedAt: "2026-10-16T12:00:00Z",
+      },
+    ]);
+    await p;
+    expect(useAiStore.getState().ui[low.id]).toMatchObject({
+      selected: false,
+      editor: "Newer edit",
+    });
+    expect(
+      useToastStore
+        .getState()
+        .toasts.some((t) => t.message.includes("stays in its editor")),
+    ).toBe(true);
+  });
+
   it("keeps the newest output when an older read answers last", async () => {
     const answers: ((v: unknown) => void)[] = [];
     mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
