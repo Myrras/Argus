@@ -86,7 +86,8 @@ when it merges.
   bar elsewhere), in tabs: General (dark, light or retro theme, reduced
   motion, the refresh interval), GitHub (on or off, host and account),
   GitLab (URL and token; the token goes to the keychain only, Settings shows
-  just whether one is set, and it can be removed), AI (the AI analysis on
+  just whether one is set, and it can be removed; the URL's capitals or a
+  `:443` do not lose it), AI (the AI analysis on
   or off, and a local clone folder per repository), and Shortcuts. Switches apply at once, text fields have their
   own Save.
 - Keyboard: `↑`/`↓` to move through the list, `Enter` to open, `⇧R` (or
