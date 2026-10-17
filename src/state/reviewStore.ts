@@ -74,10 +74,21 @@ interface ReviewStoreState {
 
 /**
  * Reads can answer out of order: only the newest read of the list (`LIST`)
- * or of one review applies its answer.
+ * or of one review applies its answer. A list read keeps the records of the
+ * reviews re-read one by one since it began: theirs are newer.
  */
 const reads = latestOnly<string>();
 const LIST = "\u0000list";
+
+function withNewer(
+  listed: ReviewRecord[],
+  current: ReviewRecord[],
+  moved: (id: ReviewId) => boolean,
+): ReviewRecord[] {
+  return listed.map((r) =>
+    moved(r.id) ? (current.find((c) => c.id === r.id) ?? r) : r,
+  );
+}
 
 export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   reviews: [],
@@ -92,6 +103,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
 
   load: async () => {
     const current = reads.begin(LIST);
+    const moved = reads.mark();
     try {
       const [reviews, report] = await Promise.all([
         listReviews(),
@@ -105,7 +117,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
         return;
       }
       set((s) => ({
-        reviews,
+        reviews: withNewer(reviews, s.reviews, moved),
         loaded: true,
         // An event may have delivered a newer report while this was in flight.
         lastRefresh: newer(s.lastRefresh, report),
@@ -118,9 +130,15 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
 
   reloadList: async () => {
     const current = reads.begin(LIST);
+    const moved = reads.mark();
     try {
       const reviews = await listReviews();
-      if (current()) set({ reviews, loaded: true });
+      if (current()) {
+        set((s) => ({
+          reviews: withNewer(reviews, s.reviews, moved),
+          loaded: true,
+        }));
+      }
     } catch (e) {
       toastError("Could not load the reviews", toIpcError(e).message);
     }

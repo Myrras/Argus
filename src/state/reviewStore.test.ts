@@ -179,6 +179,36 @@ describe("reviewStore", () => {
     await older;
     expect(useReviewStore.getState().reviews[0].title).toBe("A, renamed");
   });
+  it("a list read that started first never overwrites a newer record", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));
+    const list = useReviewStore.getState().reloadList();
+    const one = useReviewStore.getState().applyChanged(a.id);
+    answers[1]({ ...a, title: "A, renamed" });
+    await one;
+    // The list was read before that record: its copy of A is older.
+    answers[0]([a, { ...b, title: "B, renamed" }]);
+    await list;
+    expect(useReviewStore.getState().reviews.map((r) => r.title)).toEqual([
+      "A, renamed",
+      "B, renamed",
+    ]);
+  });
+
+  it("a list read still drops a review that left the list", async () => {
+    const answers: ((v: unknown) => void)[] = [];
+    mockInvoke.mockImplementation(() => new Promise((r) => answers.push(r)));
+    const list = useReviewStore.getState().reloadList();
+    const one = useReviewStore.getState().applyChanged(a.id);
+    answers[1]({ ...a, title: "A, renamed" });
+    await one;
+    answers[0]([b]);
+    await list;
+    expect(useReviewStore.getState().reviews.map((r) => r.title)).toEqual([
+      "B",
+    ]);
+  });
+
   it("a second approval while one runs is refused, not reported done", async () => {
     let finish: (v: unknown) => void = () => {};
     mockInvoke.mockImplementation((cmd: string) =>

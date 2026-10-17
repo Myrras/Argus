@@ -13,5 +13,14 @@ export function latestOnly<K = string>() {
       last.set(key, n);
       return () => last.get(key) === n;
     },
+    /**
+     * Note where every key stands now; the returned `moved(key)` is true
+     * once a read of that key began after this call. A read of a whole
+     * collection uses it to keep the members re-read meanwhile.
+     */
+    mark(): (key: K) => boolean {
+      const at = new Map(last);
+      return (key) => (last.get(key) ?? 0) !== (at.get(key) ?? 0);
+    },
   };
 }
