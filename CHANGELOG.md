@@ -153,10 +153,10 @@ when it merges.
   its own agent settings, hooks or instructions. Claude can only read the
   review's files and the clone, not your home folder or other repositories,
   and anything shaped like a token or private key is removed from findings
-  before they are saved. Auggie runs without its file-writing, process, web
-  and sub-agent tools; Argus cannot turn off MCP tools from your own Auggie
-  setup, so the AI panel and Settings → AI say so instead of claiming the
-  run only reads.
+  before they are saved, including more token shapes. The agent cannot read
+  the clone's `.git`, `.env` files or `.netrc`/`.npmrc`/`.pypirc`. Auggie
+  runs keep only its read tools: Argus removes every other tool Auggie lists,
+  including MCP tools.
 - AI findings post on the code the AI actually read; a finding from a later
   round's "since last review" diff on a removed line is refused instead of
   landing on another line, with a hint to re-run the AI pass on the full
