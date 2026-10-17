@@ -259,6 +259,7 @@ fn old_database(path: &Path, version: usize) -> (ReviewRecord, ThreadId) {
     tx.commit().unwrap();
     let store = Store {
         conn: Mutex::new(conn),
+        refreshing: Mutex::new(()),
     };
     let mut r = record();
     r.last_reviewed_sha = Some("h0".into());

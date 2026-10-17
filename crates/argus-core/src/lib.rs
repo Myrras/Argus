@@ -240,7 +240,8 @@ impl Core {
         self.store.threads(id)
     }
 
-    /// Refresh every provider once (blocking).
+    /// Refresh every provider once (blocking). A refresh already under way
+    /// (the poll's) is waited for first: refreshes run one at a time.
     pub fn refresh(&self) -> RefreshReport {
         poll::refresh_all(&self.providers(), &self.store, Utc::now())
     }

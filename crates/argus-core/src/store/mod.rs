@@ -224,6 +224,11 @@ pub struct StoredThread {
 /// connection, which is plenty for one user's reviews.
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Held for a whole refresh of every provider (see
+    /// [`poll::refresh_all`](crate::poll::refresh_all)): refreshes over one
+    /// database run one at a time, so a manual refresh never fetches
+    /// alongside a poll and races it to the store.
+    pub(crate) refreshing: Mutex<()>,
 }
 
 fn invalid(what: &str) -> rusqlite::Error {
@@ -259,6 +264,7 @@ impl Store {
         migrate(&mut conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            refreshing: Mutex::new(()),
         })
     }
 

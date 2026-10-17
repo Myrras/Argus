@@ -101,19 +101,26 @@ impl ReviewProvider for Fake {
     }
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
         *self.fetches.lock().unwrap().entry(r.number).or_default() += 1;
+        // Read before the gate: a held fetch returns what the platform had
+        // when it started, like a response already on its way.
+        let answer = match self.details.lock().unwrap().get(&r.number) {
+            Some(Ok(d)) => Some(Ok(d.clone())),
+            Some(Err(e)) => Some(Err(clone_err(e))),
+            None => None,
+        };
         let gate = self.gate.lock().unwrap().take();
         if let Some((started, go)) = gate {
             started.send(()).unwrap();
             go.recv().unwrap();
         }
-        match self.details.lock().unwrap().get(&r.number) {
-            Some(Ok(d)) => Ok(d.clone()),
+        match answer {
+            Some(Ok(d)) => Ok(d),
             Some(Err(e)) => {
                 // Like a real provider: a rate-limit reply starts its pause.
-                if crate::provider::is_rate_limited(e) {
+                if crate::provider::is_rate_limited(&e) {
                     *self.limited.lock().unwrap() = Some(at(10, 13));
                 }
-                Err(clone_err(e))
+                Err(e)
             }
             None => Err(CoreError::NotFound),
         }
@@ -579,4 +586,93 @@ fn quitting_does_not_wait_for_a_refresh_under_way() {
     }
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(reports.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_fetch_that_started_earlier_never_overwrites_a_later_one() {
+    // A refresh started at 10:12 stored h2 and the user marked it; a fetch
+    // that started at 10:11 (still h1) lands after it.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 12)).unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    store
+        .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))
+        .unwrap();
+
+    let stored = persist(&store, None, &detail_n(12, "h1"), &[], ME, true, at(10, 11)).unwrap();
+    assert!(!stored);
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(rec.round, 1);
+    assert_eq!(rec.fetched_at, at(10, 12));
+}
+
+#[test]
+fn an_unchanged_fetch_still_counts_as_the_latest() {
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 11)).unwrap();
+    // Nothing changed at 10:14, but it is the newest look at the review.
+    assert!(!persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 14)).unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().fetched_at, at(10, 14));
+    // So a fetch from 10:12 that still saw the old head is older than it.
+    assert!(!persist(&store, None, &detail_n(12, "h1"), &[], ME, true, at(10, 12)).unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().head_sha, "h2");
+}
+
+#[test]
+fn a_slow_poll_cannot_undo_a_refresh_that_overtook_it() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 10));
+    let id = review_ref(12).id();
+
+    // A poll starts at 10:11 and its fetch is on the network (h1); the
+    // author pushes h2; a refresh after a post (10:12) stores h2 and the
+    // user marks it reviewed; then the slow poll lands.
+    let (started, go) = gh.hold_next_fetch();
+    std::thread::scope(|s| {
+        let poll = s.spawn(|| refresh_all(&providers, &store, at(10, 11)));
+        started.recv().unwrap();
+        persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 12)).unwrap();
+        let rec = store.review(id).unwrap().unwrap();
+        store
+            .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))
+            .unwrap();
+        go.send(()).unwrap();
+        let report = poll.join().unwrap();
+        assert!(report.changed.is_empty(), "{:?}", report.changed);
+    });
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h2"));
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+    assert!(rec.round_reasons.is_empty());
+    assert_eq!(rec.round, 1);
+}
+
+#[test]
+fn refreshes_run_one_at_a_time() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    let (started, go) = gh.hold_next_fetch();
+    let busy = std::thread::scope(|s| {
+        let first = s.spawn(|| refresh_all(&providers, &store, at(10, 11)));
+        started.recv().unwrap();
+        // A second refresh (Shift+R while the poll runs) waits for the
+        // first instead of fetching alongside it.
+        let busy = store.refreshing.try_lock().is_err();
+        go.send(()).unwrap();
+        first.join().unwrap();
+        busy
+    });
+    assert!(busy, "a refresh under way holds the refresh lock");
+    assert!(store.refreshing.try_lock().is_ok());
+    assert_eq!(refresh_all(&providers, &store, at(10, 12)).errors, []);
 }
