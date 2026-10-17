@@ -302,6 +302,7 @@ impl Core {
     ) -> CoreResult<()> {
         let prev = self.review(id)?;
         let me = provider.current_user()?;
+        let seq = self.store.begin_fetch();
         let detail = provider.fetch_review(&prev.review)?;
         let threads = provider.fetch_threads(&prev.review)?;
         poll::persist(
@@ -312,6 +313,7 @@ impl Core {
             &me,
             prev.listed,
             now,
+            seq,
         )?;
         Ok(())
     }

@@ -466,13 +466,33 @@ fn the_poll_never_writes_the_watermark_it_did_not_read() {
     // `persist` with a stale `prev` (no watermark) over a stored one.
     let store = Store::in_memory().unwrap();
     let d = detail_n(12, "h1");
-    assert!(persist(&store, None, &d, &[], ME, true, at(10, 12)).unwrap());
+    assert!(persist(
+        &store,
+        None,
+        &d,
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        store.begin_fetch()
+    )
+    .unwrap());
     let stale = store.review(d.review.id()).unwrap().unwrap();
     store.set_watermark(stale.id, "h1", at(10, 13)).unwrap();
 
     let mut moved = detail_n(12, "h2");
     moved.review.title = "Moved".into();
-    assert!(persist(&store, Some(&stale), &moved, &[], ME, true, at(10, 14)).unwrap());
+    assert!(persist(
+        &store,
+        Some(&stale),
+        &moved,
+        &[],
+        ME,
+        true,
+        at(10, 14),
+        store.begin_fetch()
+    )
+    .unwrap());
     let rec = store.review(stale.id).unwrap().unwrap();
     assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
     assert_eq!(rec.last_reviewed_at, Some(at(10, 13)));
@@ -486,7 +506,17 @@ fn the_poll_never_writes_the_watermark_it_did_not_read() {
 fn an_approval_made_in_argus_after_the_fetch_started_survives_it() {
     let store = Store::in_memory().unwrap();
     let d = detail_n(12, "h1");
-    persist(&store, None, &d, &[], ME, true, at(10, 12)).unwrap();
+    persist(
+        &store,
+        None,
+        &d,
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        store.begin_fetch(),
+    )
+    .unwrap();
     let id = d.review.id();
     // Approved from Argus at 10:30, while a poll that started at 10:20
     // still read the review as not approved.
@@ -503,6 +533,7 @@ fn an_approval_made_in_argus_after_the_fetch_started_survives_it() {
         ME,
         true,
         at(10, 12) + chrono::Duration::minutes(20),
+        store.begin_fetch(),
     )
     .unwrap();
     let rec = store.review(id).unwrap().unwrap();
@@ -511,7 +542,17 @@ fn an_approval_made_in_argus_after_the_fetch_started_survives_it() {
 
     // A poll that started after the approval and still sees none: revoked.
     late.review.title = "Later".into();
-    persist(&store, None, &late, &[], ME, true, at(10, 14)).unwrap();
+    persist(
+        &store,
+        None,
+        &late,
+        &[],
+        ME,
+        true,
+        at(10, 14),
+        store.begin_fetch(),
+    )
+    .unwrap();
     let rec = store.review(id).unwrap().unwrap();
     assert_eq!(rec.approved_at, None);
     assert_eq!(rec.status, ReviewStatus::NeedsReview);
@@ -664,13 +705,34 @@ fn a_fetch_that_started_earlier_never_overwrites_a_later_one() {
     // that started at 10:11 (still h1) lands after it.
     let store = Store::in_memory().unwrap();
     let id = review_ref(12).id();
-    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 12)).unwrap());
+    let (earlier, later) = (store.begin_fetch(), store.begin_fetch());
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        later
+    )
+    .unwrap());
     let rec = store.review(id).unwrap().unwrap();
     store
         .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))
         .unwrap();
 
-    let stored = persist(&store, None, &detail_n(12, "h1"), &[], ME, true, at(10, 11)).unwrap();
+    let stored = persist(
+        &store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        at(10, 11),
+        earlier,
+    )
+    .unwrap();
     assert!(!stored);
     let rec = store.review(id).unwrap().unwrap();
     assert_eq!(rec.head_sha, "h2");
@@ -685,16 +747,77 @@ fn a_fetched_at_from_a_clock_that_ran_ahead_does_not_freeze_the_review() {
     let store = Store::in_memory().unwrap();
     let id = review_ref(12).id();
     let ahead = Utc::now() + chrono::Duration::days(1);
-    assert!(persist(&store, None, &detail_n(12, "h1"), &[], ME, true, ahead).unwrap());
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        ahead,
+        store.begin_fetch()
+    )
+    .unwrap());
     let now = Utc::now();
-    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, now).unwrap());
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        now,
+        store.begin_fetch()
+    )
+    .unwrap());
     let rec = store.review(id).unwrap().unwrap();
     assert_eq!(rec.head_sha, "h2");
     assert_eq!(rec.fetched_at, now);
-    // Unchanged fetches move it too, so the order holds from here on.
+    // Unchanged fetches move it too.
     let later = Utc::now();
-    assert!(!persist(&store, None, &detail_n(12, "h2"), &[], ME, true, later).unwrap());
+    assert!(!persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        later,
+        store.begin_fetch()
+    )
+    .unwrap());
     assert_eq!(store.review(id).unwrap().unwrap().fetched_at, later);
+}
+
+#[test]
+fn an_older_fetch_stays_older_when_the_clock_steps_back() {
+    // Fetch A starts at 10:15 (h1); the clock is set back an hour; fetch B
+    // starts at 09:15, sees the push (h2) and lands first. A, slower,
+    // lands last: by the wall clock it looks newer, but it started first.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let a = store.begin_fetch();
+    let b = store.begin_fetch();
+    let (a_at, b_at) = (at(10, 10) + chrono::Duration::minutes(5), at(10, 9));
+    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, b_at, b).unwrap());
+    assert!(!persist(&store, None, &detail_n(12, "h1"), &[], ME, true, a_at, a).unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.fetched_at, b_at);
+    // A fetch that starts after B, whatever its clock says, lands.
+    let c = store.begin_fetch();
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h3"),
+        &[],
+        ME,
+        true,
+        at(10, 8),
+        c
+    )
+    .unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().head_sha, "h3");
 }
 
 #[test]
@@ -733,12 +856,47 @@ fn a_review_is_timed_when_its_fetch_starts_not_when_the_refresh_was_asked() {
 fn an_unchanged_fetch_still_counts_as_the_latest() {
     let store = Store::in_memory().unwrap();
     let id = review_ref(12).id();
-    persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 11)).unwrap();
+    let (s11, s12, s14) = (
+        store.begin_fetch(),
+        store.begin_fetch(),
+        store.begin_fetch(),
+    );
+    persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        at(10, 11),
+        s11,
+    )
+    .unwrap();
     // Nothing changed at 10:14, but it is the newest look at the review.
-    assert!(!persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 14)).unwrap());
+    assert!(!persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        at(10, 14),
+        s14
+    )
+    .unwrap());
     assert_eq!(store.review(id).unwrap().unwrap().fetched_at, at(10, 14));
     // So a fetch from 10:12 that still saw the old head is older than it.
-    assert!(!persist(&store, None, &detail_n(12, "h1"), &[], ME, true, at(10, 12)).unwrap());
+    assert!(!persist(
+        &store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        s12
+    )
+    .unwrap());
     assert_eq!(store.review(id).unwrap().unwrap().head_sha, "h2");
 }
 
@@ -758,7 +916,17 @@ fn a_slow_poll_cannot_undo_a_refresh_that_overtook_it() {
     std::thread::scope(|s| {
         let poll = s.spawn(|| refresh_all(&providers, &store, at(10, 11)));
         started.recv().unwrap();
-        persist(&store, None, &detail_n(12, "h2"), &[], ME, true, at(10, 12)).unwrap();
+        persist(
+            &store,
+            None,
+            &detail_n(12, "h2"),
+            &[],
+            ME,
+            true,
+            at(10, 12),
+            store.begin_fetch(),
+        )
+        .unwrap();
         let rec = store.review(id).unwrap().unwrap();
         store
             .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))

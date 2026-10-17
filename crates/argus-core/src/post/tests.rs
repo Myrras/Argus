@@ -931,7 +931,8 @@ fn a_poll_storing_while_the_watermark_moves_is_kept() {
                 // Started after the post's own refresh (an older one is
                 // dropped, see `persist`).
                 let now = chrono::Utc::now();
-                crate::poll::persist(&store, None, &renamed, &threads, ME, true, now).unwrap();
+                let seq = store.begin_fetch();
+                crate::poll::persist(&store, None, &renamed, &threads, ME, true, now, seq).unwrap();
                 let _ = done_tx.send(());
             }));
             let _ = done_rx.recv_timeout(std::time::Duration::from_millis(300));

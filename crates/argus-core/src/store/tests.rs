@@ -257,10 +257,7 @@ fn old_database(path: &Path, version: usize) -> (ReviewRecord, ThreadId) {
     }
     tx.pragma_update(None, "user_version", version).unwrap();
     tx.commit().unwrap();
-    let store = Store {
-        conn: Mutex::new(conn),
-        refreshing: Mutex::new(()),
-    };
+    let store = Store::over(conn);
     let mut r = record();
     r.last_reviewed_sha = Some("h0".into());
     r.last_reviewed_at = Some(at(9, 8));

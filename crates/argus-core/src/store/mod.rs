@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -229,6 +230,12 @@ pub struct Store {
     /// database run one at a time, so a manual refresh never fetches
     /// alongside a poll and races it to the store.
     pub(crate) refreshing: Mutex<()>,
+    /// The order fetches of a review started in (see [`Store::begin_fetch`]).
+    fetch_seq: AtomicU64,
+    /// Per review, the newest fetch stored so far (see
+    /// [`Store::claim_fetch`]). In memory: ordering only matters between
+    /// fetches of one process, so nothing is migrated or persisted.
+    stored_fetch: Mutex<HashMap<ReviewId, u64>>,
 }
 
 fn invalid(what: &str) -> rusqlite::Error {
@@ -262,10 +269,41 @@ impl Store {
         // in-memory database answers "memory" and that is fine.
         let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
         migrate(&mut conn)?;
-        Ok(Self {
+        Ok(Self::over(conn))
+    }
+
+    /// A store over `conn` as it is (no pragmas, no migration).
+    pub(crate) fn over(conn: Connection) -> Self {
+        Self {
             conn: Mutex::new(conn),
             refreshing: Mutex::new(()),
-        })
+            fetch_seq: AtomicU64::new(0),
+            stored_fetch: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// The ticket of a fetch starting now: later starts get higher ones.
+    /// Fetches are ordered by it, not by the wall clock, which can step
+    /// back (an NTP correction, a manual change) and make an older fetch
+    /// look newer.
+    pub(crate) fn begin_fetch(&self) -> u64 {
+        self.fetch_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether the fetch `seq` of review `id` is the newest one to land so
+    /// far; it is then recorded as such. Call it inside the transaction
+    /// that stores the fetch, so checking and storing are one step for
+    /// concurrent fetches. A transaction that fails afterwards still
+    /// leaves `seq` recorded: an older fetch is then dropped too, and the
+    /// next poll stores the review.
+    pub(crate) fn claim_fetch(&self, id: ReviewId, seq: u64) -> bool {
+        let mut stored = self.stored_fetch.lock().expect("fetch order lock poisoned");
+        let newest = stored.entry(id).or_insert(0);
+        if seq < *newest {
+            return false;
+        }
+        *newest = seq;
+        true
     }
 
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {

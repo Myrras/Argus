@@ -96,9 +96,10 @@ pub fn refresh_all(
 /// refresh over its old providers first. `None` when it stopped.
 ///
 /// The time is read from `clock` once the lock is held, and per review just
-/// before its fetch: what a review's `fetched_at` says it was read at, and
-/// what a slower fetch is ordered against (see [`persist`]), never predates
-/// the read, however long the refresh waited or ran.
+/// before its fetch, together with the fetch's ticket that orders it
+/// against a slower one (see [`persist`]): what a review's `fetched_at`
+/// says it was read at never predates the read, however long the refresh
+/// waited or ran.
 pub(crate) fn refresh_all_unless(
     providers: &[Arc<dyn ReviewProvider>],
     store: &Store,
@@ -149,11 +150,12 @@ pub(crate) fn refresh_all_unless(
     Some(report)
 }
 
-/// One fetched review (and when its fetch started), or why it could not be.
+/// One fetched review (and when its fetch started: by the wall clock, and
+/// its ticket from [`Store::begin_fetch`]), or why it could not be.
 type Fetched = (
     ReviewRef,
     bool,
-    DateTime<Utc>,
+    (DateTime<Utc>, u64),
     CoreResult<(ReviewDetail, Vec<Thread>)>,
 );
 
@@ -222,20 +224,21 @@ fn refresh_provider_with(
                 .map(|(r, listed)| {
                     let h = s.spawn(move || {
                         let started = clock();
+                        let seq = store.begin_fetch();
                         let fetch = || {
                             let detail = provider.fetch_review(r)?;
                             let threads = provider.fetch_threads(r)?;
                             Ok((detail, threads))
                         };
-                        (started, fetch())
+                        ((started, seq), fetch())
                     });
                     (r, *listed, h)
                 })
                 .collect();
             for (r, listed, h) in handles {
-                let (started, result) = h
-                    .join()
-                    .unwrap_or_else(|_| (now, Err(CoreError::Provider("a fetch crashed".into()))));
+                let (started, result) = h.join().unwrap_or_else(|_| {
+                    ((now, 0), Err(CoreError::Provider("a fetch crashed".into())))
+                });
                 fetched.push((r.clone(), listed, started, result));
             }
         });
@@ -244,11 +247,13 @@ fn refresh_provider_with(
     let mut changed = Vec::new();
     let mut errors = Vec::new();
     let mut limited: Option<CoreError> = None;
-    for (r, listed, started, result) in fetched {
+    for (r, listed, (started, seq), result) in fetched {
         let id = r.id();
         let prev = stored.iter().find(|s| s.id == id);
         let outcome = match result {
-            Ok((detail, threads)) => persist(store, prev, &detail, &threads, &me, listed, started),
+            Ok((detail, threads)) => {
+                persist(store, prev, &detail, &threads, &me, listed, started, seq)
+            }
             // An unlisted review that is gone (deleted, access lost): just
             // no longer listed.
             Err(CoreError::NotFound) if !listed => match prev {
@@ -299,7 +304,10 @@ fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
 }
 
 /// Classify a fresh fetch against the stored record and store it if
-/// anything changed. `now` is when the fetch started.
+/// anything changed. `seq` is the fetch's ticket from
+/// [`Store::begin_fetch`], taken when it started; `now` is when it started
+/// by the wall clock (shown, and what an unlisted review's next fetch is
+/// timed from).
 ///
 /// The stored record is re-read, classified against and written in one
 /// transaction, so whatever landed while the fetch was on the network (the
@@ -308,15 +316,14 @@ fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
 /// is therefore not used (kept for callers that still pass one). The
 /// watermark is never written here (see [`WriteColumns::Fetched`]).
 ///
-/// A fetch that started before the stored one (`fetched_at`) is older
-/// than what is stored and is dropped (`Ok(false)`): a slow poll landing
-/// after a refresh that overtook it (after a post) would otherwise move the
-/// head back, start a false round and drop the threads posted meanwhile.
-/// An unchanged fetch still moves `fetched_at`, so it counts as the newest
-/// look at the review too. A stored `fetched_at` later than the wall clock
-/// (written while the clock ran ahead, corrected since) orders nothing: the
-/// check is skipped, or the review would not update until the clock caught
-/// up.
+/// A fetch that started before the newest one stored is older than what
+/// is stored and is dropped (`Ok(false)`): a slow poll landing after a
+/// refresh that overtook it (after a post) would otherwise move the head
+/// back, start a false round and drop the threads posted meanwhile. An
+/// unchanged fetch counts as the newest look at the review too. The order
+/// is the tickets', not the wall clock's: a clock stepping back between
+/// two starts would make the older fetch look newer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn persist(
     store: &Store,
     _prev: Option<&ReviewRecord>,
@@ -325,17 +332,14 @@ pub(crate) fn persist(
     me: &str,
     listed: bool,
     now: DateTime<Utc>,
+    seq: u64,
 ) -> CoreResult<bool> {
     let id = detail.review.id();
     store.transaction(|conn| {
-        let prev = store::read_review(conn, id)?;
-        let wall = Utc::now();
-        if prev
-            .as_ref()
-            .is_some_and(|p| p.fetched_at > now && p.fetched_at <= wall)
-        {
+        if !store.claim_fetch(id, seq) {
             return Ok(false);
         }
+        let prev = store::read_review(conn, id)?;
         // The cached line walks at this head sharpen the untouched count;
         // none (or a failed read) falls back to the approximation.
         let touches = read_line_touches(conn, id, &detail.head_sha).ok();
@@ -361,9 +365,9 @@ pub(crate) fn persist(
             store::write_review(conn, &next, WriteColumns::Fetched)?;
             store::write_threads(conn, id, threads, me)?;
         } else {
-            // The newest look at the review, changed or not: what a slower
-            // fetch is checked against, and what an unlisted review's daily
-            // fetch is timed from (see `unlisted_due`).
+            // The newest look at the review, changed or not: what an
+            // unlisted review's daily fetch is timed from (see
+            // `unlisted_due`).
             store::touch_fetched(conn, id, now)?;
         }
         Ok(changed)
