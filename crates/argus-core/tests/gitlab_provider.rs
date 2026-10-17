@@ -925,3 +925,73 @@ fn a_merged_commented_mr_is_not_fetched_again() {
     assert_eq!(count("/api/v4/projects/300/merge_requests/8"), 1);
     assert_eq!(count("/api/v4/projects/200/merge_requests/5"), 2);
 }
+
+#[test]
+fn a_failing_page_after_a_full_last_page_ends_the_list() {
+    // Exactly 100 discussions and no next page: page 2 is asked for in case
+    // more came in, and its failing does not fail the complete list.
+    let (base, seen) = serve(|path| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
+            return fixture_routes(path);
+        }
+        if query.ends_with("page=1") {
+            Reply {
+                status: "200 OK",
+                headers: "X-Next-Page: \r\n".into(),
+                body: discussions(0, 100),
+            }
+        } else {
+            status("500 Internal Server Error")
+        }
+    });
+    let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
+    assert_eq!(threads.len(), 100);
+    assert!(seen.lock().unwrap().iter().any(|l| l.contains("page=2")));
+
+    // A page the list names as next failing is a real gap.
+    let (base, _) = serve(|path| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        if route != "/api/v4/projects/grp%2Fapp/merge_requests/21/discussions" {
+            return fixture_routes(path);
+        }
+        if query.ends_with("page=1") {
+            Reply {
+                status: "200 OK",
+                headers: "X-Next-Page: 2\r\n".into(),
+                body: discussions(0, 100),
+            }
+        } else {
+            status("500 Internal Server Error")
+        }
+    });
+    assert!(provider(&base).fetch_threads(&mr_ref(&base, 21)).is_err());
+}
+
+#[test]
+fn the_head_and_commits_do_not_need_the_reviewer_state() {
+    // /reviewers and /approvals failing fail `fetch_review` (see above),
+    // not the head check before approving or the history's commit list.
+    let (base, seen) = serve_raw(mr21_with(
+        ("500 Internal Server Error", "{}"),
+        ("500 Internal Server Error", "{}"),
+    ));
+    let gl = provider(&base);
+    let r = mr_ref(&base, 21);
+    assert!(gl.fetch_review(&r).is_err());
+    let full = {
+        let (b, _) = serve(fixture_routes);
+        provider(&b).fetch_review(&mr_ref(&b, 21)).unwrap()
+    };
+    seen.lock().unwrap().clear();
+    let head = gl.fetch_head(&r).unwrap();
+    assert_eq!(head.head_sha, full.head_sha);
+    assert_eq!(head.base_sha, full.base_sha);
+    assert_eq!(head.commits, full.commits);
+    // Nor are they asked.
+    let calls = seen.lock().unwrap().join("\n");
+    assert!(
+        !calls.contains("/reviewers") && !calls.contains("/approvals"),
+        "{calls}"
+    );
+}

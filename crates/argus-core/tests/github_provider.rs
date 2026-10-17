@@ -907,3 +907,158 @@ fn a_push_between_reading_the_head_and_the_diff_fails_the_post_and_refreshes() {
     // The refusal stored the new head: a retry starts from it.
     assert_eq!(core.review(id).unwrap().head_sha, c4);
 }
+
+/// `FAKE` with PR 12's files served from `files<N>.json` next to the log
+/// (`page=N`, no `Link` header: every page looks like the last); a page
+/// without a file is logged as `missing files page N` and answered 422,
+/// as GitHub answers a page past its 3000-file cap.
+fn files_pages_fake() -> Fake {
+    let routes = r#"  "$P/files?per_page=100") respond "${LOG%/*}/files1.json" ;;
+  "$P/files?per_page=100&page="*)
+    n="${path##*page=}"
+    if [ -e "${LOG%/*}/files$n.json" ]; then respond "${LOG%/*}/files$n.json"; fi
+    echo "missing files page $n" >> "$LOG"
+    printf 'HTTP/2.0 422 Unprocessable Entity\r\n\r\n{"message":"Pagination is limited"}'
+    echo "gh: HTTP 422" >&2; exit 1 ;;"#;
+    let body = FAKE.replace(
+        r#"  "$P/files?per_page=100") respond "$F/pull_12_files_page1.json" "per_page=100&page=2" ;;
+  "$P/files?per_page=100&page=2") respond "$F/pull_12_files_page2.json" ;;"#,
+        routes,
+    );
+    assert_ne!(body, FAKE);
+    script(&body)
+}
+
+/// `n` changed files named from `from`, as GitHub lists them.
+fn files_json(from: usize, n: usize) -> String {
+    let items: Vec<String> = (from..from + n)
+        .map(|i| {
+            format!(
+                r#"{{"sha":"f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1","filename":"src/f{i}.rs","status":"modified","additions":1,"deletions":0,"changes":1,"patch":"@@ -1 +1,2 @@\n x\n+y"}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", items.join(","))
+}
+
+fn review_range() -> DiffRange {
+    DiffRange::Review {
+        base: BASE.into(),
+        head: HEAD.into(),
+    }
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_failing_page_after_a_full_last_page_ends_the_list() {
+    // 100 files: page 1 is full, so page 2 is asked for in case more came
+    // in; that page failing does not fail a list that is complete.
+    let fake = files_pages_fake();
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    std::fs::write(dir.join("files1.json"), files_json(0, 100)).unwrap();
+    let gh = fake.provider("github.com", None);
+    let diff = gh.fetch_files(&widgets_12(), &review_range()).unwrap();
+    assert_eq!(diff.files.len(), 100);
+    assert!(!diff.truncated);
+    assert!(fake.calls().contains("missing files page 2"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_list_at_the_3000_file_cap_is_not_followed_past_it() {
+    let fake = files_pages_fake();
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    for page in 1..=30 {
+        let json = files_json((page - 1) * 100, 100);
+        std::fs::write(dir.join(format!("files{page}.json")), json).unwrap();
+    }
+    let gh = fake.provider("github.com", None);
+    let diff = gh.fetch_files(&widgets_12(), &review_range()).unwrap();
+    assert_eq!(diff.files.len(), 3000);
+    assert!(diff.truncated);
+    assert!(!fake.calls().contains("missing files page 31"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_failing_page_the_list_links_to_fails_the_list() {
+    // Page 1 names a next page: that one failing is a real gap.
+    let fake = files_pages_fake();
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    let linked =
+        r#"  "$P/files?per_page=100") respond "${LOG%/*}/files1.json" "per_page=100&page=2" ;;"#;
+    let body = std::fs::read_to_string(&fake.gh).unwrap().replace(
+        r#"  "$P/files?per_page=100") respond "${LOG%/*}/files1.json" ;;"#,
+        linked,
+    );
+    std::fs::write(&fake.gh, body).unwrap();
+    std::fs::write(dir.join("files1.json"), files_json(0, 100)).unwrap();
+    let gh = fake.provider("github.com", None);
+    assert!(gh.fetch_files(&widgets_12(), &review_range()).is_err());
+}
+
+/// `FAKE` where PR 12's head is c3 for the first `reads` reads of the PR
+/// and c4 after, with c4's merge base served too.
+fn moving_head_fake(reads: usize) -> (Fake, String) {
+    let moving = format!(
+        r#"  "$P")
+    D="${{LOG%/*}}"
+    echo x >> "$D/pull-reads"
+    [ "$(wc -l < "$D/pull-reads")" -gt {reads} ] && respond "$D/pull_12_c4.json"
+    respond "$F/pull_12.json" ;;
+  "repos/acme-fixture/widgets/compare/$B0...c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4")
+    respond "$F/compare_b0_c3_merge_base.txt" ;;"#
+    );
+    let body = FAKE.replace(r#"  "$P") respond "$F/pull_12.json" ;;"#, &moving);
+    assert_ne!(body, FAKE);
+    let fake = script(&body);
+    let c4 = "c4".repeat(20);
+    let pull = std::fs::read_to_string(fixtures().join("pull_12.json")).unwrap();
+    std::fs::write(
+        fake.log.parent().unwrap().join("pull_12_c4.json"),
+        pull.replace(HEAD, &c4),
+    )
+    .unwrap();
+    (fake, c4)
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_push_while_reading_the_files_reads_them_again() {
+    // Read 1 (before the files) says c3, read 2 (after) already c4: the
+    // files may be either head's, so all of it is read once more, at c4.
+    let (fake, c4) = moving_head_fake(1);
+    let gh = fake.provider("github.com", None);
+    let diff = gh.fetch_files(&widgets_12(), &review_range()).unwrap();
+    assert_eq!(diff.head_sha, c4);
+    assert_eq!(diff.base_sha, "b".repeat(40));
+    let calls = fake.calls();
+    let file_reads = calls
+        .lines()
+        .filter(|l| l.contains("pulls/12/files?per_page=100 "))
+        .count();
+    assert_eq!(file_reads, 2, "{calls}");
+    assert!(calls.contains("compare/b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0...c4c4"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_head_that_keeps_moving_fails_the_diff_instead_of_mislabelling_it() {
+    // Every read after the first moves on: c3, then c4 for good, but the
+    // second round reads c4 before and after, so only a push in both
+    // rounds fails. Here: c3 → c4 (round 1), then c4 → c5 (round 2).
+    let (fake, _) = moving_head_fake(1);
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    let c5 = "c5".repeat(20);
+    let pull = std::fs::read_to_string(fixtures().join("pull_12.json")).unwrap();
+    std::fs::write(dir.join("pull_12_c5.json"), pull.replace(HEAD, &c5)).unwrap();
+    let body = std::fs::read_to_string(&fake.gh).unwrap().replace(
+        r#"[ "$(wc -l < "$D/pull-reads")" -gt 1 ] && respond "$D/pull_12_c4.json""#,
+        r#"[ "$(wc -l < "$D/pull-reads")" -gt 3 ] && respond "$D/pull_12_c5.json"
+    [ "$(wc -l < "$D/pull-reads")" -gt 1 ] && respond "$D/pull_12_c4.json""#,
+    );
+    std::fs::write(&fake.gh, body).unwrap();
+    let gh = fake.provider("github.com", None);
+    let err = gh.fetch_files(&widgets_12(), &review_range()).unwrap_err();
+    assert!(err.to_string().contains("new commits"), "{err}");
+}

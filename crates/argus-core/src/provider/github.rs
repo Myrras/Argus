@@ -31,7 +31,7 @@ use serde::Deserialize;
 use super::conditional::{Cached, ConditionalCache};
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
-    ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
+    ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
 };
 use super::rate_limit::{default_reset, reset_at, Backoff};
 use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
@@ -362,7 +362,11 @@ impl GithubProvider {
     /// A full page (an array of [`PER_PAGE`]) without a next link is
     /// followed anyway: a 304 replays the link as it was when the page was
     /// cached, and a last page of exactly [`PER_PAGE`] stays unchanged (a
-    /// 304) when more items arrive after it. An empty next page ends it.
+    /// 304) when more items arrive after it. An empty next page ends it, and
+    /// so does that unasked-for page failing (any error but a rate limit):
+    /// the list read so far is complete as far as GitHub said. Not at
+    /// [`PULL_FILES_LIMIT`] items: GitHub serves no page past its cap (a
+    /// 422), and the cap is where a cut list ends anyway.
     fn pages(&self, path: &str) -> CoreResult<Vec<String>> {
         let (base, query) = path.split_once('?').unwrap_or((path, ""));
         let first = if query.is_empty() {
@@ -372,20 +376,32 @@ impl GithubProvider {
         };
         let mut url = first.clone();
         let mut number = 1;
+        let mut items = 0;
+        let mut guessed = false;
         let mut bodies = Vec::new();
         for _ in 0..MAX_PAGES {
-            let page = self.get(&url, None)?;
-            let full = serde_json::from_str::<Vec<serde::de::IgnoredAny>>(&page.body)
-                .is_ok_and(|items| items.len() >= PER_PAGE);
+            let page = match self.get(&url, None) {
+                Ok(p) => p,
+                Err(e) if guessed && !super::is_rate_limited(&e) => {
+                    tracing::debug!("a GitHub list ends at a page it did not link: {e}");
+                    break;
+                }
+                Err(e) => return Err(e),
+            };
+            let count = serde_json::from_str::<Vec<serde::de::IgnoredAny>>(&page.body)
+                .map_or(0, |items| items.len());
+            items += count;
             bodies.push(page.body);
             match page.next {
                 Some(q) if format!("{base}?{q}") != url => {
                     number = page_number(&q).unwrap_or(number + 1);
                     url = format!("{base}?{q}");
+                    guessed = false;
                 }
-                None if full => {
+                None if count >= PER_PAGE && items < PULL_FILES_LIMIT => {
                     number += 1;
                     url = format!("{first}&page={number}");
+                    guessed = true;
                 }
                 _ => break,
             }
@@ -750,6 +766,22 @@ impl ReviewProvider for GithubProvider {
         Ok(assemble_detail(r, &me, pull?, commits?, reviews?))
     }
 
+    /// The PR and its commits: not its reviews.
+    fn fetch_head(&self, r: &ReviewRef) -> CoreResult<ReviewHead> {
+        let base = format!("repos/{}/pulls/{}", r.repo, r.number);
+        let (pull, commits) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.api::<GhPull>(&base));
+            let b = s.spawn(|| self.api_list::<GhCommit>(&format!("{base}/commits")));
+            (join(a), join(b))
+        });
+        let pull = pull?;
+        Ok(ReviewHead {
+            head_sha: pull.head.sha,
+            base_sha: pull.base.sha,
+            commits: commit_infos(commits?),
+        })
+    }
+
     /// The REST review comments, regrouped into threads, with GraphQL's
     /// resolved state laid over them (fetched in parallel; on failure the
     /// threads just stay unresolved).
@@ -943,6 +975,23 @@ fn decode_content(file: GhContent) -> CoreResult<String> {
     String::from_utf8(bytes).map_err(|_| CoreError::Provider("the file is not text".into()))
 }
 
+/// GitHub's commits (oldest first, as listed) as the model's.
+fn commit_infos(commits: Vec<GhCommit>) -> Vec<CommitInfo> {
+    commits
+        .into_iter()
+        .map(|c| CommitInfo {
+            title: first_line(&c.commit.message),
+            author: c
+                .author
+                .map(|a| a.login)
+                .or_else(|| c.commit.author.as_ref().map(|a| a.name.clone()))
+                .unwrap_or_default(),
+            authored_at: c.commit.author.and_then(|a| a.date),
+            sha: c.sha,
+        })
+        .collect()
+}
+
 fn assemble_detail(
     r: &ReviewRef,
     me: &str,
@@ -1031,19 +1080,7 @@ fn assemble_detail(
         head_sha: pull.head.sha,
         base_sha: pull.base.sha,
         start_sha: None,
-        commits: commits
-            .into_iter()
-            .map(|c| CommitInfo {
-                title: first_line(&c.commit.message),
-                author: c
-                    .author
-                    .map(|a| a.login)
-                    .or_else(|| c.commit.author.as_ref().map(|a| a.name.clone()))
-                    .unwrap_or_default(),
-                authored_at: c.commit.author.and_then(|a| a.date),
-                sha: c.sha,
-            })
-            .collect(),
+        commits: commit_infos(commits),
         versions: Vec::new(),
         reviewers,
         requested_from_me,

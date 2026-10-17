@@ -52,7 +52,7 @@ impl Core {
             return Ok(results.into_iter().flatten().collect());
         }
         // The platform's head now, not the stored one: comments go on it.
-        let detail = provider.fetch_review(&record.review)?;
+        let detail = provider.fetch_head(&record.review)?;
         let current = provider.fetch_files(
             &record.review,
             &DiffRange::Review {
@@ -65,7 +65,7 @@ impl Core {
         // of the moment, and `commit_id` is the head read before, so a push
         // in between would place lines of one head on another.
         let moved = current.head_sha != detail.head_sha
-            || provider.fetch_review(&record.review)?.head_sha != detail.head_sha;
+            || provider.fetch_head(&record.review)?.head_sha != detail.head_sha;
         if moved {
             self.refresh_after_head_moved(provider.as_ref(), &record);
             return Err(PostError::new(
@@ -157,7 +157,7 @@ impl Core {
         }
         // The platform's head now: GitHub would approve an older commit
         // without complaint (GitLab refuses by itself, see its `approve`).
-        if provider.fetch_review(&record.review)?.head_sha != seen_head {
+        if provider.fetch_head(&record.review)?.head_sha != seen_head {
             self.refresh_after_head_moved(provider.as_ref(), &record);
             return Err(moved());
         }

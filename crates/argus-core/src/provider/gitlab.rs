@@ -25,7 +25,8 @@ use super::conditional::{Cached, ConditionalCache};
 use super::github::check_sha;
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
-    ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
+    ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side,
+    Thread,
 };
 use super::rate_limit::{reset_at, Backoff};
 use super::{
@@ -321,7 +322,9 @@ impl GitlabProvider {
     /// A full page without a next one is followed anyway: a 304 replays the
     /// header as it was when the page was cached, and a page that was the
     /// last at exactly [`PER_PAGE`] items stays unchanged (so a 304) when
-    /// more items arrive after it. An empty next page ends it.
+    /// more items arrive after it. An empty next page ends it, and so does
+    /// that unasked-for page failing (any error but a rate limit): the list
+    /// read so far is complete as far as GitLab said.
     fn get_all<T: DeserializeOwned>(&self, path: &str) -> CoreResult<Vec<T>> {
         self.get_pages(path, MAX_PAGES)
     }
@@ -332,14 +335,29 @@ impl GitlabProvider {
         let sep = if path.contains('?') { '&' } else { '?' };
         let mut all = Vec::new();
         let mut page = 1;
+        let mut guessed = false;
         for _ in 0..max_pages {
-            let (body, next) = self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}"))?;
+            let (body, next) =
+                match self.get(&format!("{path}{sep}per_page={PER_PAGE}&page={page}")) {
+                    Ok(reply) => reply,
+                    Err(e) if guessed && !super::is_rate_limited(&e) => {
+                        tracing::debug!("a GitLab list ends at a page it did not name: {e}");
+                        return Ok(all);
+                    }
+                    Err(e) => return Err(e),
+                };
             let items: Vec<T> = serde_json::from_str(&body).map_err(|_| unexpected())?;
             let full = items.len() >= PER_PAGE as usize;
             all.extend(items);
             match next {
-                Some(n) if n > page => page = n,
-                None if full => page += 1,
+                Some(n) if n > page => {
+                    page = n;
+                    guessed = false;
+                }
+                None if full => {
+                    page += 1;
+                    guessed = true;
+                }
                 _ => return Ok(all),
             }
         }
@@ -589,6 +607,26 @@ impl ReviewProvider for GitlabProvider {
             reviewers,
             approved_by,
         ))
+    }
+
+    /// The MR and its commits: not `/reviewers` or `/approvals`.
+    fn fetch_head(&self, r: &ReviewRef) -> CoreResult<ReviewHead> {
+        let p = Self::mr_path(r);
+        let (mr, commits) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.get_json::<GlMr>(&p));
+            let b = s.spawn(|| self.get_all::<GlCommit>(&format!("{p}/commits")));
+            (join(a), join(b))
+        });
+        let mr = mr?;
+        Ok(ReviewHead {
+            head_sha: mr.head_sha(),
+            base_sha: mr
+                .diff_refs
+                .as_ref()
+                .and_then(|r| r.base_sha.clone())
+                .unwrap_or_default(),
+            commits: commit_infos(commits?),
+        })
     }
 
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
@@ -911,17 +949,7 @@ fn assemble_detail(
     };
     let head_sha = mr.head_sha();
     let refs = mr.diff_refs.clone();
-    let mut commits: Vec<CommitInfo> = commits
-        .into_iter()
-        .map(|c| CommitInfo {
-            title: c.title.unwrap_or_else(|| first_line(&c.message)),
-            author: c.author_name,
-            authored_at: c.authored_date,
-            sha: c.id,
-        })
-        .collect();
-    // GitLab lists commits newest first; the model is oldest first.
-    commits.reverse();
+    let commits = commit_infos(commits);
     let mut versions: Vec<DiffVersion> = versions
         .into_iter()
         .map(|v| DiffVersion {
@@ -949,6 +977,21 @@ fn assemble_detail(
         requested_from_me,
         approved_by_me: i_approved && !requested_from_me,
     }
+}
+
+/// GitLab's commits (newest first) as the model's, oldest first.
+fn commit_infos(commits: Vec<GlCommit>) -> Vec<CommitInfo> {
+    let mut out: Vec<CommitInfo> = commits
+        .into_iter()
+        .map(|c| CommitInfo {
+            title: c.title.unwrap_or_else(|| first_line(&c.message)),
+            author: c.author_name,
+            authored_at: c.authored_date,
+            sha: c.id,
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// A discussion as a thread; `None` for one made only of system notes

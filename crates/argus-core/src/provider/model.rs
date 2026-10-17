@@ -179,6 +179,28 @@ pub struct ReviewDetail {
     pub approved_by_me: bool,
 }
 
+/// A review's head, base and commits: what a head check and the history
+/// walk need, without the reviewer and approval state a [`ReviewDetail`]
+/// also reads (and fails on). See
+/// [`ReviewProvider::fetch_head`](super::ReviewProvider::fetch_head).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewHead {
+    pub head_sha: String,
+    pub base_sha: String,
+    /// Oldest first.
+    pub commits: Vec<CommitInfo>,
+}
+
+impl From<ReviewDetail> for ReviewHead {
+    fn from(d: ReviewDetail) -> Self {
+        Self {
+            head_sha: d.head_sha,
+            base_sha: d.base_sha,
+            commits: d.commits,
+        }
+    }
+}
+
 /// Which side of the diff a line anchor is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

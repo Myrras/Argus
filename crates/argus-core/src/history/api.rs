@@ -170,7 +170,7 @@ fn compute(
     };
     // The review's commits, in order: the walk's steps and the
     // timeline's commit details.
-    let detail = match provider.fetch_review(&record.review) {
+    let detail = match provider.fetch_head(&record.review) {
         Ok(d) => d,
         Err(e) => return threads.iter().map(|t| degraded(t, &e)).collect(),
     };

@@ -20,7 +20,8 @@ pub use github::{GhAuth, GithubProvider};
 pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
 pub use model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
-    ProviderId, ReviewDetail, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
+    ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side,
+    Thread,
 };
 
 use std::sync::Arc;
@@ -49,6 +50,15 @@ pub trait ReviewProvider: Send + Sync {
     fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>>;
 
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail>;
+
+    /// The review's head, base and commits only: for the head checks before
+    /// posting and approving and for the history walk, which must not fail
+    /// on what they do not use (GitLab's `/reviewers` and `/approvals`,
+    /// GitHub's reviews, which fail [`fetch_review`](Self::fetch_review)
+    /// rather than guess). The default reads the whole detail.
+    fn fetch_head(&self, r: &ReviewRef) -> CoreResult<ReviewHead> {
+        self.fetch_review(r).map(ReviewHead::from)
+    }
 
     /// All line threads (and, on GitLab, MR-level discussions), oldest first.
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>>;

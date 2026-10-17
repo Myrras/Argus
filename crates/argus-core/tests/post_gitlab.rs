@@ -626,3 +626,30 @@ fn a_push_between_reading_the_head_and_the_diff_fails_the_post_and_refreshes() {
     // The refusal stored the new head: a retry starts from it.
     assert_eq!(core.review(id).unwrap().head_sha, PUSHED);
 }
+
+#[test]
+fn a_failing_reviewers_call_does_not_block_approving() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let down = Arc::new(AtomicBool::new(false));
+    let flag = down.clone();
+    let (base, log) = serve(move |req| {
+        let route = req
+            .path
+            .split_once('?')
+            .map_or(req.path.as_str(), |(r, _)| r);
+        if flag.load(Ordering::SeqCst) && route == format!("{MR21}/reviewers") {
+            return reply("500 Internal Server Error", "{}");
+        }
+        instance(req)
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let id = core.reviews().unwrap()[0].id;
+
+    // The reviewer states are down: the head check before approving only
+    // needs the MR's head, so the approval goes through.
+    down.store(true, Ordering::SeqCst);
+    core.approve_review(id, HEAD_SHA).unwrap();
+    let approval = posts(&log).last().unwrap().clone();
+    assert_eq!(approval.path, format!("{MR21}/approve"));
+}
