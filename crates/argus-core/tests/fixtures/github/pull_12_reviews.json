@@ -34,7 +34,7 @@
   {
     "id": 7005,
     "user": { "login": "erin-fixture", "id": 1005 },
-    "body": "",
+    "body": "Draft, not sent yet.",
     "state": "PENDING",
     "commit_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
   }

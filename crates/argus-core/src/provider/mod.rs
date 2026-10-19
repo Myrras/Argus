@@ -12,6 +12,7 @@
 
 mod conditional;
 pub mod github;
+mod github_conversation;
 pub mod gitlab;
 pub mod model;
 mod rate_limit;
@@ -60,7 +61,10 @@ pub trait ReviewProvider: Send + Sync {
         self.fetch_review(r).map(ReviewHead::from)
     }
 
-    /// All line threads (and, on GitLab, MR-level discussions), oldest first.
+    /// All line threads and the discussions on the review as a whole
+    /// (GitLab MR-level discussions; GitHub's conversation comments and
+    /// review summaries, threaded as `github_conversation` describes; both
+    /// without an anchor), oldest first.
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>>;
 
     /// The content of `path` at commit `sha`.
