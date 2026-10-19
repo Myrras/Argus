@@ -8,7 +8,8 @@
 //! decided from what came before it only (so a new comment never moves an
 //! older one, and thread ids stay put across polls):
 //!
-//! 1. **A quote reply** (GitHub's "Quote reply"): an entry opening with a `>` block whose every line occurs
+//! 1. **A quote reply** (GitHub's "Quote reply", and how Argus replies, see
+//!    [`quote`]): an entry opening with a `>` block whose every line occurs
 //!    in an earlier entry joins that entry's thread (the latest such entry).
 //! 2. **The PR author answering**: an entry by the PR author that is not a
 //!    quote reply joins the thread the user last wrote in, if the user wrote
@@ -29,6 +30,9 @@ use super::model::{Note, Thread};
 const ISSUE_COMMENT: &str = "issuecomment-";
 const REVIEW: &str = "pullrequestreview-";
 
+/// The longest quoted line a reply carries (characters).
+const QUOTE_MAX: usize = 200;
+
 /// A conversation entry's platform id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ConversationId {
@@ -39,6 +43,20 @@ pub(super) enum ConversationId {
 }
 
 impl ConversationId {
+    /// The id of a conversation thread or note; `None` for anything else
+    /// (a review comment thread's bare number).
+    pub(super) fn parse(id: &str) -> Option<Self> {
+        let number = |s: &str| {
+            (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+                .then(|| s.parse().ok())
+                .flatten()
+        };
+        if let Some(n) = id.strip_prefix(ISSUE_COMMENT) {
+            return number(n).map(Self::Comment);
+        }
+        id.strip_prefix(REVIEW).and_then(number).map(Self::Review)
+    }
+
     pub(super) fn key(self) -> String {
         match self {
             Self::Comment(n) => format!("{ISSUE_COMMENT}{n}"),
@@ -148,6 +166,22 @@ fn quoted_lines(body: &str) -> Vec<String> {
         })
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+/// The quote a reply to a conversation thread opens with: the first line
+/// of the thread's first entry that is not itself a quote (cut to
+/// [`QUOTE_MAX`] characters), as GitHub's "Quote reply" would. It is what
+/// files the reply under that thread on the next fetch (rule 1). `None`
+/// for an empty body.
+pub(super) fn quote(root: &str) -> Option<String> {
+    let line = root
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('>'))
+        .map(str::to_string)
+        .or_else(|| quoted_lines(root).into_iter().next())?;
+    let line: String = line.chars().take(QUOTE_MAX).collect();
+    Some(format!("> {}", line.trim_end()))
 }
 
 #[cfg(test)]
@@ -285,6 +319,46 @@ mod tests {
             t[0].notes[0].body,
             "**Requested changes**\n\nPlease split the module."
         );
+    }
+
+    #[test]
+    fn ids_round_trip_and_reject_everything_else() {
+        for id in [ConversationId::Comment(42), ConversationId::Review(7)] {
+            assert_eq!(ConversationId::parse(&id.key()), Some(id));
+        }
+        for bad in [
+            "42",
+            "issuecomment-",
+            "issuecomment-4x",
+            "pullrequestreview-../1",
+            "issuecomment--1",
+            "",
+        ] {
+            assert_eq!(ConversationId::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn quotes_the_first_own_line() {
+        assert_eq!(
+            quote("\n  Why a constant?  \nmore").as_deref(),
+            Some("> Why a constant?")
+        );
+        assert_eq!(quote("> earlier\n\nMine.").as_deref(), Some("> Mine."));
+        assert_eq!(quote("> only a quote").as_deref(), Some("> only a quote"));
+        assert_eq!(quote(" \n"), None);
+        let long = "é".repeat(300);
+        assert_eq!(quote(&long).unwrap().chars().count(), 2 + QUOTE_MAX);
+        // What a reply quotes files it under the quoted thread.
+        let root = "Ready for review.\nThe TTL is open.";
+        let reply = format!("{}\n\nOk.", quote(root).unwrap());
+        let t = threads(
+            vec![comment(1, AUTHOR, 0, root), comment(2, ME, 1, &reply)],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].notes.len(), 2);
     }
 
     #[test]

@@ -882,6 +882,9 @@ impl ReviewProvider for GithubProvider {
     }
 
     fn reply(&self, r: &ReviewRef, thread: &str, body: &str) -> PostResultOf<PostedNote> {
+        if let Some(id) = ConversationId::parse(thread) {
+            return self.reply_in_conversation(r, id, body);
+        }
         let root: u64 = thread
             .parse()
             .map_err(|_| PostError::new(PostErrorKind::InvalidInput, "not a GitHub thread"))?;
@@ -1448,6 +1451,44 @@ impl GithubProvider {
             Some(m) => PostError::new(PostErrorKind::PostRejected, m),
             None if stderr.contains("http 404") => CoreError::NotFound.into(),
             None => CoreError::Provider("gh could not post to GitHub".into()).into(),
+        })
+    }
+}
+
+impl GithubProvider {
+    /// GitHub's conversation has no threads: a reply is a new PR comment
+    /// that opens with a quote of the thread's first entry, as GitHub's own
+    /// "Quote reply" does, which files it under that thread on the next
+    /// fetch (see [`conversation::quote`]). The first entry is read for that
+    /// (a conditional GET) right before the one write.
+    fn reply_in_conversation(
+        &self,
+        r: &ReviewRef,
+        id: ConversationId,
+        body: &str,
+    ) -> PostResultOf<PostedNote> {
+        let root = match id {
+            ConversationId::Comment(n) => {
+                self.api::<GhIssueComment>(&format!("repos/{}/issues/comments/{n}", r.repo))?
+                    .body
+            }
+            ConversationId::Review(n) => {
+                self.api::<GhReview>(&format!("repos/{}/pulls/{}/reviews/{n}", r.repo, r.number))?
+                    .body
+            }
+        };
+        let text = match conversation::quote(root.as_deref().unwrap_or_default()) {
+            Some(q) => format!("{q}\n\n{body}"),
+            None => body.to_string(),
+        };
+        let posted: GhPosted = self.post_json(
+            &format!("repos/{}/issues/{}/comments", r.repo, r.number),
+            &serde_json::json!({ "body": text }),
+        )?;
+        Ok(PostedNote {
+            url: posted.html_url.unwrap_or_else(|| r.url.clone()),
+            provider_thread_id: id.key(),
+            provider_note_id: ConversationId::Comment(posted.id).key(),
         })
     }
 }

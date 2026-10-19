@@ -15,15 +15,34 @@ use serde_json::{json, Value};
 const HEAD: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
 
 /// Routes `gh` calls; every call's arguments and token go to `$LOG`, every
-/// stdin body to `$BODIES` (one JSON document per line).
+/// stdin body to `$BODIES` (one JSON document per line). The reads a reply
+/// to a conversation thread makes first (`api -i`) answer from `$F`.
 const FAKE: &str = r#"
 echo "$* token=${GH_TOKEN:-none}" >> "$LOG"
 case "$*" in
   "auth token --hostname github.com --user work") echo fake-gh-token; exit 0 ;;
+  "api -i -H If-None-Match: \"fx-8002\" repos/acme-fixture/widgets/issues/comments/8002")
+    printf 'HTTP/2.0 304 Not Modified\r\nEtag: "fx-8002"\r\n\r\n'
+    echo "gh: HTTP 304" >&2; exit 1 ;;
+  "api -i repos/acme-fixture/widgets/issues/comments/8002")
+    printf 'HTTP/2.0 200 OK\r\nEtag: "fx-8002"\r\n\r\n'; cat "$F/issue_comment_8002.json"; exit 0 ;;
+  "api -i repos/acme-fixture/widgets/pulls/12/reviews/7004")
+    printf 'HTTP/2.0 200 OK\r\nEtag: "fx-7004"\r\n\r\n'; cat "$F/pull_12_review_7004.json"; exit 0 ;;
+  "api -i "*)
+    printf 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}'
+    echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
 esac
 body=$(cat)
 printf '%s\n' "$body" >> "$BODIES"
 case "$*" in
+  "api --method POST repos/acme-fixture/widgets/issues/12/comments --input -")
+    case "$body" in
+      *reject-me*)
+        echo '{"message":"Validation Failed","errors":[{"resource":"IssueComment","code":"custom","message":"body is locked (fake-gh-token)"}],"status":"422"}'
+        echo "gh: Validation Failed (HTTP 422)" >&2; exit 1 ;;
+      *)
+        echo '{"id":8010,"html_url":"https://github.com/acme-fixture/widgets/pull/12#issuecomment-8010","body":"x"}' ;;
+    esac ;;
   "api --method POST repos/acme-fixture/widgets/pulls/12/comments --input -")
     case "$body" in
       *reject-me*)
@@ -80,7 +99,10 @@ fn fake() -> Fake {
     let bodies = dir.path().join("bodies.log");
     let gh = dir.path().join("gh");
     let script = format!(
-        "#!/bin/sh\nLOG='{}'\nBODIES='{}'\n{FAKE}\n",
+        "#!/bin/sh\nF='{}'\nLOG='{}'\nBODIES='{}'\n{FAKE}\n",
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/github")
+            .display(),
         log.display(),
         bodies.display()
     );
@@ -243,6 +265,74 @@ fn replies_to_the_root_comment() {
     let err = gh.reply(&pr(12), "abc/../x", "x").unwrap_err();
     assert_eq!(err.kind, PostErrorKind::InvalidInput);
     assert_eq!(fake.bodies().len(), 1);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn replies_in_the_conversation_with_a_quoting_pr_comment() {
+    let fake = fake();
+    let gh = fake.provider();
+    let note = gh
+        .reply(&pr(12), "issuecomment-8002", "Settings it is.")
+        .unwrap();
+    assert_eq!(
+        (
+            note.provider_thread_id.as_str(),
+            note.provider_note_id.as_str(),
+            note.url.as_str()
+        ),
+        (
+            "issuecomment-8002",
+            "issuecomment-8010",
+            "https://github.com/acme-fixture/widgets/pull/12#issuecomment-8010"
+        )
+    );
+    // Exactly one write: a PR comment quoting the thread's first comment,
+    // read just before.
+    assert_eq!(
+        fake.bodies(),
+        [json!({
+            "body": "> Should the TTL come from settings instead of a constant?\n\nSettings it is."
+        })]
+    );
+    let calls = fake.calls();
+    let lines: Vec<&str> = calls.lines().filter(|l| !l.starts_with("auth ")).collect();
+    assert_eq!(
+        lines,
+        [
+            "api -i repos/acme-fixture/widgets/issues/comments/8002 token=fake-gh-token",
+            "api --method POST repos/acme-fixture/widgets/issues/12/comments --input - token=fake-gh-token",
+        ]
+    );
+
+    // A review summary's thread: the review's own body is quoted, not its
+    // verdict heading.
+    let note = gh
+        .reply(&pr(12), "pullrequestreview-7004", "Fixed.")
+        .unwrap();
+    assert_eq!(note.provider_thread_id, "pullrequestreview-7004");
+    assert_eq!(
+        fake.bodies()[1],
+        json!({ "body": "> One more nit.\n\nFixed." })
+    );
+    assert!(fake
+        .calls()
+        .contains("api -i repos/acme-fixture/widgets/pulls/12/reviews/7004 token="));
+
+    // GitHub's refusal comes through redacted; a thread that is gone is
+    // not found, and nothing is posted for it.
+    let err = gh
+        .reply(&pr(12), "issuecomment-8002", "reject-me")
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert_eq!(
+        err.message,
+        "GitHub: Validation Failed: body is locked ([redacted])"
+    );
+    let posts = fake.bodies().len();
+    let err = gh.reply(&pr(12), "issuecomment-9999", "x").unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::NotFound);
+    assert_eq!(fake.bodies().len(), posts);
 }
 
 #[test]

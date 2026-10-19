@@ -103,8 +103,9 @@ pub trait ReviewProvider: Send + Sync {
         Err(read_only())
     }
 
-    /// Reply to the platform thread `thread` (GitHub: the root comment id;
-    /// GitLab: the discussion id).
+    /// Reply to the platform thread `thread` (GitHub: the root comment id,
+    /// or for a conversation thread a new PR comment quoting its first
+    /// entry; GitLab: the discussion id).
     fn reply(&self, _r: &ReviewRef, _thread: &str, _body: &str) -> PostResultOf<PostedNote> {
         Err(read_only())
     }

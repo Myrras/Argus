@@ -207,8 +207,17 @@ fn github_errors_with(status: &str, stderr: &str) {
                 assert_clean(GH_TOKEN, what, &text);
                 checked += 1;
             }
+            // A reply in the PR conversation (its own read, then a PR
+            // comment) fails clean too.
+            for thread in ["issuecomment-4001", "pullrequestreview-4001"] {
+                let e = gh
+                    .reply(&github_pr(), thread, "Thanks")
+                    .expect_err("every gh call fails");
+                assert_clean(GH_TOKEN, "conversation reply", &format!("{e} / {e:?}"));
+                checked += 1;
+            }
         }
-        assert!(checked >= 140);
+        assert!(checked >= 168);
     }
 }
 
