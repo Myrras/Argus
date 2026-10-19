@@ -17,6 +17,10 @@
 //! link). Searches (`gh search prs`) stay unconditional. Every `gh` call is
 //! killed after a timeout. Thread resolved state comes from one GraphQL query
 //! per PR (REST has none).
+//!
+//! Threads are the review comments (`pulls/{n}/comments`) plus the PR's
+//! conversation: its issue comments and review summaries, threaded by
+//! [`super::github_conversation`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::process::{Output, Stdio};
@@ -29,6 +33,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use super::conditional::{Cached, ConditionalCache};
+use super::github_conversation::{self as conversation, ConversationId};
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
     ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
@@ -788,20 +793,40 @@ impl ReviewProvider for GithubProvider {
     }
 
     /// The REST review comments, regrouped into threads, with GraphQL's
-    /// resolved state laid over them (fetched in parallel; on failure the
-    /// threads just stay unresolved).
+    /// resolved state laid over them (on failure the threads just stay
+    /// unresolved), then the conversation's threads: issue comments and
+    /// review summaries. All fetched in parallel.
+    ///
+    /// The reviews are the list [`fetch_review`](Self::fetch_review) read
+    /// moments before in a poll: read again conditionally, a 304 replays it
+    /// from the cache at no rate-limit cost.
     fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
-        let (comments, states) = std::thread::scope(|s| {
-            let a = s.spawn(|| {
-                self.api_list::<GhComment>(&format!("repos/{}/pulls/{}/comments", r.repo, r.number))
+        let me = self.me()?;
+        let base = format!("repos/{}/pulls/{}", r.repo, r.number);
+        let (comments, issue_comments, reviews, states) = std::thread::scope(|s| {
+            let a = s.spawn(|| self.api_list::<GhComment>(&format!("{base}/comments")));
+            let b = s.spawn(|| {
+                self.api_list::<GhIssueComment>(&format!(
+                    "repos/{}/issues/{}/comments",
+                    r.repo, r.number
+                ))
             });
-            let b = s.spawn(|| self.thread_states(r));
-            (join(a), b.join().ok().flatten())
+            let c = s.spawn(|| self.api_list::<GhReview>(&format!("{base}/reviews")));
+            let d = s.spawn(|| self.thread_states(r));
+            (join(a), join(b), join(c), d.join().ok().flatten())
         });
         let mut threads = group_threads(comments?);
         if let Some(states) = states {
             apply_thread_states(&mut threads, &states);
         }
+        threads.extend(conversation::threads(
+            conversation_entries(issue_comments?, reviews?),
+            &me,
+            &r.author,
+        ));
+        // Oldest first across both kinds; stable, so equal times keep the
+        // review comments' own order.
+        threads.sort_by_key(|t| t.created_at);
         Ok(threads)
     }
 
@@ -857,6 +882,9 @@ impl ReviewProvider for GithubProvider {
     }
 
     fn reply(&self, r: &ReviewRef, thread: &str, body: &str) -> PostResultOf<PostedNote> {
+        if let Some(id) = ConversationId::parse(thread) {
+            return self.reply_in_conversation(r, id, body);
+        }
         let root: u64 = thread
             .parse()
             .map_err(|_| PostError::new(PostErrorKind::InvalidInput, "not a GitHub thread"))?;
@@ -1260,8 +1288,56 @@ struct GhCommitAuthor {
 
 #[derive(Deserialize)]
 struct GhReview {
+    #[serde(default)]
+    id: u64,
     user: Option<GhUser>,
     state: String,
+    /// The summary sent with the review; empty or absent for most (a reply
+    /// to a review comment is a review without one).
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    submitted_at: Option<DateTime<Utc>>,
+}
+
+/// One comment of the PR's conversation (`issues/{n}/comments`).
+#[derive(Deserialize)]
+struct GhIssueComment {
+    id: u64,
+    user: Option<GhUser>,
+    #[serde(default)]
+    body: Option<String>,
+    created_at: DateTime<Utc>,
+}
+
+/// The conversation's entries: every issue comment, and every submitted
+/// review with a non-empty summary (headed by its verdict).
+fn conversation_entries(
+    comments: Vec<GhIssueComment>,
+    reviews: Vec<GhReview>,
+) -> Vec<conversation::Entry> {
+    let comments = comments.into_iter().map(|c| {
+        let body = c.body.unwrap_or_default();
+        conversation::Entry {
+            id: ConversationId::Comment(c.id),
+            author: login(&c.user),
+            shown: body.clone(),
+            body,
+            created_at: c.created_at,
+        }
+    });
+    let reviews = reviews.into_iter().filter_map(|r| {
+        let label = conversation::review_label(&r.state)?;
+        let body = r.body.filter(|b| !b.trim().is_empty())?;
+        Some(conversation::Entry {
+            id: ConversationId::Review(r.id),
+            author: login(&r.user),
+            shown: conversation::review_note(label, &body),
+            body,
+            created_at: r.submitted_at?,
+        })
+    });
+    comments.chain(reviews).collect()
 }
 
 #[derive(Deserialize)]
@@ -1375,6 +1451,44 @@ impl GithubProvider {
             Some(m) => PostError::new(PostErrorKind::PostRejected, m),
             None if stderr.contains("http 404") => CoreError::NotFound.into(),
             None => CoreError::Provider("gh could not post to GitHub".into()).into(),
+        })
+    }
+}
+
+impl GithubProvider {
+    /// GitHub's conversation has no threads: a reply is a new PR comment
+    /// that opens with a quote of the thread's first entry, as GitHub's own
+    /// "Quote reply" does, which files it under that thread on the next
+    /// fetch (see [`conversation::quote`]). The first entry is read for that
+    /// (a conditional GET) right before the one write.
+    fn reply_in_conversation(
+        &self,
+        r: &ReviewRef,
+        id: ConversationId,
+        body: &str,
+    ) -> PostResultOf<PostedNote> {
+        let root = match id {
+            ConversationId::Comment(n) => {
+                self.api::<GhIssueComment>(&format!("repos/{}/issues/comments/{n}", r.repo))?
+                    .body
+            }
+            ConversationId::Review(n) => {
+                self.api::<GhReview>(&format!("repos/{}/pulls/{}/reviews/{n}", r.repo, r.number))?
+                    .body
+            }
+        };
+        let text = match conversation::quote(root.as_deref().unwrap_or_default()) {
+            Some(q) => format!("{q}\n\n{body}"),
+            None => body.to_string(),
+        };
+        let posted: GhPosted = self.post_json(
+            &format!("repos/{}/issues/{}/comments", r.repo, r.number),
+            &serde_json::json!({ "body": text }),
+        )?;
+        Ok(PostedNote {
+            url: posted.html_url.unwrap_or_else(|| r.url.clone()),
+            provider_thread_id: id.key(),
+            provider_note_id: ConversationId::Comment(posted.id).key(),
         })
     }
 }

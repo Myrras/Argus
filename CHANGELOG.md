@@ -197,6 +197,8 @@ when it merges.
   Argus cannot open its data at startup it says so, naming the folder.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and
   Close Window (⌘W).
+- GitHub pull request conversation comments and review summaries now show in
+  the Conversation section and count for rounds and the AI pass.
 
 ## [0.1.0] - 2026-10-16
 

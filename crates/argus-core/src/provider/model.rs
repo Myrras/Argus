@@ -254,8 +254,9 @@ pub struct Note {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Thread {
-    /// The platform's thread id (GitHub: root comment id; GitLab: discussion
-    /// id).
+    /// The platform's thread id (GitHub: root comment id, or for the PR
+    /// conversation `issuecomment-<id>` / `pullrequestreview-<id>` of its
+    /// first entry; GitLab: discussion id).
     pub id: String,
     pub author: String,
     pub created_at: DateTime<Utc>,
@@ -263,7 +264,8 @@ pub struct Thread {
     /// when that query fails.
     pub resolved: bool,
     pub outdated: bool,
-    /// `None` for a GitLab discussion on the MR as a whole.
+    /// `None` for a discussion on the review as a whole (a GitLab MR-level
+    /// discussion, GitHub's PR conversation).
     pub anchor: Option<Anchor>,
     pub notes: Vec<Note>,
 }

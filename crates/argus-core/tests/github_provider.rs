@@ -11,9 +11,11 @@ use std::path::{Path, PathBuf};
 
 use argus_core::provider::{
     DiffRange, FileStatus, GithubProvider, ProviderId, ReviewProvider, ReviewRef, ReviewState,
-    ReviewerState, Side,
+    ReviewerState, Side, Thread,
 };
+use argus_core::review::{classify, RoundInput};
 use argus_core::CoreError;
+use argus_core::{ReviewStatus, RoundReason};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/github")
@@ -96,6 +98,8 @@ case "$path" in
   "$P/reviews?per_page=100") respond "$F/pull_12_reviews.json" ;;
   "$P/comments?per_page=100") respond "$F/pull_12_comments_page1.json" "per_page=100&page=2" ;;
   "$P/comments?per_page=100&page=2") respond "$F/pull_12_comments_page2.json" ;;
+  "repos/acme-fixture/widgets/issues/12/comments?per_page=100") respond "$F/issue_12_comments_page1.json" "per_page=100&page=2" ;;
+  "repos/acme-fixture/widgets/issues/12/comments?per_page=100&page=2") respond "$F/issue_12_comments_page2.json" ;;
   "$P/files?per_page=100") respond "$F/pull_12_files_page1.json" "per_page=100&page=2" ;;
   "$P/files?per_page=100&page=2") respond "$F/pull_12_files_page2.json" ;;
   "repos/acme-fixture/widgets/compare/$B0...$C3") respond "$F/compare_b0_c3_merge_base.txt" ;;
@@ -151,6 +155,11 @@ fn script(body: &str) -> Fake {
 #[cfg(not(unix))]
 fn script(_body: &str) -> Fake {
     unreachable!("fake gh scripts are Unix-only; these tests are ignored on Windows")
+}
+
+/// The review comment threads only (the conversation's have no anchor).
+fn code_threads(threads: Vec<Thread>) -> Vec<Thread> {
+    threads.into_iter().filter(|t| t.anchor.is_some()).collect()
 }
 
 fn widgets_12() -> ReviewRef {
@@ -246,7 +255,7 @@ fn merged_pr_with_my_approval() {
 fn rebuilds_threads_from_review_comments() {
     let fake = script(FAKE);
     let gh = fake.provider("github.com", None);
-    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let threads = code_threads(gh.fetch_threads(&widgets_12()).unwrap());
     let ids: Vec<&str> = threads.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, ["501", "510", "530", "520"]);
 
@@ -282,6 +291,130 @@ fn rebuilds_threads_from_review_comments() {
     assert_eq!(renamed.side, Side::Old);
     assert_eq!(renamed.line_old, Some(4));
     assert_eq!(renamed.path_new.as_deref(), Some("src/new_name.rs"));
+}
+
+/// (thread id, author, note ids) of the conversation's threads.
+fn conversation(threads: &[Thread]) -> Vec<(String, String, Vec<String>)> {
+    threads
+        .iter()
+        .filter(|t| t.anchor.is_none())
+        .map(|t| {
+            (
+                t.id.clone(),
+                t.author.clone(),
+                t.notes.iter().map(|n| n.id.clone()).collect(),
+            )
+        })
+        .collect()
+}
+
+fn owned(ids: &[&str]) -> Vec<String> {
+    ids.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_conversation_and_review_summaries_are_threads_without_an_anchor() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    // Both pages of issue comments; the review summaries with a body (not
+    // the empty ones, not the pending one); oldest first among the review
+    // comment threads.
+    assert_eq!(
+        conversation(&threads),
+        [
+            (
+                "issuecomment-8001".into(),
+                "alice-fixture".into(),
+                // The user's quote reply.
+                owned(&["issuecomment-8001", "issuecomment-8005"])
+            ),
+            (
+                "pullrequestreview-7003".into(),
+                "dana-fixture".into(),
+                owned(&["pullrequestreview-7003"])
+            ),
+            (
+                "pullrequestreview-7004".into(),
+                "dana-fixture".into(),
+                owned(&["pullrequestreview-7004"])
+            ),
+            (
+                "issuecomment-8002".into(),
+                "rev-fixture".into(),
+                // The PR author's plain answer, then another reviewer's
+                // quote reply.
+                owned(&[
+                    "issuecomment-8002",
+                    "issuecomment-8004",
+                    "issuecomment-8006"
+                ])
+            ),
+            (
+                "issuecomment-8003".into(),
+                "carol-fixture".into(),
+                // The author quoting carol: her thread, not the user's.
+                owned(&["issuecomment-8003", "issuecomment-8007"])
+            ),
+        ]
+    );
+    let all: Vec<_> = threads.iter().map(|t| t.created_at).collect();
+    assert!(all.windows(2).all(|w| w[0] <= w[1]), "oldest first");
+    for t in threads.iter().filter(|t| t.anchor.is_none()) {
+        assert!(!t.resolved && !t.outdated);
+        assert!(t.notes.iter().all(|n| !n.system));
+    }
+    let review = threads
+        .iter()
+        .find(|t| t.id == "pullrequestreview-7003")
+        .unwrap();
+    assert_eq!(review.notes[0].body, "**Approved**\n\nLooks fine.");
+    assert_eq!(review.created_at.to_rfc3339(), "2026-10-09T12:00:00+00:00");
+    let mine = threads
+        .iter()
+        .find(|t| t.id == "issuecomment-8002")
+        .unwrap();
+    assert_eq!(mine.notes[1].body, "Moved it to settings in c3.");
+    assert_eq!(mine.notes[1].author, "alice-fixture");
+
+    // The same ids on the next poll (all 304s).
+    let again = gh.fetch_threads(&widgets_12()).unwrap();
+    assert_eq!(again, threads);
+    assert!(fake
+        .calls()
+        .contains("304 repos/acme-fixture/widgets/issues/12/comments?per_page=100&page=2\n"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_pr_authors_conversation_answer_counts_as_a_reply() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let at = |s: &str| s.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+    let round = |reviewed_at: &str| {
+        classify(&RoundInput {
+            state: ReviewState::Open,
+            head_sha: HEAD,
+            last_reviewed_sha: Some(HEAD),
+            last_reviewed_at: Some(at(reviewed_at)),
+            approved_at: None,
+            rerequested_at: None,
+            threads: &threads,
+            me: "rev-fixture",
+        })
+    };
+    // Reviewed after every review comment reply (the last is 10-10 09:00)
+    // but before alice answered the user's conversation comment at 15:00
+    // (carol's plain comment at 13:00 is a thread of her own: no reply).
+    let r = round("2026-10-10T14:00:00Z");
+    assert_eq!(r.status, ReviewStatus::NeedsReReview);
+    assert_eq!(r.reasons, [RoundReason::AuthorReplied]);
+    // After carol's quote reply: alice's later comment quotes carol, in
+    // carol's thread, so nothing new for the user.
+    let r = round("2026-10-10T17:30:00Z");
+    assert_eq!(r.status, ReviewStatus::WaitingOnAuthor);
 }
 
 const BASE: &str = "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0";
@@ -579,14 +712,18 @@ fn a_second_poll_sends_the_etags_and_replays_the_304s() {
     };
     let first = poll();
     let calls = fake.calls();
-    // Within the first poll only the PR itself is read again (detail, and
-    // around the files): already a 304.
+    // Within the first poll only the PR itself (detail, and around the
+    // files) and its reviews (detail, then the conversation's review
+    // summaries) are read again: already a 304, so the threads reuse the
+    // detail's reviews for free.
     let repeats: Vec<&str> = calls.lines().filter(|l| l.starts_with("304 ")).collect();
-    assert!(!repeats.is_empty());
+    assert!(repeats.contains(&"304 repos/acme-fixture/widgets/pulls/12/reviews?per_page=100"));
     assert!(
-        repeats
-            .iter()
-            .all(|l| *l == "304 repos/acme-fixture/widgets/pulls/12"),
+        repeats.iter().all(|l| [
+            "304 repos/acme-fixture/widgets/pulls/12",
+            "304 repos/acme-fixture/widgets/pulls/12/reviews?per_page=100"
+        ]
+        .contains(l)),
         "{repeats:?}"
     );
 
@@ -600,6 +737,10 @@ fn a_second_poll_sends_the_etags_and_replays_the_304s() {
     )));
     // Page 2 was still followed: its link came from the cached page 1.
     assert!(calls.contains(&format!("304 {comments}&page=2\n")));
+    // The conversation too, both pages.
+    let conversation = "repos/acme-fixture/widgets/issues/12/comments?per_page=100";
+    assert!(calls.contains(&format!("304 {conversation}\n")));
+    assert!(calls.contains(&format!("304 {conversation}&page=2\n")));
     assert!(calls.contains("304 repos/acme-fixture/widgets/pulls/12\n"));
     assert!(calls.contains("304 repos/acme-fixture/widgets/pulls/12/files?per_page=100&page=2\n"));
     // The `--jq` merge base is cached too.
@@ -611,7 +752,7 @@ fn a_second_poll_sends_the_etags_and_replays_the_304s() {
 fn graphql_marks_resolved_threads_across_pages() {
     let fake = script(FAKE);
     let gh = fake.provider("github.com", None);
-    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let threads = code_threads(gh.fetch_threads(&widgets_12()).unwrap());
     let state: Vec<(&str, bool, bool)> = threads
         .iter()
         .map(|t| (t.id.as_str(), t.resolved, t.outdated))
@@ -643,7 +784,7 @@ fn a_failing_graphql_query_leaves_threads_unresolved() {
     let fake = script(FAKE);
     std::fs::write(fake.log.with_file_name("graphql-down"), "").unwrap();
     let gh = fake.provider("github.com", None);
-    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let threads = code_threads(gh.fetch_threads(&widgets_12()).unwrap());
     let ids: Vec<&str> = threads.iter().map(|t| t.id.as_str()).collect();
     assert_eq!(ids, ["501", "510", "530", "520"]);
     assert!(threads.iter().all(|t| !t.resolved));
@@ -739,8 +880,8 @@ fn a_hung_gh_is_killed_after_the_timeout() {
 }
 
 /// A fake `gh` serving PR 12's review comments from `page1.json` and
-/// `page2.json` next to its log, with an ETag per file content and a 304
-/// for a request that names it; GraphQL is down.
+/// `page2.json` next to its log (and no conversation), with an ETag per
+/// file content and a 304 for a request that names it; GraphQL is down.
 const PAGED: &str = r##"
 echo "$*" >> "$LOG"
 case "$*" in "auth token"*) exit 1 ;; "api graphql "*) exit 1 ;; esac
@@ -758,6 +899,9 @@ D="${LOG%/*}"
 case "$path" in
   "repos/acme-fixture/widgets/pulls/12/comments?per_page=100") f="$D/page1.json" ;;
   "repos/acme-fixture/widgets/pulls/12/comments?per_page=100&page=2") f="$D/page2.json" ;;
+  user) f="$F/user.json" ;;
+  "repos/acme-fixture/widgets/issues/12/comments?per_page=100") f="$F/empty.json" ;;
+  "repos/acme-fixture/widgets/pulls/12/reviews?per_page=100") f="$F/empty.json" ;;
   *) printf 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}'; exit 1 ;;
 esac
 tag="\"fx-$(cksum < "$f" | cut -d' ' -f1)\""
