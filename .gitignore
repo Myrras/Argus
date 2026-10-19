@@ -28,3 +28,6 @@ coverage
 # Agent worktrees
 .claude/worktrees
 .podium
+
+# Local signing identity (machine-specific)
+src-tauri/tauri.dev-signed.conf.json

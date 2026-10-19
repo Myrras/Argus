@@ -27,6 +27,47 @@ sweep:
         && echo "recycled stale target/ artifacts" \
         || echo "cargo-sweep not installed; skipping target/ recycle (cargo install cargo-sweep)"
 
+# Build + launch a debug .app signed with a STABLE self-signed cert (macOS).
+# `just dev` ad-hoc-signs the binary with a fresh identity every rebuild, so the
+# keychain (GitLab token) re-prompts each run and "Always Allow" never sticks.
+# This recipe keeps one signing identity across rebuilds, so a single "Always
+# Allow" persists. Tradeoff: runs a bundle, so there's NO hot reload — use
+# `just dev` for fast iteration and this when the keychain prompt is in your way.
+# One-time setup: create a self-signed *Code Signing* certificate named
+# "Argus Dev" (Keychain Access → Certificate Assistant → Create a Certificate);
+# to use a different name, edit src-tauri/tauri.dev-signed.conf.json.
+dev-signed: _signed-conf
+    pnpm tauri build --debug --bundles app --config src-tauri/tauri.dev-signed.conf.json
+    @just sweep
+    open "${CARGO_TARGET_DIR:-target}/debug/bundle/macos/Argus.app"
+
+# Build a SIGNED release .app for personal install (macOS).
+# Reuses the stable signing identity in tauri.dev-signed.conf.json (that file
+# only sets bundle.macOS.signingIdentity, so it's equally valid for release).
+# A stable identity means macOS keychain "Always Allow" persists and the app
+# launches with no Gatekeeper prompt on this machine. Output:
+# target/release/bundle/macos/Argus.app. Install: drag it into /Applications,
+# or run `just install-signed`.
+# Only the .app is built (--bundles app): the .dmg step isn't needed for a
+# personal install.
+build-signed: _signed-conf
+    pnpm install
+    pnpm tauri build --bundles app --config src-tauri/tauri.dev-signed.conf.json
+    @just sweep
+    open "${CARGO_TARGET_DIR:-target}/release/bundle/macos"
+
+# Build the signed release and copy it straight into /Applications.
+install-signed: build-signed
+    rm -rf "/Applications/Argus.app"
+    cp -R "${CARGO_TARGET_DIR:-target}/release/bundle/macos/Argus.app" "/Applications/Argus.app"
+    @echo "Installed → /Applications/Argus.app"
+
+# Guard for the signed recipes. The config is gitignored (it names *your*
+# machine's signing identity), so a fresh clone or git worktree does not have it
+# and tauri would fail with an opaque config error instead.
+_signed-conf:
+    @test -f src-tauri/tauri.dev-signed.conf.json || { echo "error: src-tauri/tauri.dev-signed.conf.json is missing."; echo "It is gitignored (machine-specific signing identity), so copy it from another checkout of this repo, or create it per 'macOS keychain prompt during development' in CLAUDE.md."; echo "Your identities: security find-identity -v -p codesigning"; exit 1; }
+
 # Regenerate the app icons from src-tauri/icons/source/argus.svg (needs
 # rsvg-convert: `brew install librsvg`). Only the desktop icons are kept.
 icons:

@@ -260,6 +260,9 @@ colors/durations/easings.
 ```
 just dev            # Vite + Tauri, hot reload
 just build          # .app + APFS .dmg (scripts/make-dmg.sh)
+just dev-signed     # debug .app, stable signing identity (no hot reload)
+just build-signed   # release .app, stable signing identity
+just install-signed # build-signed + copy to /Applications
 just test           # cargo test --workspace + vitest
 just test-core      # argus-core only
 just lint           # clippy -D warnings + eslint
@@ -267,6 +270,20 @@ just format         # rustfmt + prettier
 just version-check  # versions in sync across manifests
 just coverage       # cargo-llvm-cov + Vitest v8 (not in `just test` or CI)
 ```
+
+### macOS keychain prompt during development
+
+`just dev` ad-hoc signs the binary, and that signature changes on every
+rebuild, so macOS re-asks for keychain access to the GitLab token (service
+`com.argus.app.gitlab`) each run; "Always Allow" can't stick. Dev-only: a
+properly signed release reads its items silently.
+
+- `just dev-signed`, `just build-signed` and `just install-signed` sign with a
+  stable identity from the gitignored `src-tauri/tauri.dev-signed.conf.json`
+  (only `bundle.macOS.signingIdentity`), so one "Always Allow" persists.
+  `dev-signed` has no hot reload; keep `just dev` for fast iteration.
+- The conf is machine-specific: copy it from Selene/Podium or create it.
+  List identities with `security find-identity -v -p codesigning`.
 
 ## Testing
 
