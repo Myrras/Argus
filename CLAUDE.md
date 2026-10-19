@@ -80,6 +80,11 @@ sibling app Iris (`../Iris`).
     (migration 2), keyed path + `content_sha` (GitHub blob sha, GitLab diff
     digest) of the review's own diff. Keys `nextFile`/`prevFile`/
     `toggleViewed` (scope `files`).
+  - GitHub conversation (`provider/github_conversation.rs`): issue comments
+    and non-empty submitted review bodies are anchor-less threads
+    (`issuecomment-<id>`, `pullrequestreview-<id>`); threading by quote (`>`
+    block found in an earlier entry) or the PR author answering after the
+    user; replies post an issue comment quoting the thread's root.
 - ✅ **Milestone 4 — Posting.** Core `post/`: `post_comments` (one by one,
   a result per comment in order, moved to the platform's current head),
   `reply_to_thread`, `approve_review` (pinned to the head the user saw:
