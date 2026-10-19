@@ -4,7 +4,12 @@
  * already explain.
  */
 
-import type { ProviderId, ProviderStatus, RefreshError } from "../ipc/types";
+import type {
+  ProviderId,
+  ProviderStatus,
+  RefreshError,
+  RefreshReport,
+} from "../ipc/types";
 import { PROVIDER_LABEL } from "./reviews";
 import { clockTime } from "./time";
 
@@ -18,6 +23,27 @@ export interface BannerItem {
   settings?: boolean;
   /** The core's full message, for a tooltip, when the text is reworded. */
   detail?: string;
+}
+
+/** When each provider's setup (settings, GitLab token) last changed, in ms since the epoch. */
+export type SetupChanges = Partial<Record<ProviderId, number>>;
+
+/**
+ * The last refresh's errors that still describe the current setup. A refresh that began before a
+ * provider's setup changed ran with the old one: saving the GitLab URL restarts the poll, which
+ * refreshes before the token is stored, and its "GitLab is not set up" would stay until the next
+ * report. Such errors are dropped; the refresh the change started brings its own.
+ */
+export function currentErrors(
+  report: RefreshReport | null,
+  changed: SetupChanges,
+): RefreshError[] {
+  if (!report) return [];
+  const began = Date.parse(report.refreshedAt);
+  return report.errors.filter((e) => {
+    const at = changed[e.provider];
+    return at === undefined || !(began < at);
+  });
 }
 
 /** The problems, derived from the status and the last refresh. */

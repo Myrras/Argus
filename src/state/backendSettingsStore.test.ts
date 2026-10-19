@@ -113,6 +113,32 @@ describe("backendSettingsStore", () => {
     expect(useBackendSettingsStore.getState().tokenPresent).toBe(true);
   });
 
+  it("notes when a provider's setup changed, as asked for", async () => {
+    backend(status(), false);
+    await useBackendSettingsStore.getState().load();
+    await useBackendSettingsStore.getState().save({ pollIntervalSecs: 300 });
+    expect(useBackendSettingsStore.getState().setupChanged).toEqual({});
+
+    const before = Date.now();
+    await useBackendSettingsStore.getState().save({
+      gitlab: { baseUrl: "http://gitlab.vpn.test" },
+    });
+    const saved = useBackendSettingsStore.getState().setupChanged;
+    expect(Object.keys(saved)).toEqual(["gitlab"]);
+    expect(saved.gitlab).toBeGreaterThanOrEqual(before);
+
+    // A token the keychain refused changes nothing.
+    mockInvoke.mockRejectedValueOnce({ kind: "provider", message: "nope" });
+    await useBackendSettingsStore.getState().setGitlabToken(TOKEN);
+    expect(useBackendSettingsStore.getState().setupChanged).toEqual(saved);
+
+    const asked = Date.now();
+    await useBackendSettingsStore.getState().setGitlabToken(TOKEN);
+    expect(
+      useBackendSettingsStore.getState().setupChanged.gitlab,
+    ).toBeGreaterThanOrEqual(asked);
+  });
+
   it("re-checks the providers after every refresh", async () => {
     const loggedOut = status({
       github: {

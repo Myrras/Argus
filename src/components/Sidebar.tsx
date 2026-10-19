@@ -4,6 +4,7 @@
  * below it, the Providers section.
  */
 
+import { currentErrors } from "../lib/banner";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
@@ -18,6 +19,7 @@ export function Sidebar({ now }: { now: number }) {
   const status = useBackendSettingsStore((s) => s.status);
   const openSettings = useSettingsRequestStore((s) => s.open);
   const report = useReviewStore((s) => s.lastRefresh);
+  const setupChanged = useBackendSettingsStore((s) => s.setupChanged);
 
   return (
     <aside
@@ -34,7 +36,7 @@ export function Sidebar({ now }: { now: number }) {
       </section>
       <ProvidersSection
         status={status}
-        errors={report?.errors ?? []}
+        errors={currentErrors(report, setupChanged)}
         onOpenSettings={openSettings}
       />
     </aside>

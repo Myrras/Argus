@@ -12,6 +12,10 @@
  * nowhere else (never into `Settings`), and only whether one is stored ever
  * comes back. Failures are error toasts. UI-only preferences live in
  * `settingsStore` instead.
+ *
+ * `setupChanged` notes when a provider's settings or token last changed
+ * (when the change was asked for), so the sidebar can drop errors of a
+ * refresh that began before it (`lib/banner`'s `currentErrors`).
  */
 
 import { create } from "zustand";
@@ -25,7 +29,8 @@ import {
   updateSettings,
 } from "../ipc/commands";
 import { onReviewsRefreshed } from "../ipc/events";
-import type { ProviderStatus, Settings } from "../ipc/types";
+import type { ProviderId, ProviderStatus, Settings } from "../ipc/types";
+import type { SetupChanges } from "../lib/banner";
 import { toastError } from "./toastStore";
 
 /** Bounds of the refresh interval in minutes (the core floors it at 30 s). */
@@ -37,6 +42,8 @@ interface BackendSettingsState {
   settings: Settings | null;
   tokenPresent: boolean;
   status: ProviderStatus | null;
+  /** When each provider's settings or token last changed (ms). */
+  setupChanged: SetupChanges;
   load: () => Promise<void>;
   /** Re-read the provider status and whether a token is stored. */
   refreshStatus: () => Promise<void>;
@@ -50,6 +57,19 @@ interface BackendSettingsState {
 let saving: Promise<unknown> = Promise.resolve();
 const queued: Partial<Settings>[] = [];
 
+/** The providers whose setup a settings patch changes. */
+const PROVIDER_KEYS: readonly ProviderId[] = ["github", "gitlab"];
+
+function changedBy(
+  patch: Partial<Settings>,
+  at: number,
+  before: SetupChanges,
+): SetupChanges {
+  const touched = PROVIDER_KEYS.filter((p) => p in patch);
+  if (touched.length === 0) return before;
+  return { ...before, ...Object.fromEntries(touched.map((p) => [p, at])) };
+}
+
 /** `base` with the patches still waiting on top (what the user sees). */
 function withQueued(base: Settings): Settings {
   return Object.assign({ ...base }, ...queued) as Settings;
@@ -60,6 +80,7 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
     settings: null,
     tokenPresent: false,
     status: null,
+    setupChanged: {},
 
     load: async () => {
       try {
@@ -92,9 +113,14 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
         const current = get().settings;
         try {
           if (!current) throw new Error("The settings are not loaded.");
+          // Before the call: the refresh the save starts begins after it.
+          const asked = Date.now();
           const stored = await updateSettings({ ...current, ...patch });
           queued.shift();
-          set({ settings: withQueued(stored) });
+          set((s) => ({
+            settings: withQueued(stored),
+            setupChanged: changedBy(patch, asked, s.setupChanged),
+          }));
         } catch (e) {
           queued.shift();
           toastError("Could not save the settings", toIpcError(e).message);
@@ -112,8 +138,10 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
     },
 
     setGitlabToken: async (token) => {
+      const asked = Date.now();
       try {
         await setGitlabToken(token);
+        set((s) => ({ setupChanged: { ...s.setupChanged, gitlab: asked } }));
       } catch (e) {
         toastError(
           token ? "Could not store the token" : "Could not remove the token",

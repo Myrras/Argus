@@ -2,7 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 import { status } from "../test/fixtures";
-import { bannerItems } from "../lib/banner";
+import { bannerItems, currentErrors } from "../lib/banner";
 import { useLayoutStore } from "../state/layoutStore";
 import { ProvidersSection } from "./ProvidersSection";
 
@@ -228,5 +228,37 @@ describe("ProvidersSection", () => {
     // The core's own message stays available.
     expect(item.closest("li")).toHaveAttribute("title", message);
     expect(screen.queryByText(/Argus tries again/)).not.toBeInTheDocument();
+  });
+
+  it("drops a provider's errors from a refresh that began before its setup changed", () => {
+    const err = (provider: "github" | "gitlab", message: string) => ({
+      provider,
+      review: null,
+      message,
+      unavailable: true,
+      rateLimitedUntil: null,
+    });
+    const report = {
+      changed: [],
+      errors: [
+        err(
+          "gitlab",
+          "GitLab is not set up: add its URL and a token in Settings.",
+        ),
+        err("github", "The GitHub CLI (gh) is missing or not logged in."),
+      ],
+      refreshedAt: "2026-10-19T12:12:41.100Z",
+    };
+    const at = (iso: string) => Date.parse(iso);
+    expect(currentErrors(null, {})).toEqual([]);
+    expect(currentErrors(report, {})).toEqual(report.errors);
+    // GitLab's token came after the refresh began: only GitHub's stays.
+    expect(
+      currentErrors(report, { gitlab: at("2026-10-19T12:12:41.500Z") }),
+    ).toEqual([report.errors[1]]);
+    // A refresh that began after the change keeps its errors.
+    expect(
+      currentErrors(report, { gitlab: at("2026-10-19T12:12:41.000Z") }),
+    ).toEqual(report.errors);
   });
 });

@@ -27,6 +27,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import App from "./App";
+import type { RefreshError, RefreshReport } from "./ipc/types";
 import { useReviewStore } from "./state/reviewStore";
 import { useBackendSettingsStore } from "./state/backendSettingsStore";
 import { useSettingsRequestStore } from "./state/settingsRequestStore";
@@ -130,6 +131,96 @@ describe("App", () => {
     act(() => events.emit("menu:open-settings"));
     expect(
       await screen.findByRole("dialog", { name: "Settings" }),
+    ).toBeInTheDocument();
+  });
+
+  it("drops a GitLab error from before its token was stored", async () => {
+    // The URL save restarted the poll, which refreshed before the token
+    // was there: its report says GitLab is not set up.
+    const notSetUp: RefreshError = {
+      provider: "gitlab",
+      review: null,
+      message: "GitLab is not set up: add its URL and a token in Settings.",
+      unavailable: true,
+      rateLimitedUntil: null,
+    };
+    const stale: RefreshReport = {
+      changed: [],
+      errors: [notSetUp],
+      refreshedAt: new Date(Date.now() - 1000).toISOString(),
+    };
+    let tokenStored = false;
+    const base = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "last_refresh":
+          return Promise.resolve(stale);
+        case "get_settings":
+          return Promise.resolve(
+            settings({ gitlab: { baseUrl: "http://gitlab.vpn.test" } }),
+          );
+        case "provider_status":
+          return Promise.resolve(
+            status({
+              gitlab: {
+                configured: true,
+                baseUrl: "http://gitlab.vpn.test",
+                tokenPresent: tokenStored,
+                problem: null,
+                insecure: true,
+              },
+            }),
+          );
+        case "gitlab_token_present":
+          return Promise.resolve(tokenStored);
+        case "set_gitlab_token":
+          tokenStored = true;
+          return Promise.resolve(null);
+        default:
+          return base(cmd);
+      }
+    });
+    render(<App />);
+    const providers = screen.getByRole("region", { name: "Providers" });
+    await within(providers).findByText(
+      "GitLab has no token: add one in Settings.",
+    );
+
+    fireEvent.click(screen.getByTitle("Settings (Ctrl+,)"));
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    fireEvent.click(within(dialog).getByRole("tab", { name: "GitLab" }));
+    fireEvent.change(within(dialog).getByLabelText("Personal access token"), {
+      target: { value: "glpat-fixture-not-a-real-token" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(within(providers).getByText("Token set")).toBeInTheDocument(),
+    );
+    // No new report yet (the refresh with the token is still running), and
+    // still no "not set up": that report predates the token.
+    expect(useReviewStore.getState().lastRefresh).toEqual(stale);
+    expect(within(providers).queryByText(/is not set up/)).toBeNull();
+    expect(within(providers).queryByRole("status")).toBeNull();
+
+    // A refresh that began after the token does show its GitLab errors.
+    act(() =>
+      useReviewStore.setState({
+        lastRefresh: {
+          ...stale,
+          errors: [
+            {
+              ...notSetUp,
+              message: "GitLab rejected the token: check Settings.",
+            },
+          ],
+          refreshedAt: new Date(Date.now() + 1000).toISOString(),
+        },
+      }),
+    );
+    expect(
+      within(providers).getByText(
+        "GitLab: GitLab rejected the token: check Settings.",
+      ),
     ).toBeInTheDocument();
   });
 
