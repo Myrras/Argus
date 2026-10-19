@@ -724,6 +724,106 @@ fn saving_settings_does_not_wait_for_a_refresh_under_way() {
     core.shutdown();
 }
 
+/// Wait until `f` holds (another thread's progress), failing after 10 s.
+fn wait_until(what: &str, f: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !f() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A core polling a GitHub fake plus, once a GitLab URL is saved, a GitLab
+/// fake that is "not set up" until its token is stored (the keychain, read
+/// per call as `KeychainToken` does). Also counts the provider builds.
+fn core_with_gitlab_token(gh: &Arc<Fake>, gl: &Arc<Fake>) -> (Arc<crate::Core>, Arc<AtomicUsize>) {
+    *gl.down.lock().unwrap() = Some(|| CoreError::GitlabNotConfigured);
+    let mut core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(gh)),
+    );
+    let builds = Arc::new(AtomicUsize::new(0));
+    let (fgh, fgl, built) = (gh.clone(), gl.clone(), builds.clone());
+    core.build_providers = Box::new(move |s: &crate::Settings| {
+        built.fetch_add(1, Ordering::SeqCst);
+        let mut out = vec![fgh.clone() as Arc<dyn ReviewProvider>];
+        if s.gitlab_enabled() {
+            out.push(fgl.clone());
+        }
+        out
+    });
+    let keychain = gl.clone();
+    core.write_gitlab_token = Box::new(move |_url: &str, token: &str| {
+        *keychain.down.lock().unwrap() = token
+            .trim()
+            .is_empty()
+            .then_some(|| CoreError::GitlabNotConfigured);
+        Ok(())
+    });
+    (Arc::new(core), builds)
+}
+
+#[test]
+fn storing_the_gitlab_token_leaves_no_stale_not_set_up_error() {
+    // The Settings form saves the URL first and the token right after. The
+    // URL save restarts the loop, whose first refresh runs before the token
+    // is stored: GitLab "is not set up". That refresh is still on the
+    // network (GitHub) when the token comes in.
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    let (core, builds) = core_with_gitlab_token(&gh, &gl);
+    let (tx, rx) = mpsc::channel();
+    core.start_polling(move |r| {
+        let _ = tx.send(r.clone());
+    });
+    let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+
+    let (started, go) = gh.hold_next_fetch();
+    let mut s = core.settings();
+    s.gitlab.base_url = "http://gitlab.example.test".into();
+    core.update_settings(s).unwrap();
+    started.recv().unwrap();
+    wait_until("GitLab was asked without a token", || {
+        gl.calls.load(Ordering::SeqCst) >= 1
+    });
+    let built = builds.load(Ordering::SeqCst);
+
+    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
+    // A token is part of GitLab's setup: fresh providers, as for a save.
+    assert_eq!(builds.load(Ordering::SeqCst), built + 1);
+    go.send(()).unwrap();
+
+    // The refresh from before the token reports nothing; the next one
+    // reads GitLab with it, right away (not a poll interval later).
+    let next = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(
+        next.errors.is_empty(),
+        "a stale error was reported: {:?}",
+        next.errors
+    );
+    assert!(gl.calls.load(Ordering::SeqCst) >= 2);
+    core.shutdown();
+}
+
+#[test]
+fn storing_the_gitlab_token_without_a_loop_rebuilds_the_providers() {
+    let gh = github();
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    let (core, builds) = core_with_gitlab_token(&gh, &gl);
+    let mut s = core.settings();
+    s.gitlab.base_url = "https://gitlab.example.test".into();
+    core.update_settings(s).unwrap();
+    let built = builds.load(Ordering::SeqCst);
+    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
+    assert_eq!(builds.load(Ordering::SeqCst), built + 1);
+    assert!(core.poller.lock().unwrap().is_none(), "no loop was started");
+    assert!(core.refresh().errors.is_empty());
+}
+
+const FIXTURE_TOKEN: &str = "glpat-fixture-not-a-real-token";
+
 #[test]
 fn a_stopped_loop_waiting_for_the_refresh_lock_does_not_refresh() {
     let gh = github();

@@ -47,7 +47,7 @@ mod testutil;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
 
@@ -82,6 +82,11 @@ pub type RefreshCallback = Arc<dyn Fn(&RefreshReport) + Send + Sync>;
 /// tests swap in their own).
 type ProviderBuilder = Box<dyn Fn(&Settings) -> Vec<Arc<dyn ReviewProvider>> + Send + Sync>;
 
+/// Where a core stores the GitLab token for an instance URL (the OS
+/// keychain, [`provider::gitlab::gitlab_token_set`]; tests swap in their
+/// own).
+type TokenWriter = Box<dyn Fn(&str, &str) -> CoreResult<()> + Send + Sync>;
+
 /// The application's single entry point.
 ///
 /// Cheap to share: hold it behind an `Arc` in the shell and clone the handle
@@ -100,6 +105,8 @@ pub struct Core {
     providers: Mutex<Vec<Arc<dyn ReviewProvider>>>,
     /// What a settings save builds its providers with.
     build_providers: ProviderBuilder,
+    /// What [`set_gitlab_token`](Self::set_gitlab_token) stores the token with.
+    write_gitlab_token: TokenWriter,
     poller: Mutex<Option<(poll::Poller, RefreshCallback)>>,
     /// Held by a settings save and a poll start from reading the providers
     /// to putting the loop in place (see [`update_settings`](Self::update_settings)).
@@ -171,6 +178,7 @@ impl Core {
             settings: Mutex::new(settings),
             providers: Mutex::new(providers),
             build_providers: Box::new(provider::from_settings),
+            write_gitlab_token: Box::new(provider::gitlab::gitlab_token_set),
             poller: Mutex::new(None),
             settings_update: Mutex::new(()),
             content_keys: Mutex::new(HashMap::new()),
@@ -214,11 +222,44 @@ impl Core {
         *self.settings.lock().expect("settings lock poisoned") = settings.clone();
         self.ai.set_enabled(settings.ai.enabled);
         self.ai.set_adapter(&settings.ai.adapter);
-        *self.providers.lock().expect("providers lock poisoned") =
-            (self.build_providers)(&settings);
+        self.rebuild_providers(&settings, one_at_a_time);
+        Ok(settings)
+    }
+
+    /// Store the GitLab token for the configured instance in the OS keychain
+    /// (a blank token deletes it). Like a settings save, the providers are
+    /// rebuilt and a running poll loop restarts with them.
+    ///
+    /// The Settings form saves the URL first and the token right after: the
+    /// loop the URL save restarted has already refreshed (or is refreshing)
+    /// without a token, and would report "GitLab is not set up" until the
+    /// next poll. Restarting drops that refresh's report and reads GitLab
+    /// with the token at once. Fresh providers also forget what the old
+    /// token's user and conditional cache held.
+    pub fn set_gitlab_token(&self, token: &str) -> CoreResult<()> {
+        let one_at_a_time = self
+            .settings_update
+            .lock()
+            .expect("settings update lock poisoned");
+        let settings = self.settings();
+        if settings.gitlab.base_url.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "set the GitLab URL before its token".into(),
+            ));
+        }
+        (self.write_gitlab_token)(&settings.gitlab.base_url, token)?;
+        self.rebuild_providers(&settings, one_at_a_time);
+        Ok(())
+    }
+
+    /// Build the providers for `settings` and restart a running poll loop
+    /// with them. `one_at_a_time` is the held `settings_update` lock: it is
+    /// let go once the new loop is in place, before the old one's grace.
+    fn rebuild_providers(&self, settings: &Settings, one_at_a_time: MutexGuard<'_, ()>) {
+        *self.providers.lock().expect("providers lock poisoned") = (self.build_providers)(settings);
         let running = self.poller.lock().expect("poller lock poisoned").take();
         let Some((poller, callback)) = running else {
-            return Ok(settings);
+            return;
         };
         // The old loop is told to stop, not waited for: a refresh it has on
         // the network (up to a minute) would hold up the save. It ends on
@@ -232,19 +273,6 @@ impl Core {
         if !poller.stop_within(POLL_STOP_GRACE) {
             tracing::debug!("a refresh was still under way when the settings changed");
         }
-        Ok(settings)
-    }
-
-    /// Store the GitLab token for the configured instance in the OS keychain
-    /// (a blank token deletes it).
-    pub fn set_gitlab_token(&self, token: &str) -> CoreResult<()> {
-        let url = self.settings().gitlab.base_url;
-        if url.is_empty() {
-            return Err(CoreError::InvalidInput(
-                "set the GitLab URL before its token".into(),
-            ));
-        }
-        provider::gitlab::gitlab_token_set(&url, token)
     }
 
     /// Whether a GitLab token is stored for the configured instance.
