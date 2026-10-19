@@ -6,6 +6,8 @@
 //!   spawn/timeout/kill loop.
 //! - [`prompt`]: the prompt text (consts) and its assembly.
 //! - [`output`]: JSON extraction and strict validation of the answer.
+//! - [`dedupe`]: the safety net that drops findings the review already
+//!   makes (an existing thread, a posted finding).
 //! - [`job`]: one run end to end (diff, workspace, prompt, retry).
 //! - [`runtime`]: queueing (per review serial, two at once), `ai:state`,
 //!   and the shutdown that kills running agents on quit.
@@ -18,6 +20,7 @@
 
 pub(crate) mod adapter;
 mod api;
+pub(crate) mod dedupe;
 pub(crate) mod job;
 pub(crate) mod output;
 pub mod prompt;

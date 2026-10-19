@@ -96,6 +96,7 @@
   "structs": {
     "AiRunState": [
       "adapter",
+      "droppedDuplicates",
       "droppedFindings",
       "droppedVerdicts",
       "enabled",
