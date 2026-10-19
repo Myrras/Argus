@@ -9,6 +9,29 @@ export interface ProviderLine {
   host: string;
   state: string;
   tone: "ok" | "warning" | "off";
+  /** The connection is unencrypted (plain http off this machine). */
+  insecure: boolean;
+}
+
+/** Shown wherever the GitLab URL is plain http off this machine. */
+export const INSECURE_NOTE =
+  "Plain http: your token travels unencrypted. Only use this on a trusted network, such as a VPN.";
+
+/**
+ * Whether a typed GitLab URL is plain http to a host other than this
+ * machine (mirrors the core's `is_insecure`; the core's status is the truth
+ * once saved, this is for the URL while it is being typed).
+ */
+export function isInsecureUrl(url: string): boolean {
+  try {
+    const u = new URL(url.trim());
+    if (u.protocol !== "http:") return false;
+    return !["localhost", "127.0.0.1", "[::1]"].includes(
+      u.hostname.toLowerCase(),
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function providerLines(status: ProviderStatus): ProviderLine[] {
@@ -19,6 +42,7 @@ export function providerLines(status: ProviderStatus): ProviderLine[] {
       key: "github",
       label: "GitHub",
       host: gh.host,
+      insecure: false,
       ...(!gh.enabled
         ? { state: "Off", tone: "off" as const }
         : !gh.installed
@@ -31,6 +55,7 @@ export function providerLines(status: ProviderStatus): ProviderLine[] {
       key: "gitlab",
       label: "GitLab",
       host: gl.baseUrl.replace(/^https?:\/\//, ""),
+      insecure: gl.configured && gl.problem === null && gl.insecure,
       ...(!gl.configured
         ? { state: "Not set up", tone: "off" as const }
         : gl.problem === "invalidUrl"

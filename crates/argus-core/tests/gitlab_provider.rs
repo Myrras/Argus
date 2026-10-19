@@ -219,6 +219,23 @@ fn lists_reviewer_mrs_plus_commented_ones() {
     );
 }
 
+/// A GitLab on a LAN / VPN host over plain http: the provider talks to it
+/// at `http://host/api/v4/...`, token header included. The double listens
+/// on loopback; `0.0.0.0` reaches it but is not a loopback host to Argus,
+/// so it counts like any other non-local one.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn talks_plain_http_to_a_non_loopback_host() {
+    let (base, seen) = serve(fixture_routes);
+    let lan = base.replace("127.0.0.1", "0.0.0.0");
+    assert!(lan.starts_with("http://0.0.0.0:"));
+    assert!(argus_core::provider::gitlab::is_insecure(&lan));
+    let gl = provider(&lan);
+    assert_eq!(gl.current_user().unwrap(), "rev-fixture");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.as_slice(), ["/api/v4/user token=yes"]);
+}
+
 #[test]
 fn fetches_detail_with_versions_reviewers_and_approvals() {
     let (base, _) = serve(fixture_routes);

@@ -177,8 +177,9 @@ when it merges.
 - Quitting Argus stops running AI passes and removes their temporary files;
   files left by a crash are cleaned up on the next start. It no longer waits
   for a refresh that is still talking to GitHub or GitLab.
-- GitLab over plain http is refused except on localhost, so your token never
-  travels unencrypted.
+- A self-hosted GitLab may use plain http (for example behind a VPN). Argus
+  warns that the token then travels unencrypted: a note under the URL in
+  Settings and an "Unencrypted" badge in the Providers section.
 - On a pull request too large for GitHub to find its merge base, removed
   lines take no comments (the file says why; the `c` key and posting refuse
   them as well, so nothing lands on the wrong line), unless a local clone supplies

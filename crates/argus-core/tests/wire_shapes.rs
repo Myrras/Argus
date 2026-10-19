@@ -387,6 +387,7 @@ fn current() -> Value {
             base_url: "https://gitlab.example.test".into(),
             token_present: true,
             problem: Some(GitlabProblem::InvalidUrl),
+            insecure: true,
         },
     };
     let snapshot = CodeSnapshot {

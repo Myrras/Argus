@@ -340,6 +340,8 @@ export interface GitlabStatus {
   tokenPresent: boolean;
   /** `null` when nothing is wrong. */
   problem: GitlabProblem | null;
+  /** Plain http to a host other than this machine: the token is unencrypted. */
+  insecure: boolean;
 }
 
 /** `provider::ProviderStatus`. */

@@ -61,7 +61,7 @@ export function bannerItems(
       key: "gl-url",
       provider: "gitlab",
       tone: "warning",
-      text: "GitLab is off: its URL must start with https:// (http:// only for localhost). Fix it in Settings.",
+      text: "GitLab is off: its URL must start with https:// or http:// and have no user, query or fragment. Fix it in Settings.",
       settings: true,
     });
   } else if (status?.gitlab.configured && !status.gitlab.tokenPresent) {

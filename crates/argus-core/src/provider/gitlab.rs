@@ -203,11 +203,10 @@ pub fn url_host(url: &str) -> &str {
     rest.split(['/', '?', '#']).next().unwrap_or("")
 }
 
-/// Trim, parse and drop a trailing slash; `None` when not an https URL,
-/// or a plain http one off this machine: every request carries the token
-/// in a header, which plain http sends in cleartext. Local http
-/// (`localhost`, `127.0.0.1`, `[::1]`) stays for a GitLab on the user's own
-/// machine.
+/// Trim, parse and drop a trailing slash; `None` when not an http(s) URL
+/// of an instance. Plain http is allowed for any host (a self-hosted GitLab
+/// behind a VPN has no TLS): the token then travels unencrypted, which
+/// [`is_insecure`] reports so the UI can say so.
 ///
 /// The host is the parsed one, what a request really connects to: in
 /// `http://127.0.0.1:80@gitlab.example.test` the part before `@` is
@@ -223,13 +222,22 @@ pub fn normalize_base_url(url: &str) -> Option<String> {
     {
         return None;
     }
-    let host = parsed.host_str().filter(|h| !h.is_empty())?;
-    let ok = match parsed.scheme() {
-        "https" => true,
-        "http" => is_local(host),
-        _ => false,
+    parsed.host_str().filter(|h| !h.is_empty())?;
+    matches!(parsed.scheme(), "https" | "http")
+        .then(|| parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// Whether requests to `url` send the token unencrypted: plain http to a
+/// host that is not this machine. Loopback http (`localhost`, `127.0.0.1`,
+/// `[::1]`) never leaves the machine. `false` for an unusable URL.
+pub fn is_insecure(url: &str) -> bool {
+    let Some(base) = normalize_base_url(url) else {
+        return false;
     };
-    ok.then(|| parsed.as_str().trim_end_matches('/').to_string())
+    let Ok(parsed) = reqwest::Url::parse(&base) else {
+        return false;
+    };
+    parsed.scheme() == "http" && !parsed.host_str().is_some_and(is_local)
 }
 
 /// A parsed host (no port; IPv6 in brackets) names this machine.
@@ -1642,11 +1650,10 @@ mod tests {
             GitlabProvider::new("", StaticToken("t".into())),
             Err(CoreError::GitlabNotConfigured)
         ));
-        // A hand-edited settings file with plain http is refused too.
-        assert!(
-            GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_err()
-        );
+        // Plain http is fine on any host (a VPN); other schemes are not.
+        assert!(GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_ok());
         assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
+        assert!(GitlabProvider::new("ftp://gitlab.example.test", StaticToken("t".into())).is_err());
     }
 
     /// An in-memory keychain: account → secret.
@@ -1719,8 +1726,8 @@ mod tests {
 
     #[test]
     fn userinfo_never_passes_for_a_local_host() {
-        // The part before `@` is userinfo: the host is gitlab.example.test,
-        // over plain http, so the token would go out in cleartext.
+        // The part before `@` is userinfo, not the host: refused whatever
+        // the scheme, so a local-looking prefix never hides the real host.
         for url in [
             "http://127.0.0.1:80@gitlab.example.test",
             "http://localhost@gitlab.example.test",
@@ -1730,9 +1737,15 @@ mod tests {
             // Userinfo has no place in the instance URL at all.
             "https://someone@gitlab.example.test",
             "http://someone@localhost:8080",
+            "http://someone:pw@10.0.0.5",
+            // Query and fragment have no place in an instance URL.
+            "http://10.0.0.5/?a=b",
+            "https://gitlab.example.test#x",
             // Not a URL a GitLab can be at.
             "http://localhost:99999",
             "https://",
+            "ftp://gitlab.example.test",
+            "ssh://gitlab.example.test",
         ] {
             assert_eq!(normalize_base_url(url), None, "{url}");
         }
@@ -1741,10 +1754,54 @@ mod tests {
             ("http://127.0.0.1:3000", "127.0.0.1:3000"),
             ("http://[::1]:8080", "[::1]:8080"),
             ("https://gitlab.example.test/sub", "gitlab.example.test"),
+            // Plain http on a VPN / LAN host: accepted, host kept for the
+            // keychain key.
+            ("http://GitLab.vpn.test:8080/", "gitlab.vpn.test:8080"),
+            ("http://10.0.0.5", "10.0.0.5"),
+            ("http://gitlab.example.test:80", "gitlab.example.test"),
         ] {
             let ok = normalize_base_url(url).unwrap_or_else(|| panic!("{url}"));
             assert_eq!(url_host(&ok), host);
         }
+    }
+
+    #[test]
+    fn only_plain_http_off_this_machine_is_insecure() {
+        for url in [
+            "http://gitlab.example.test",
+            "http://10.0.0.5:8080/",
+            "http://localhost.example.test",
+            "http://[fd00::1]",
+        ] {
+            assert!(is_insecure(url), "{url}");
+        }
+        for url in [
+            "https://gitlab.example.test",
+            "https://10.0.0.5",
+            "http://localhost:8080",
+            "http://127.0.0.1:3000/",
+            "http://[::1]:8080",
+            // Unusable URLs are a problem, not an insecure connection.
+            "",
+            "gitlab.example.test",
+            "http://someone@10.0.0.5",
+        ] {
+            assert!(!is_insecure(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn the_token_key_of_a_plain_http_instance_is_its_normalized_host() {
+        let store = MemStore::default();
+        write_token(&store, "http://GitLab.vpn.test:80/", FIXTURE_TOKEN).unwrap();
+        assert_eq!(
+            read_token(&store, "http://gitlab.vpn.test").as_deref(),
+            Some(FIXTURE_TOKEN)
+        );
+        assert_eq!(
+            store.0.lock().unwrap().keys().collect::<Vec<_>>(),
+            ["gitlab.vpn.test"]
+        );
     }
 
     #[test]

@@ -28,9 +28,10 @@ describe("ProvidersSection", () => {
         status={status({
           gitlab: {
             configured: true,
-            baseUrl: "http://gitlab.example.test",
+            baseUrl: "http://someone@gitlab.example.test",
             tokenPresent: false,
             problem: "invalidUrl",
+            insecure: false,
           },
         })}
         errors={[]}
@@ -41,11 +42,57 @@ describe("ProvidersSection", () => {
     // Not a missing token: the URL is what to fix.
     expect(screen.queryByText(/has no token/)).not.toBeInTheDocument();
     const item = screen.getByText(
-      /GitLab is off: its URL must start with https:\/\//,
+      /GitLab is off: its URL must start with https:\/\/ or http:\/\//,
     );
     expect(item).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(onOpenSettings).toHaveBeenCalledWith("gitlab");
+  });
+
+  it("badges a GitLab line that is plain http, without a problem item", () => {
+    render(
+      <ProvidersSection
+        status={status({
+          gitlab: {
+            configured: true,
+            baseUrl: "http://gitlab.vpn.test",
+            tokenPresent: true,
+            problem: null,
+            insecure: true,
+          },
+        })}
+        errors={[]}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    const badge = screen.getByText("Unencrypted");
+    expect(badge).toHaveAttribute(
+      "title",
+      expect.stringContaining("token travels unencrypted"),
+    );
+    expect(screen.getByText("gitlab.vpn.test")).toBeInTheDocument();
+    expect(screen.getByText("Token set")).toBeInTheDocument();
+    // Visible, not blocking: nothing in the problem list.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("shows no badge for https or a local http GitLab", () => {
+    render(
+      <ProvidersSection
+        status={status({
+          gitlab: {
+            configured: true,
+            baseUrl: "http://localhost:8080",
+            tokenPresent: true,
+            problem: null,
+            insecure: false,
+          },
+        })}
+        errors={[]}
+        onOpenSettings={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("Unencrypted")).not.toBeInTheDocument();
   });
 
   it("collapses to its title, counting the problems", () => {
@@ -58,6 +105,7 @@ describe("ProvidersSection", () => {
             baseUrl: "",
             tokenPresent: false,
             problem: null,
+            insecure: false,
           },
         })}
         errors={[]}
@@ -85,6 +133,7 @@ describe("ProvidersSection", () => {
         baseUrl: "",
         tokenPresent: false,
         problem: null,
+        insecure: false,
       },
     });
     const items = bannerItems(s, [

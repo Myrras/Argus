@@ -122,8 +122,8 @@ impl Settings {
     }
 
     /// Normalise and check: trims hosts, drops a trailing slash from the
-    /// GitLab URL, and rejects a GitLab URL that is not https (plain http
-    /// only for localhost).
+    /// GitLab URL, and rejects a GitLab URL that is not an http(s) instance
+    /// URL. Plain http is allowed (a VPN); the status flags it.
     pub fn validated(mut self) -> CoreResult<Self> {
         self.github.host = self.github.host.trim().to_string();
         if self.github.host.is_empty() {
@@ -140,8 +140,8 @@ impl Settings {
         } else {
             normalize_base_url(url).ok_or_else(|| {
                 CoreError::InvalidInput(
-                    "the GitLab URL must start with https:// (http:// only for localhost: \
-                     plain http would send the token unencrypted)"
+                    "the GitLab URL must start with https:// or http:// and have no \
+                     user, query or fragment"
                         .into(),
                 )
             })?
@@ -235,17 +235,17 @@ mod tests {
 
     #[test]
     fn a_gitlab_url_validation_refuses_still_loads_the_rest() {
-        // Hand-edited: plain http. Loading keeps every other setting (the
+        // Hand-edited: userinfo in the URL. Loading keeps every other setting (the
         // provider list leaves GitLab off and its status says why).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(
             &path,
-            r#"{"gitlab":{"baseUrl":"http://gitlab.example.test"},"pollIntervalSecs":60,"github":{"account":"work"}}"#,
+            r#"{"gitlab":{"baseUrl":"http://someone@gitlab.example.test"},"pollIntervalSecs":60,"github":{"account":"work"}}"#,
         )
         .unwrap();
         let s = Settings::load(&path);
-        assert_eq!(s.gitlab.base_url, "http://gitlab.example.test");
+        assert_eq!(s.gitlab.base_url, "http://someone@gitlab.example.test");
         assert_eq!(s.poll_interval_secs, 60);
         assert_eq!(s.github.account.as_deref(), Some("work"));
         // Saving it as is fails with the reason, until the URL is fixed.
@@ -277,24 +277,36 @@ mod tests {
     }
 
     #[test]
-    fn plain_http_is_only_for_a_local_gitlab() {
-        // The token would go out in cleartext.
-        let mut s = Settings::default();
-        s.gitlab.base_url = "http://gitlab.example.test".into();
-        let err = s.validated().unwrap_err();
-        assert!(err.to_string().contains("https://"), "{err}");
-        for local in [
+    fn plain_http_is_allowed_for_any_gitlab_host() {
+        for url in [
+            "http://gitlab.vpn.test",
+            "http://10.0.0.5:8080/",
             "http://localhost:8080",
             "http://127.0.0.1:3000/",
             "http://[::1]:8080",
         ] {
             let mut s = Settings::default();
-            s.gitlab.base_url = local.into();
-            assert!(s.validated().is_ok(), "{local}");
+            s.gitlab.base_url = url.into();
+            assert!(s.validated().is_ok(), "{url}");
         }
-        // A host that merely starts like one is not local.
         let mut s = Settings::default();
-        s.gitlab.base_url = "http://localhost.example.test".into();
-        assert!(s.validated().is_err());
+        s.gitlab.base_url = " http://GitLab.vpn.test:8080/ ".into();
+        assert_eq!(
+            s.validated().unwrap().gitlab.base_url,
+            "http://gitlab.vpn.test:8080"
+        );
+        // Still refused: userinfo, query, fragment, other schemes.
+        for bad in [
+            "http://someone@gitlab.vpn.test",
+            "http://gitlab.vpn.test/?a=b",
+            "http://gitlab.vpn.test/#x",
+            "ftp://gitlab.vpn.test",
+            "gitlab.vpn.test",
+        ] {
+            let mut s = Settings::default();
+            s.gitlab.base_url = bad.into();
+            let err = s.validated().unwrap_err();
+            assert!(err.to_string().contains("http://"), "{bad}: {err}");
+        }
     }
 }

@@ -61,6 +61,7 @@ describe("App", () => {
                 baseUrl: "",
                 tokenPresent: false,
                 problem: null,
+                insecure: false,
               },
             }),
           );

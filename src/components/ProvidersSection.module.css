@@ -55,6 +55,17 @@
   color: var(--text-muted);
 }
 
+/* Plain http: a small badge, not a blocker. */
+.insecure {
+  flex-shrink: 0;
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
 .state[data-tone="warning"] {
   color: var(--warning);
 }

@@ -225,6 +225,38 @@ describe("SettingsModal — GitLab tab", () => {
     expect(updates()).toEqual([]);
   });
 
+  it("warns under the URL while it is plain http off this machine", async () => {
+    await renderTab("GitLab");
+    const url = screen.getByLabelText("Base URL");
+    const warning = () =>
+      screen.queryByText(
+        "Plain http: your token travels unencrypted. Only use this on a trusted network, such as a VPN.",
+      );
+    expect(warning()).not.toBeInTheDocument();
+    for (const quiet of [
+      "https://gitlab.example.test",
+      "http://localhost:8080",
+      "http://127.0.0.1:3000",
+      "http://[::1]:8080",
+    ]) {
+      fireEvent.change(url, { target: { value: quiet } });
+      expect(warning(), quiet).not.toBeInTheDocument();
+    }
+    fireEvent.change(url, { target: { value: "http://gitlab.vpn.test" } });
+    expect(warning()).toBeInTheDocument();
+    // Not blocking: no alert, no toast, and Save still works.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(updates()).toEqual([
+        { ...settings(), gitlab: { baseUrl: "http://gitlab.vpn.test" } },
+      ]),
+    );
+    expect(
+      useToastStore.getState().toasts.every((t) => t.kind !== "error"),
+    ).toBe(true);
+  });
+
   it("refuses a token without a GitLab URL, and toasts backend errors", async () => {
     await renderTab("GitLab");
     fireEvent.change(screen.getByLabelText("Personal access token"), {

@@ -216,6 +216,7 @@
       "gitlab",
       "gitlab.baseUrl",
       "gitlab.configured",
+      "gitlab.insecure",
       "gitlab.problem",
       "gitlab.tokenPresent"
     ],

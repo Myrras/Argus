@@ -238,14 +238,17 @@ pub struct GitlabStatus {
     pub token_present: bool,
     /// Why a configured GitLab is off anyway; `None` when nothing is wrong.
     pub problem: Option<GitlabProblem>,
+    /// The URL is plain http to a host other than this machine: the token
+    /// travels unencrypted. Allowed (a VPN), but shown.
+    pub insecure: bool,
 }
 
 /// Why a configured GitLab is not used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GitlabProblem {
-    /// The URL is not one Argus sends the token to: not https (plain http
-    /// only for localhost), or not a plain instance URL. Saving settings
+    /// The URL is not one Argus sends the token to: not http(s), or not a
+    /// plain instance URL (userinfo, query or fragment). Saving settings
     /// refuses it; a hand-edited file can still hold one.
     InvalidUrl,
 }
@@ -279,6 +282,7 @@ pub fn status(settings: &Settings) -> ProviderStatus {
             token_present: !url.is_empty()
                 && problem.is_none()
                 && gitlab::gitlab_token_present(&url),
+            insecure: problem.is_none() && gitlab::is_insecure(&url),
             base_url: url,
             problem,
         },
@@ -358,20 +362,49 @@ mod tests {
 
     #[test]
     fn a_gitlab_url_argus_will_not_use_says_why() {
-        // A hand-edited settings.json with plain http: GitLab stays off, and
-        // the status says so instead of a silent log line.
+        // A hand-edited settings.json with userinfo in the URL: GitLab stays
+        // off, and the status says so instead of a silent log line.
         let mut s = Settings::default();
         s.github.enabled = false;
-        s.gitlab.base_url = "http://gitlab.example.test".into();
+        s.gitlab.base_url = "http://someone@gitlab.example.test".into();
         assert!(from_settings(&s).is_empty());
         let st = status(&s).gitlab;
         assert!(st.configured);
         assert!(!st.token_present);
+        assert!(!st.insecure);
         assert_eq!(st.problem, Some(GitlabProblem::InvalidUrl));
         assert_eq!(serde_json::to_value(&st).unwrap()["problem"], "invalidUrl");
         // Not set up is no problem, just off.
         s.gitlab.base_url = String::new();
         assert_eq!(status(&s).gitlab.problem, None);
+    }
+
+    #[test]
+    fn the_status_flags_plain_http_off_this_machine() {
+        let mut s = Settings::default();
+        s.github.enabled = false;
+        for (url, insecure) in [
+            ("http://gitlab.vpn.test", true),
+            ("http://10.0.0.5:8080", true),
+            ("https://gitlab.example.test", false),
+            ("http://localhost:8080", false),
+            ("http://127.0.0.1:3000", false),
+            ("http://[::1]:8080", false),
+            ("", false),
+        ] {
+            s.gitlab.base_url = url.into();
+            let st = status(&s).gitlab;
+            assert_eq!(st.insecure, insecure, "{url}");
+            assert_eq!(st.problem, None, "{url}");
+            assert_eq!(
+                serde_json::to_value(&st).unwrap()["insecure"],
+                insecure,
+                "{url}"
+            );
+        }
+        // A plain-http GitLab is on: a provider is built for it.
+        s.gitlab.base_url = "http://gitlab.vpn.test".into();
+        assert_eq!(from_settings(&s).len(), 1);
     }
 
     #[test]

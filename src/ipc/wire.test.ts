@@ -246,6 +246,7 @@ const status: ProviderStatus = {
     baseUrl: "https://gitlab.example.test",
     tokenPresent: true,
     problem: "invalidUrl",
+    insecure: true,
   },
 };
 

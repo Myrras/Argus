@@ -9,7 +9,7 @@
 
 import type { ProviderId, ProviderStatus, RefreshError } from "../ipc/types";
 import { bannerItems } from "../lib/banner";
-import { providerLines } from "../lib/providers";
+import { INSECURE_NOTE, providerLines } from "../lib/providers";
 import { useLayoutStore } from "../state/layoutStore";
 import { ProvidersIcon } from "./icons";
 import { SectionTitle } from "./SectionTitle";
@@ -60,6 +60,11 @@ export function ProvidersSection({
                   {line.host && (
                     <span className={styles.host} title={line.host}>
                       {line.host}
+                    </span>
+                  )}
+                  {line.insecure && (
+                    <span className={styles.insecure} title={INSECURE_NOTE}>
+                      Unencrypted
                     </span>
                   )}
                   <span className={styles.state} data-tone={line.tone}>

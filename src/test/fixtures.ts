@@ -140,6 +140,7 @@ export function status(
       baseUrl: "https://gitlab.example.test",
       tokenPresent: true,
       problem: null,
+      insecure: false,
     },
     ...overrides,
   };

@@ -29,6 +29,7 @@ import {
   withClone,
   withoutClone,
 } from "../lib/clonePaths";
+import { INSECURE_NOTE, isInsecureUrl } from "../lib/providers";
 import { NOT_READ_ONLY_NOTE, useReadOnlyGuaranteed } from "../state/aiStore";
 import {
   POLL_MINUTES_MAX,
@@ -473,6 +474,11 @@ function GitlabTab() {
               setError(null);
             }}
           />
+          {isInsecureUrl(url) && (
+            <p className={styles.warning} role="note">
+              {INSECURE_NOTE}
+            </p>
+          )}
         </div>
         <div className={styles.field}>
           <div className={styles.labelRow}>
