@@ -120,6 +120,42 @@ describe("then/now", () => {
     ).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("opens a colleague's thread the user replied in like their own", () => {
+    const t = theirs({
+      mine: true,
+      startedByMe: false,
+      notes: [
+        {
+          id: "n-bob",
+          author: "bob-fixture",
+          body: "Is this cached twice?",
+          createdAt: "2026-10-15T09:00:00Z",
+          system: false,
+        },
+        {
+          id: "n-me",
+          author: "rev-fixture",
+          body: "Looks like it.",
+          createdAt: "2026-10-15T10:00:00Z",
+          system: false,
+        },
+      ],
+    });
+    seed(historyFor(t));
+    show(t);
+    const article = screen.getByRole("article", {
+      name: "Thread by bob-fixture",
+    });
+    expect(article).toHaveAttribute("data-mine", "true");
+    expect(article).toHaveAttribute("data-open", "true");
+    expect(within(article).getByText("Looks like it.")).toBeInTheDocument();
+    const block = screen.getByRole("region", { name: "Code then and now" });
+    // The code is tracked from bob's comment, not the user's.
+    expect(
+      within(block).getByText("Untouched since the comment"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps someone else's thread collapsed until the toggle", () => {
     const t = theirs();
     seed(historyFor(t));

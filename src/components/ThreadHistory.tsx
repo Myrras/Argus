@@ -160,7 +160,7 @@ export function ThenNow({
       </p>
     );
   }
-  const status = statusLine(h, t.mine);
+  const status = statusLine(h, t.startedByMe);
   if (!status || !columns) return null;
   const thenPath = h.thenSnapshot?.path ?? "";
   const nowPath = h.nowSnapshot?.path ?? thenPath;

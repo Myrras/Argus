@@ -43,6 +43,19 @@ describe("conversationThreads", () => {
     expect(got.elsewhere).toEqual([away]);
   });
 
+  it("lists a thread the user replied in with the user's own", () => {
+    // Carol's, older than the user's own and with a reply from the user.
+    const replied = thread({
+      anchor: null,
+      author: "carol-fixture",
+      mine: true,
+      startedByMe: false,
+      createdAt: "2026-10-08T00:00:00Z",
+    });
+    const got = conversationThreads([general, mineGeneral, replied], [], false);
+    expect(got.conversation).toEqual([replied, mineGeneral, general]);
+  });
+
   it("holds the anchored ones back while loading, shows them all on failure", () => {
     expect(conversationThreads(all, null, false).elsewhere).toEqual([]);
     expect(conversationThreads(all, null, true).elsewhere).toEqual([
@@ -71,6 +84,10 @@ describe("threadsOnFile", () => {
       total: 2,
       mine: 1,
     });
+    // One the user replied in is highlighted as theirs too.
+    expect(
+      threadCounts([onNew, { ...onOld, mine: true, startedByMe: false }]),
+    ).toEqual({ total: 2, mine: 1 });
   });
 });
 

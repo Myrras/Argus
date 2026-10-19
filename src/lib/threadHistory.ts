@@ -143,9 +143,14 @@ function plural(n: number, word: string): string {
 
 /**
  * What happened to the commented code, in one line; `null` for a thread
- * without code. `mine` picks "your comment" over "the comment".
+ * without code. `startedByMe` picks "your comment" over "the comment" (the
+ * root the code is tracked from; in a thread the user only replied in it
+ * is someone else's).
  */
-export function statusLine(h: ThreadHistory, mine: boolean): StatusLine | null {
+export function statusLine(
+  h: ThreadHistory,
+  startedByMe: boolean,
+): StatusLine | null {
   const s = h.status;
   switch (s.kind) {
     case "notCode":
@@ -186,7 +191,7 @@ export function statusLine(h: ThreadHistory, mine: boolean): StatusLine | null {
           ? n > 0
             ? `touched by ${plural(n, "commit")}`
             : "touched since the comment"
-          : `untouched since ${mine ? "your" : "the"} comment`,
+          : `untouched since ${startedByMe ? "your" : "the"} comment`,
       );
       const text = parts.join(" · ");
       return {
