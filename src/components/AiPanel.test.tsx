@@ -351,6 +351,19 @@ describe("AiPanel", () => {
     expect(screen.getByText(warning)).toBeInTheDocument();
   });
 
+  it("counts the findings skipped as already raised in the review", () => {
+    const { unmount } = render(<AiPanel />);
+    expect(screen.queryByText(/already raised in the review/)).toBeNull();
+    unmount();
+    useAiStore.setState({
+      runs: { [ID]: aiRun({ reviewId: ID, droppedDuplicates: 3 }) },
+    });
+    render(<AiPanel />);
+    expect(
+      screen.getByText("3 skipped: already raised in the review."),
+    ).toBeInTheDocument();
+  });
+
   it("is absent with the AI pass off", () => {
     seed(false);
     const { container } = render(<AiPanel />);

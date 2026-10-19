@@ -12,7 +12,7 @@
 import { useEffect } from "react";
 
 import type { ReviewId, ReviewRecord } from "../ipc/types";
-import { aiStatusText } from "../lib/findings";
+import { aiStatusText, skippedDuplicatesText } from "../lib/findings";
 import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import {
@@ -62,6 +62,7 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
           aiStatusText(run, active),
           run.adapter &&
             `${run.adapter}${run.round !== null ? `, round ${run.round}` : ""}`,
+          skippedDuplicatesText(run),
         ]
           .filter(Boolean)
           .join(" — ")}

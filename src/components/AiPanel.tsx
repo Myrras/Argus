@@ -15,6 +15,7 @@ import {
 } from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
+import { skippedDuplicatesText } from "../lib/findings";
 import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { Checklist } from "./Checklist";
@@ -36,6 +37,7 @@ function Panel({ reviewId }: { reviewId: string }) {
   const error = useAiStore((s) => s.byReview[reviewId]?.error ?? null);
   const reload = useAiStore((s) => s.reloadOutput);
   const keymap = useKeymap();
+  const skipped = run ? skippedDuplicatesText(run) : null;
 
   const note =
     run?.status === "running"
@@ -78,6 +80,7 @@ function Panel({ reviewId }: { reviewId: string }) {
             out: not on a file of this change.
           </p>
         )}
+        {skipped && <p className={styles.note}>{skipped}.</p>}
         {error && (
           <div className={styles.error} role="alert">
             {error.message}{" "}
