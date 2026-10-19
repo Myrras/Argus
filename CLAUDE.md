@@ -144,6 +144,11 @@ sibling app Iris (`../Iris`).
     overrides, Argus-only), pure rules in `lib/findings`. Keys
     `toggleFindings` (`a`, scope `files`) and `toggleFindingSelected` (`x`).
     Only the "Post selected" button posts.
+  - Duplicates: the prompt includes every existing thread (all reviewers,
+    open/resolved/outdated, MR-level, posted findings; budgeted), and
+    `ai/dedupe.rs` drops findings that repeat a thread (same path/side within
+    ±2 lines and similarity ≥ 0.5, MR-level ≥ 0.7), counted in
+    `droppedDuplicates`; migration 7 adds `ai_runs.dropped_duplicates`.
 - ✅ **Milestone 6 — Local clone.** Core `git/`: with a clone configured per
   repository (`Settings::clone_paths`), the history walk and `Core::file_at`
   read through plain `git` (`rev-list`, `diff-tree`, `cat-file --batch`)
