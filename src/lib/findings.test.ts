@@ -4,6 +4,7 @@ import { aiRun, checklistItem, finding } from "../test/aiFixtures";
 import {
   aiStatusText,
   currentRound,
+  skippedDuplicatesText,
   defaultBody,
   findingPlacement,
   fromEarlierRound,
@@ -99,6 +100,13 @@ describe("findings", () => {
     ).toBe("AI: cancelled");
     expect(aiStatusText(aiRun({ status: "notStarted" }), 0)).toBe(
       "AI: not started",
+    );
+  });
+
+  it("count the findings left out as already raised", () => {
+    expect(skippedDuplicatesText(aiRun())).toBeNull();
+    expect(skippedDuplicatesText(aiRun({ droppedDuplicates: 2 }))).toBe(
+      "2 skipped: already raised in the review",
     );
   });
 });

@@ -125,6 +125,12 @@ when it merges.
   threads shows whether the AI thinks it was addressed, partly addressed or
   untouched, with its reasoning; you can set your own call or clear it. The
   label stays in Argus and never changes the thread on GitHub or GitLab.
+  The AI never repeats a point already raised in the review, by anyone,
+  open or resolved: it reads every thread (yours, other reviewers', the
+  author's, on code or on the review as a whole) and every finding you
+  posted, and Argus also leaves out any finding that still says the same
+  as a thread on the same lines; the panel and the header's tooltip show
+  how many were skipped as already raised.
   With the AI analysis off, none of this shows and everything else works
   as before.
 - Polling is lighter: Argus asks GitHub and GitLab only for what changed since

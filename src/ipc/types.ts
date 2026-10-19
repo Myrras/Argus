@@ -506,6 +506,11 @@ export interface AiRunState {
   /** Verdicts the latest successful run dropped (unknown thread ids). */
   droppedVerdicts: number;
   /**
+   * Findings the latest successful run dropped because the review already
+   * makes their point (an existing thread, anyone's, or a posted finding).
+   */
+  droppedDuplicates: number;
+  /**
    * Whether Argus can guarantee the configured agent only reads. `false` for
    * `auggie`, whose user-configured MCP tools cannot be turned off.
    */

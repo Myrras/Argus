@@ -12,8 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::adapter::{self, Adapter, ChildSlot, Invocation, PromptDelivery, RunDirs};
+use super::dedupe;
+use super::model::Finding;
 use super::output::{self, RunOutput};
-use super::prompt::{self, DiffScope, PromptInput, Workspace};
+use super::prompt::{self, DiffScope, ExistingThread, PromptInput, Workspace};
 use crate::files::{review_range, since_range};
 use crate::provider::{FileDiff, ReviewProvider};
 use crate::settings::Settings;
@@ -280,6 +282,34 @@ pub(crate) fn execute(
         prompt::open_threads(&threads, |id| thread_snapshot(store, record, id))
     };
     let known: HashSet<_> = asked.iter().map(|t| t.thread.thread_id).collect();
+    // Every thread, in every round, so nothing the review already says is
+    // raised again; with its then/now code when the history cache has it
+    // (only read here: computing it for every thread would cost a walk
+    // each).
+    let snapshots: Vec<_> = threads
+        .iter()
+        .map(|t| thread_snapshot(store, record, t.thread_id))
+        .collect();
+    let earlier = super::store::findings(store, record.id).map_err(|e| e.to_string())?;
+    let posted: Vec<&Finding> = earlier.iter().filter(|f| f.posted_at.is_some()).collect();
+    let raised = dedupe::raised_points(
+        &threads
+            .iter()
+            .zip(snapshots.iter().cloned())
+            .collect::<Vec<_>>(),
+        &posted,
+    );
+    let existing: Vec<ExistingThread<'_>> = threads
+        .iter()
+        .zip(snapshots)
+        .map(|(thread, snapshot)| ExistingThread { thread, snapshot })
+        .collect();
+    // A posted finding whose thread is already fetched is in `existing`.
+    let unfetched: Vec<&Finding> = posted
+        .iter()
+        .copied()
+        .filter(|f| !threads.iter().any(|t| posted_as(t, f)))
+        .collect();
     let paths: HashSet<String> = diff
         .files
         .iter()
@@ -359,6 +389,8 @@ pub(crate) fn execute(
         description: None,
         scope,
         threads: asked,
+        existing,
+        posted: unfetched,
         conventions,
         workspace,
         nonce: &nonce,
@@ -378,14 +410,31 @@ pub(crate) fn execute(
                 .map_err(|e| format!("the agent's answer was invalid after a retry: {e}"))?
         }
     };
+    let mut run = output::filter(parsed, &paths, &known);
+    dedupe::drop_repeats(&mut run, &raised);
     Ok(RunOutput {
         // The shas of the diff actually returned (the provider's contract),
         // which for a run since the last review has the watermark as its
         // left side.
         head_sha: Some(diff.head_sha.clone()),
         base_sha: Some(diff.base_sha.clone()),
-        ..output::filter(parsed, &paths, &known)
+        ..run
     })
+}
+
+/// Whether `t` is the thread posting `f` made: the user's, on its file,
+/// its root carrying the finding's title (the posted body starts with it
+/// unless the user rewrote it).
+fn posted_as(t: &StoredThread, f: &Finding) -> bool {
+    t.mine
+        && t.thread.anchor.as_ref().is_some_and(|a| {
+            a.path_new.as_deref() == Some(f.path.as_str())
+                || a.path_old.as_deref() == Some(f.path.as_str())
+        })
+        && t.thread
+            .notes
+            .first()
+            .is_some_and(|n| n.body.contains(f.title.as_str()))
 }
 
 /// Why an auggie run did not start: its tools could not be listed (the

@@ -56,6 +56,9 @@ pub(crate) struct RunOutput {
     pub verdicts: Vec<(ThreadId, VerdictLabel, String)>,
     pub dropped_findings: u32,
     pub dropped_verdicts: u32,
+    /// Findings dropped because the review already makes their point (an
+    /// existing thread or a posted finding; see `super::dedupe`).
+    pub dropped_duplicates: u32,
     /// The diff the agent was given: its right side (where new-side lines
     /// are numbered) and left side (old-side lines; the watermark for a
     /// run over the commits since the last review).

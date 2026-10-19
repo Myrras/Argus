@@ -131,6 +131,7 @@ fn run_row(status: AiRunStatus, round: u32, last_done: Option<u32>, interrupted:
         last_done_round: last_done,
         dropped_findings: 0,
         dropped_verdicts: 0,
+        dropped_duplicates: 0,
     }
 }
 
@@ -230,13 +231,22 @@ fn store_round_trips_findings_checklist_verdicts_and_overrides() {
         verdicts: vec![(t1, VerdictLabel::Untouched, "nothing changed".into())],
         dropped_findings: 2,
         dropped_verdicts: 1,
+        dropped_duplicates: 3,
         ..RunOutput::default()
     };
     ai_store::save_done(&store, r.id, 1, &out1, at(10, 12)).unwrap();
     let run = ai_store::run(&store, r.id).unwrap().unwrap();
     assert_eq!(run.status, AiRunStatus::Done);
     assert_eq!(run.last_done_round, Some(1));
-    assert_eq!((run.dropped_findings, run.dropped_verdicts), (2, 1));
+    assert_eq!(
+        (
+            run.dropped_findings,
+            run.dropped_verdicts,
+            run.dropped_duplicates
+        ),
+        (2, 1, 3)
+    );
+    assert_eq!(run.state(true, false).dropped_duplicates, 3);
 
     let fs = ai_store::findings(&store, r.id).unwrap();
     let order: Vec<_> = fs
@@ -1460,6 +1470,144 @@ fn claude_runs_in_the_clone_with_its_conventions_in_a_later_round() {
     // Nothing was written into the clone.
     let entries: Vec<_> = std::fs::read_dir(clone.path()).unwrap().collect();
     assert_eq!(entries.len(), 1);
+}
+
+/// A thread by `author` on `src/a.rs` line 2 (`None`: on the merge request
+/// as a whole) saying `body`.
+fn said_on(id: &str, author: &str, line: Option<u32>, body: &str) -> Thread {
+    let mut n = note(&format!("{id}-n"), author, at(1, 1));
+    n.body = body.into();
+    let mut t = thread(id, author, "h1", vec![n]);
+    match line {
+        Some(l) => {
+            if let Some(a) = t.anchor.as_mut() {
+                a.path_new = Some("src/a.rs".into());
+                a.path_old = Some("src/a.rs".into());
+                a.line_new = Some(l);
+            }
+        }
+        None => t.anchor = None,
+    }
+    t
+}
+
+/// The answer of `GOOD_ANSWER` plus a finding the review has not made.
+const ANSWER_WITH_A_NEW_POINT: &str = r#"{"findings":[
+  {"path":"src/a.rs","line":2,"side":"new","severity":"high","title":"TTL of 0 disables the cache","body":"Every lookup misses."},
+  {"path":"src/a.rs","line":2,"side":"new","severity":"medium","title":"Unbounded cache growth","body":"Nothing ever evicts an entry, so memory grows with every widget id."},
+  {"path":"src/a.rs","line":1,"side":"new","severity":"low","title":"Widgets are fetched twice per request","body":"Load them once and pass them down; the second fetch doubles the latency."}
+ ],"checklist":[],"verdicts":[]}"#;
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_run_never_repeats_what_the_review_already_says() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(
+        bin.path().join("out.jsonl"),
+        result_line(ANSWER_WITH_A_NEW_POINT),
+    )
+    .unwrap();
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    // Another reviewer's resolved thread on the line, and a comment on the
+    // merge request as a whole; neither is the user's.
+    let mut resolved = said_on(
+        "bob",
+        "bob-fixture",
+        Some(2),
+        "A TTL of 0 means every lookup misses the cache.",
+    );
+    resolved.resolved = true;
+    let general = said_on(
+        "carol",
+        "carol-fixture",
+        None,
+        "Widgets get fetched twice for each request; load them once and pass them down.",
+    );
+    store
+        .upsert_threads(r.id, &[resolved, general], ME)
+        .unwrap();
+    let c = ctx(
+        fake_settings(&script, "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let titles: Vec<_> = out.findings.iter().map(|f| f.title.as_str()).collect();
+    assert_eq!(titles, vec!["Unbounded cache growth"]);
+    assert_eq!(out.dropped_duplicates, 2);
+    assert_eq!(out.dropped_findings, 0);
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(stdin.contains(prompt::FIRST_ROUND_TASK));
+    assert!(stdin.contains(prompt::EXISTING_HEADING));
+    assert!(stdin.contains("bob-fixture wrote:\nA TTL of 0 means every lookup misses the cache."));
+    assert!(stdin.contains("· resolved · on src/a.rs line 2 (new side)"));
+    assert!(stdin.contains("· open · on the merge request as a whole"));
+
+    // Stored with the run and on its state.
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    ai_store::save_done(&store, r.id, 1, &out, at(10, 12)).unwrap();
+    let state = ai_store::run(&store, r.id)
+        .unwrap()
+        .unwrap()
+        .state(true, false);
+    assert_eq!(state.dropped_duplicates, 2);
+    assert_eq!(ai_store::findings(&store, r.id).unwrap().len(), 1);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_later_round_does_not_repeat_a_finding_the_user_posted() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(
+        bin.path().join("out.jsonl"),
+        result_line(ANSWER_WITH_A_NEW_POINT),
+    )
+    .unwrap();
+    let (store, mut r, _) = later_round_with_thread();
+    // Round 1's TTL finding, posted; its thread is not fetched yet.
+    ai_store::mark_running(&store, r.id, 1, "h0", "claude", at(9, 1)).unwrap();
+    let round1 = RunOutput {
+        findings: vec![RawFinding {
+            path: "src/a.rs".into(),
+            line: 2,
+            side: Side::New,
+            severity: Severity::High,
+            title: "TTL of 0 disables the cache".into(),
+            body: "Every lookup misses.".into(),
+        }],
+        ..RunOutput::default()
+    };
+    ai_store::save_done(&store, r.id, 1, &round1, at(9, 2)).unwrap();
+    let posted = ai_store::findings(&store, r.id).unwrap()[0].id;
+    ai_store::mark_posted(&store, posted, "https://example.test/c/1", at(9, 3)).unwrap();
+    r.round = 2;
+    let c = ctx(
+        fake_settings(&script, "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let titles: Vec<_> = out.findings.iter().map(|f| f.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Unbounded cache growth",
+            "Widgets are fetched twice per request"
+        ]
+    );
+    assert_eq!(out.dropped_duplicates, 1);
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(stdin.contains(prompt::LATER_ROUND_TASK));
+    assert!(stdin.contains(
+        "## Posted by the reviewer from the AI pass (round 1) · on src/a.rs line 2 (new side)"
+    ));
+    // The user's open thread: pointed at from the existing threads, in
+    // full under "Your open threads".
+    assert!(stdin.contains("the reviewer's own; in full under \"Your open threads\""));
 }
 
 /// A later-round review with one open thread of the user's, `t1`, on head

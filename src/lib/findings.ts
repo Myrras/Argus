@@ -143,6 +143,16 @@ export function findingCount(n: number): string {
   return `${n} ${n === 1 ? "finding" : "findings"}`;
 }
 
+/**
+ * "2 skipped: already raised in the review" for the findings the latest
+ * run left out as repeats of an existing thread or a posted finding; `null`
+ * when it left out none.
+ */
+export function skippedDuplicatesText(run: AiRunState): string | null {
+  const n = run.droppedDuplicates;
+  return n > 0 ? `${n} skipped: already raised in the review` : null;
+}
+
 /** The review header chip's text for a run with `findings` findings shown. */
 export function aiStatusText(run: AiRunState, findings: number): string {
   if (run.status === "running") return "AI: running…";

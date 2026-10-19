@@ -59,6 +59,17 @@ describe("AiStatus", () => {
     );
   });
 
+  it("names the skipped repeats in the chip's tooltip", async () => {
+    run = aiRun({ reviewId: r.id, droppedDuplicates: 2 });
+    render(<AiStatus review={r} />);
+    await waitFor(() =>
+      expect(chip()).toHaveAttribute(
+        "title",
+        "AI: done · 1 finding — claude, round 1 — 2 skipped: already raised in the review",
+      ),
+    );
+  });
+
   it("shows a running run with a spinner and Cancel", async () => {
     run = aiRun({ reviewId: r.id, status: "running" });
     const { container } = render(<AiStatus review={r} />);

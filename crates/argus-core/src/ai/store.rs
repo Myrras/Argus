@@ -1,6 +1,8 @@
 //! AI state in SQLite: the v1 `findings`, `checklist` and `verdicts`
-//! tables, plus `ai_runs` (migration 5, [`MIGRATION`]) and the diff a
-//! finding was read at (migration 6, [`MIGRATION_6`]).
+//! tables, plus `ai_runs` (migration 5, [`MIGRATION`]), the diff a
+//! finding was read at (migration 6, [`MIGRATION_6`]) and the count of
+//! findings left out as repeats of the review (migration 7,
+//! [`MIGRATION_7`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -49,6 +51,12 @@ pub(crate) const MIGRATION_6: &str = r#"
     ALTER TABLE findings ADD COLUMN base_sha TEXT;
 "#;
 
+/// Migration 7: findings a run left out because the review already makes
+/// their point (`super::dedupe`). Rows from before count none.
+pub(crate) const MIGRATION_7: &str = r#"
+    ALTER TABLE ai_runs ADD COLUMN dropped_duplicates INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Error text of a run that was running when Argus stopped.
 pub(crate) const INTERRUPTED: &str = "interrupted";
 
@@ -67,6 +75,7 @@ pub(crate) struct RunRow {
     pub last_done_round: Option<u32>,
     pub dropped_findings: u32,
     pub dropped_verdicts: u32,
+    pub dropped_duplicates: u32,
 }
 
 impl RunRow {
@@ -84,6 +93,7 @@ impl RunRow {
             last_done_round: self.last_done_round,
             dropped_findings: self.dropped_findings,
             dropped_verdicts: self.dropped_verdicts,
+            dropped_duplicates: self.dropped_duplicates,
             read_only_guaranteed: true,
         }
     }
@@ -98,7 +108,7 @@ fn bad(what: &str) -> rusqlite::Error {
 }
 
 const RUN_COLUMNS: &str = "review_id, status, round, adapter, error, interrupted, started_at,
-    finished_at, last_done_round, dropped_findings, dropped_verdicts";
+    finished_at, last_done_round, dropped_findings, dropped_verdicts, dropped_duplicates";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
     let id: String = r.get(0)?;
@@ -115,6 +125,7 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
         last_done_round: r.get(8)?,
         dropped_findings: r.get(9)?,
         dropped_verdicts: r.get(10)?,
+        dropped_duplicates: r.get(11)?,
     })
 }
 
@@ -308,9 +319,17 @@ pub(crate) fn save_done(
 
     let n = tx.execute(
         "UPDATE ai_runs SET status = 'done', error = NULL, interrupted = 0, round = ?2,
-            finished_at = ?3, last_done_round = ?2, dropped_findings = ?4, dropped_verdicts = ?5
+            finished_at = ?3, last_done_round = ?2, dropped_findings = ?4, dropped_verdicts = ?5,
+            dropped_duplicates = ?6
          WHERE review_id = ?1",
-        params![rid, round, now, out.dropped_findings, out.dropped_verdicts],
+        params![
+            rid,
+            round,
+            now,
+            out.dropped_findings,
+            out.dropped_verdicts,
+            out.dropped_duplicates
+        ],
     )?;
     if n == 0 {
         return Err(CoreError::NotFound);

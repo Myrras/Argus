@@ -8,7 +8,7 @@
 //!   queued: boolean; round: number | null; adapter: string | null;
 //!   error: string | null; startedAt: string | null; finishedAt: string | null;
 //!   lastDoneRound: number | null; droppedFindings: number; droppedVerdicts: number;
-//!   readOnlyGuaranteed: boolean;
+//!   droppedDuplicates: number; readOnlyGuaranteed: boolean;
 //! }
 //! type Severity = "high" | "medium" | "low";
 //! interface Finding {
@@ -146,6 +146,10 @@ pub struct AiRunState {
     pub dropped_findings: u32,
     /// Verdicts the latest successful run dropped: unknown thread ids.
     pub dropped_verdicts: u32,
+    /// Findings the latest successful run dropped because the review
+    /// already makes their point: an existing thread (anyone's, open or
+    /// resolved) or a finding the user posted.
+    pub dropped_duplicates: u32,
     /// Whether Argus can guarantee the configured agent only reads. False
     /// for `auggie`: its user-configured MCP tools cannot be turned off, so
     /// the UI warns.
@@ -167,6 +171,7 @@ impl AiRunState {
             last_done_round: None,
             dropped_findings: 0,
             dropped_verdicts: 0,
+            dropped_duplicates: 0,
             read_only_guaranteed: true,
         }
     }
@@ -318,6 +323,7 @@ mod tests {
         assert_eq!(v["queued"], false);
         assert!(v.get("lastDoneRound").is_some());
         assert!(v.get("droppedFindings").is_some());
+        assert_eq!(v["droppedDuplicates"], 0);
         assert_eq!(serde_json::to_value(Severity::High).unwrap(), "high");
         assert_eq!(
             serde_json::to_value(VerdictLabel::Partly).unwrap(),

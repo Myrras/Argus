@@ -159,6 +159,8 @@ const MIGRATIONS: &[&str] = &[
     crate::ai::store::MIGRATION,
     // 6: the head and left side of the diff a finding was read at.
     crate::ai::store::MIGRATION_6,
+    // 7: findings an AI run left out as repeats of the review.
+    crate::ai::store::MIGRATION_7,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus

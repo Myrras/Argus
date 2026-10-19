@@ -330,6 +330,7 @@ const aiState: AiRunState = {
   lastDoneRound: 2,
   droppedFindings: 0,
   droppedVerdicts: 0,
+  droppedDuplicates: 0,
   readOnlyGuaranteed: true,
 };
 
