@@ -24,8 +24,10 @@ when it merges.
 - Review rounds: Argus remembers where you last reviewed each item. Items that
   need another look say why (new commits, the author replied, or your review
   was re-requested) and how many of your threads nobody has touched since.
-  "Mark round reviewed" moves the item to Waiting on author, with a
-  confirmation; items you approved drop off the list.
+  Threads you started or replied in count as yours: they are shown first,
+  tracked for rounds (a reply after your last comment there counts) and
+  judged by the AI. "Mark round reviewed" moves the item to Waiting on
+  author, with a confirmation; items you approved drop off the list.
 - A detail view per review, on one scrolling page like a platform's "Files
   changed" tab combined with its conversation, better organised: its title,
   a link that opens it in the browser, status and round, then a

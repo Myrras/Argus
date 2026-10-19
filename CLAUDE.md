@@ -27,6 +27,8 @@ sibling app Iris (`../Iris`).
   background polling; IPC commands + events; the four-tab list, detail view
   with threads (mine first, outdated never hidden), settings, provider
   status. The boilerplate greet/notes sample is gone.
+  - `mine` = `Thread::is_mine`: started by the user or with a non-system
+    note of theirs (`startedByMe` tells the first apart).
   - Island shell, ported from Iris (Podium is the UI reference): same tokens
     (Argus violet is the only brand difference), title bar on the canvas
     (`titleBarStyle: Overlay` on macOS, own `WindowControls` on Windows),
