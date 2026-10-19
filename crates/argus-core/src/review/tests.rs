@@ -396,3 +396,71 @@ fn the_watermark_is_the_last_fetch_and_never_after_the_click() {
         Some(click)
     );
 }
+
+#[test]
+fn a_thread_i_replied_in_is_mine_for_the_round() {
+    let (r, d) = reviewed();
+    // A colleague's thread: their note and the author's after the
+    // watermark, then the user's reply. Only what comes after the user's
+    // own last note is new to them.
+    let mut replied = thread(
+        "1",
+        OTHER,
+        "h1",
+        vec![
+            note("1", OTHER, at(10, 9)),
+            note("2", AUTHOR, at(11, 7)),
+            note("3", ME, at(11, 8)),
+        ],
+    );
+    let quiet = step(Some(&r), &d, std::slice::from_ref(&replied), at(11, 9));
+    assert_eq!(quiet.status, ReviewStatus::WaitingOnAuthor);
+    // Untouched since the user's reply: it counts like an own thread.
+    assert_eq!(quiet.untouched_threads, 1);
+
+    replied.notes.push(note("4", AUTHOR, at(11, 10)));
+    let next = step(Some(&quiet), &d, &[replied], at(11, 11));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::AuthorReplied]);
+    assert_eq!(next.untouched_threads, 0);
+}
+
+#[test]
+fn a_system_note_of_mine_does_not_make_a_thread_mine() {
+    let (r, d) = reviewed();
+    // The user resolved a colleague's thread; the author answered after.
+    let mut resolve = note("2", ME, at(11, 7));
+    resolve.system = true;
+    let t = thread(
+        "1",
+        OTHER,
+        "h1",
+        vec![
+            note("1", OTHER, at(10, 9)),
+            resolve,
+            note("3", AUTHOR, at(11, 8)),
+        ],
+    );
+    let next = step(Some(&r), &d, &[t], at(11, 9));
+    assert_eq!(next.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(next.untouched_threads, 0);
+}
+
+#[test]
+fn a_reply_the_user_already_answered_is_not_new() {
+    let (r, d) = reviewed();
+    // In the user's own thread: the author replied after the watermark and
+    // the user answered that before the fetch.
+    let mine = thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(10, 11)),
+            note("2", AUTHOR, at(11, 7)),
+            note("3", ME, at(11, 8)),
+        ],
+    );
+    let next = step(Some(&r), &d, &[mine], at(11, 9));
+    assert_eq!(next.status, ReviewStatus::WaitingOnAuthor);
+}

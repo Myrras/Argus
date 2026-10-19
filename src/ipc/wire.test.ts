@@ -117,6 +117,7 @@ const thread: StoredThread = {
   threadId: THREAD,
   reviewId: REVIEW,
   mine: true,
+  startedByMe: true,
   id: "4001",
   author: "rev-fixture",
   createdAt: T,

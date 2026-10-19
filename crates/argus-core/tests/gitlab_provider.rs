@@ -478,6 +478,91 @@ fn never_follows_a_redirect_with_the_token() {
     assert!(stolen.lock().unwrap().is_empty());
 }
 
+/// The fixture's page 2 of MR 21's discussions plus the user's notes: a
+/// system note in dana's diff discussion (d4), a reply in alice's MR-level
+/// one (d5) and a copy of d4 (d6) the user replied in.
+fn discussions_with_my_replies() -> String {
+    let mut page: serde_json::Value =
+        serde_json::from_str(&fixture("mr_21_discussions_page2.json")).unwrap();
+    let list = page.as_array_mut().unwrap();
+    let mine = |id: u64, body: &str, system: bool, at: &str| {
+        serde_json::json!({
+            "id": id, "type": null, "body": body, "attachment": null,
+            "author": {"id": 42, "username": "Rev-Fixture", "name": "Rev Fixture",
+                       "state": "active", "avatar_url": null,
+                       "web_url": "https://gitlab.example.test/rev-fixture"},
+            "created_at": at, "updated_at": at, "system": system,
+            "noteable_id": 9021, "noteable_type": "MergeRequest", "noteable_iid": 21,
+            "resolvable": false, "resolved": false, "resolved_by": null,
+            "confidential": false, "internal": false
+        })
+    };
+    let mut d6 = list[0].clone();
+    d6["id"] = "d6eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".into();
+    d6["notes"][0]["id"] = 6050.into();
+    d6["notes"].as_array_mut().unwrap().push(mine(
+        6051,
+        "Yes, it is unused.",
+        false,
+        "2026-10-10T16:00:00.000Z",
+    ));
+    list[0]["notes"].as_array_mut().unwrap().push(mine(
+        6031,
+        "changed this line in version 2",
+        true,
+        "2026-10-10T16:30:00.000Z",
+    ));
+    list[1]["notes"].as_array_mut().unwrap().push(mine(
+        6041,
+        "Looking now.",
+        false,
+        "2026-10-10T17:00:00.000Z",
+    ));
+    list.push(d6);
+    page.to_string()
+}
+
+#[test]
+fn threads_i_replied_in_are_mine_through_the_core() {
+    let (base, _) = serve_raw(|path, _| {
+        if path.starts_with("/api/v4/projects/grp%2Fapp/merge_requests/21/discussions")
+            && path.contains("page=2")
+        {
+            Reply {
+                status: "200 OK",
+                headers: "X-Next-Page: \r\nX-Page: 2\r\n".into(),
+                body: discussions_with_my_replies(),
+            }
+        } else {
+            fixture_routes(path)
+        }
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    let report = core.refresh();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let r21 = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.number == 21)
+        .unwrap();
+    let flags: std::collections::HashMap<String, (bool, bool)> = core
+        .threads(r21.id)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.thread.id[..2].to_string(), (t.mine, t.started_by_me)))
+        .collect();
+    // (mine, started by me)
+    assert_eq!(flags["d1"], (true, true), "started by the user");
+    assert_eq!(
+        flags["d4"],
+        (false, false),
+        "only a system note of the user's"
+    );
+    assert_eq!(flags["d5"], (true, false), "MR-level, the user replied");
+    assert_eq!(flags["d6"], (true, false), "on code, the user replied");
+}
+
 #[test]
 fn refresh_end_to_end_through_the_core() {
     let (base, _) = serve(fixture_routes);

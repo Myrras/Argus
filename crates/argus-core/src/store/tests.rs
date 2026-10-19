@@ -141,6 +141,7 @@ fn upsert_threads_is_idempotent_and_drops_what_is_gone() {
     assert_eq!(got.len(), 2);
     assert_eq!(got[0].thread, t1);
     assert!(got[0].mine && !got[1].mine);
+    assert!(got[0].started_by_me && !got[1].started_by_me);
     assert_eq!(got[0].thread_id, ThreadId::from_key(r.id, "501"));
 
     // Something hanging off a thread survives an upsert of that thread.
@@ -431,4 +432,87 @@ fn a_locked_database_is_waited_on_not_failed() {
         .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
         .unwrap();
     assert_eq!(ms, 5000);
+}
+
+#[test]
+fn a_thread_the_user_replied_in_is_stored_as_theirs() {
+    let store = Store::in_memory().unwrap();
+    let r = record();
+    store.upsert_review(&r).unwrap();
+    let replied = thread(
+        "601",
+        AUTHOR,
+        "h1",
+        vec![note("601", AUTHOR, at(10, 12)), note("602", ME, at(10, 13))],
+    );
+    let mut resolve = note("612", ME, at(10, 15));
+    resolve.system = true;
+    let resolved = thread(
+        "611",
+        AUTHOR,
+        "h1",
+        vec![note("611", AUTHOR, at(10, 14)), resolve],
+    );
+    store
+        .upsert_threads(r.id, &[replied, resolved], ME)
+        .unwrap();
+    let got = store.threads(r.id).unwrap();
+    assert!(got[0].mine && !got[0].started_by_me);
+    // Only a system note of the user's: not theirs.
+    assert!(!got[1].mine && !got[1].started_by_me);
+}
+
+#[test]
+fn upgrading_to_v8_makes_threads_the_user_replied_in_theirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("argus.db");
+    let (r, _) = old_database(&path, 7);
+    {
+        let store = Store::over(Connection::open(&path).unwrap());
+        let replied = thread(
+            "t2",
+            AUTHOR,
+            "h1",
+            vec![
+                note("n3", AUTHOR, at(10, 3)),
+                note("n4", "Rev-Fixture", at(10, 4)),
+            ],
+        );
+        let mut resolve = note("n6", ME, at(10, 6));
+        resolve.system = true;
+        let resolved = thread(
+            "t3",
+            AUTHOR,
+            "h1",
+            vec![note("n5", AUTHOR, at(10, 5)), resolve],
+        );
+        let mine = thread(
+            "t1",
+            ME,
+            "h1",
+            vec![note("n1", ME, at(10, 1)), note("n2", AUTHOR, at(10, 2))],
+        );
+        store
+            .upsert_threads(r.id, &[mine, replied, resolved], ME)
+            .unwrap();
+        // As v7 stored them: only a thread the user started was theirs.
+        store
+            .conn()
+            .execute(
+                "UPDATE threads SET mine = (lower(author) = lower(?1))",
+                [ME],
+            )
+            .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap() as usize, MIGRATIONS.len());
+    let mine: HashMap<String, (bool, bool)> = store
+        .threads(r.id)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.thread.id, (t.mine, t.started_by_me)))
+        .collect();
+    assert_eq!(mine["t1"], (true, true));
+    assert_eq!(mine["t2"], (true, false));
+    assert_eq!(mine["t3"], (false, false));
 }

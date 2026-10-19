@@ -422,11 +422,12 @@ pub(crate) fn execute(
     })
 }
 
-/// Whether `t` is the thread posting `f` made: the user's, on its file,
-/// its root carrying the finding's title (the posted body starts with it
-/// unless the user rewrote it).
+/// Whether `t` is the thread posting `f` made: started by the user (a
+/// colleague's thread the user replied in is theirs, but not a post), on
+/// its file, its root carrying the finding's title (the posted body starts
+/// with it unless the user rewrote it).
 fn posted_as(t: &StoredThread, f: &Finding) -> bool {
-    t.mine
+    t.started_by_me
         && t.thread.anchor.as_ref().is_some_and(|a| {
             a.path_new.as_deref() == Some(f.path.as_str())
                 || a.path_old.as_deref() == Some(f.path.as_str())
@@ -474,4 +475,48 @@ fn invocation(
         timeout: ctx.timeout,
         output: adapter.output,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::model::Severity;
+    use crate::ids::{ReviewId, ThreadId};
+    use crate::provider::Side;
+    use crate::testutil::{at, note, thread, AUTHOR, ME};
+
+    fn stored(author: &str, root: &str) -> StoredThread {
+        let mut root_note = note("1", author, at(10, 1));
+        root_note.body = root.into();
+        let t = thread("1", author, "h1", vec![root_note, note("2", ME, at(10, 2))]);
+        let review = ReviewId::from_key("r");
+        StoredThread {
+            thread_id: ThreadId::from_key(review, "1"),
+            review_id: review,
+            mine: true,
+            started_by_me: t.started_by(ME),
+            thread: t,
+        }
+    }
+
+    #[test]
+    fn a_posted_finding_is_a_thread_the_user_started_not_one_they_replied_in() {
+        let f = Finding {
+            id: crate::ai::FindingId::new(),
+            review_id: ReviewId::from_key("r"),
+            round: 1,
+            path: "src/cache.rs".into(),
+            line: 10,
+            side: Side::New,
+            severity: Severity::High,
+            title: "Off by one".into(),
+            body: "b".into(),
+            dismissed: false,
+            posted_at: Some(at(10, 0)),
+            posted_url: None,
+        };
+        assert!(posted_as(&stored(ME, "**Off by one**\n\nb"), &f));
+        // A colleague's thread making the same point, with the user's reply.
+        assert!(!posted_as(&stored(AUTHOR, "Off by one here?"), &f));
+    }
 }

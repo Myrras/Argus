@@ -286,6 +286,7 @@ fn current() -> Value {
         thread_id,
         review_id,
         mine: true,
+        started_by_me: true,
         thread: Thread {
             id: "4001".into(),
             author: "rev-fixture".into(),

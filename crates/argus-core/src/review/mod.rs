@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::history::LineTouches;
+use crate::provider::model::same_user;
 use crate::provider::{ReviewDetail, ReviewState, Thread};
 use crate::store::ReviewRecord;
 
@@ -109,12 +110,27 @@ pub struct RoundInput<'a> {
     pub me: &'a str,
 }
 
-fn same_user(a: &str, b: &str) -> bool {
-    a.eq_ignore_ascii_case(b)
+/// Where the notes of a thread start being new to the user: the later of
+/// `watermark` and the user's own last note in it (a reply the user
+/// answered was seen).
+fn new_since(t: &Thread, me: &str, watermark: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+    let my_last = t
+        .notes
+        .iter()
+        .filter(|n| same_user(&n.author, me))
+        .map(|n| n.created_at)
+        .max();
+    match (watermark, my_last) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
 }
 
-fn is_mine(t: &Thread, me: &str) -> bool {
-    same_user(&t.author, me)
+/// A note from someone else after `since` (all of them without one).
+fn replied_since(t: &Thread, me: &str, since: Option<DateTime<Utc>>) -> bool {
+    t.notes
+        .iter()
+        .any(|n| !n.system && !same_user(&n.author, me) && since.is_none_or(|s| n.created_at > s))
 }
 
 /// Classify one review. Order matters: an approval hides the item whatever
@@ -145,12 +161,13 @@ pub fn classify_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> R
     if input.head_sha != sha {
         reasons.push(RoundReason::NewCommits);
     }
+    // Someone else's note in one of the user's threads (started or replied
+    // in) after the watermark and after the user's own last note there.
     let replied = input
         .threads
         .iter()
-        .filter(|t| is_mine(t, input.me))
-        .flat_map(|t| &t.notes)
-        .any(|n| !n.system && !same_user(&n.author, input.me) && n.created_at > at);
+        .filter(|t| t.is_mine(input.me))
+        .any(|t| replied_since(t, input.me, new_since(t, input.me, Some(at))));
     if replied {
         reasons.push(RoundReason::AuthorReplied);
     }
@@ -171,8 +188,8 @@ pub fn untouched(input: &RoundInput<'_>) -> u32 {
     untouched_with(input, None)
 }
 
-/// The user's unresolved threads that look untouched: no note from someone
-/// else since the later of the watermark and the user's own last note in
+/// The user's unresolved threads ([`Thread::is_mine`]: started or replied
+/// in) that look untouched: no note from someone else since the later of the watermark and the user's own last note in
 /// the thread, and no commit since the watermark (or, before any
 /// watermark, since the commit the thread was left on) touched its lines.
 ///
@@ -185,7 +202,7 @@ pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> 
     let count = input
         .threads
         .iter()
-        .filter(|t| is_mine(t, me) && !t.resolved)
+        .filter(|t| t.is_mine(me) && !t.resolved)
         .filter(|t| {
             let walked = touches
                 .and_then(|m| m.get(&t.id))
@@ -200,19 +217,7 @@ pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> 
             if code_touched {
                 return false;
             }
-            let my_last = t
-                .notes
-                .iter()
-                .filter(|n| same_user(&n.author, me))
-                .map(|n| n.created_at)
-                .max();
-            let since = match (input.last_reviewed_at, my_last) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
-            };
-            !t.notes.iter().any(|n| {
-                !n.system && !same_user(&n.author, me) && since.is_none_or(|s| n.created_at > s)
-            })
+            !replied_since(t, me, new_since(t, me, input.last_reviewed_at))
         })
         .count();
     u32::try_from(count).unwrap_or(u32::MAX)

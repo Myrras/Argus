@@ -1055,6 +1055,74 @@ fn a_push_between_reading_the_head_and_the_diff_fails_the_post_and_refreshes() {
     assert_eq!(core.review(id).unwrap().head_sha, c4);
 }
 
+#[test]
+#[cfg_attr(windows, ignore)]
+fn threads_i_replied_in_are_mine_through_the_core() {
+    use argus_core::Core;
+
+    // Review comments page 2 with the user's reply in dana's thread (520).
+    let replied =
+        r#"  "$P/comments?per_page=100&page=2") respond "${LOG%/*}/comments_page2.json" ;;"#;
+    let body = FAKE.replace(
+        r#"  "$P/comments?per_page=100&page=2") respond "$F/pull_12_comments_page2.json" ;;"#,
+        replied,
+    );
+    assert_ne!(body, FAKE);
+    let fake = script(&body);
+    let mut page: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(fixtures().join("pull_12_comments_page2.json")).unwrap(),
+    )
+    .unwrap();
+    let list = page.as_array_mut().unwrap();
+    let mut reply = list.iter().find(|c| c["id"] == 520).unwrap().clone();
+    reply["id"] = 521.into();
+    reply["in_reply_to_id"] = 520.into();
+    reply["user"]["login"] = "rev-fixture".into();
+    reply["body"] = "I think so.".into();
+    reply["created_at"] = "2026-10-09T13:00:00Z".into();
+    list.push(reply);
+    std::fs::write(
+        fake.log.parent().unwrap().join("comments_page2.json"),
+        page.to_string(),
+    )
+    .unwrap();
+
+    let core = Core::with_providers(
+        argus_core::store::Store::in_memory().unwrap(),
+        vec![std::sync::Arc::new(fake.provider("github.com", None))],
+    );
+    // The search lists more PRs than the fixtures serve; only 12 matters.
+    core.refresh();
+    let id = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.repo == "acme-fixture/widgets" && r.review.number == 12)
+        .unwrap()
+        .id;
+    let flags: std::collections::HashMap<String, (bool, bool)> = core
+        .threads(id)
+        .unwrap()
+        .into_iter()
+        .map(|t| (t.thread.id, (t.mine, t.started_by_me)))
+        .collect();
+    // (mine, started by me)
+    assert_eq!(flags["501"], (true, true), "started by the user");
+    assert_eq!(
+        flags["520"],
+        (true, false),
+        "review comments, the user replied"
+    );
+    assert_eq!(
+        flags["issuecomment-8001"],
+        (true, false),
+        "conversation, the user's quote reply"
+    );
+    assert_eq!(flags["issuecomment-8002"], (true, true));
+    assert_eq!(flags["issuecomment-8003"], (false, false), "carol's");
+    assert_eq!(flags["pullrequestreview-7003"], (false, false), "dana's");
+}
+
 /// `FAKE` with PR 12's files served from `files<N>.json` next to the log
 /// (`page=N`, no `Link` header: every page looks like the last); a page
 /// without a file is logged as `missing files page N` and answered 422,

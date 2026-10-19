@@ -319,6 +319,7 @@
       "outdated",
       "resolved",
       "reviewId",
+      "startedByMe",
       "threadId"
     ],
     "ThreadHistory": [

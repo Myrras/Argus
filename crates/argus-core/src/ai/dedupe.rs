@@ -450,6 +450,7 @@ mod tests {
             thread_id: ThreadId::from_key(review, "t1"),
             review_id: review,
             mine: author == ME,
+            started_by_me: author == ME,
             thread: t,
         }
     }

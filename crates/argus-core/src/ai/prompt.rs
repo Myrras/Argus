@@ -797,7 +797,7 @@ pub(crate) fn repair(original: &str, error: &str) -> String {
 }
 
 /// The threads a later round asks about: the reviewer's own unresolved
-/// ones. `snapshot` gives a thread's then/now code (see [`ThreadSnapshot`]).
+/// ones ([`StoredThread::mine`]: started or replied in). `snapshot` gives a thread's then/now code (see [`ThreadSnapshot`]).
 pub(crate) fn open_threads<'a>(
     threads: &'a [StoredThread],
     snapshot: impl Fn(ThreadId) -> Option<ThreadSnapshot>,
@@ -872,6 +872,7 @@ mod tests {
             thread_id: ThreadId::from_key(review, id),
             review_id: review,
             mine,
+            started_by_me: mine,
             thread: t,
         }
     }

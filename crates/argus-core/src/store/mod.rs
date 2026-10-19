@@ -161,6 +161,19 @@ const MIGRATIONS: &[&str] = &[
     crate::ai::store::MIGRATION_6,
     // 7: findings an AI run left out as repeats of the review.
     crate::ai::store::MIGRATION_7,
+    // 8: a thread the user replied in is theirs too (`Thread::is_mine`),
+    // not only one they started. Fetches only rewrite a review's threads
+    // when it changed, so the stored flags are brought up to the rule here:
+    // a human (non-system) note by the review's viewer makes it mine.
+    // `lower` folds ASCII only, as `eq_ignore_ascii_case` does.
+    r#"
+    UPDATE threads SET mine = 1
+    WHERE mine = 0 AND EXISTS (
+        SELECT 1 FROM notes n JOIN reviews r ON r.id = threads.review_id
+        WHERE n.thread_id = threads.id AND n.system = 0
+          AND r.viewer <> '' AND lower(n.author) = lower(r.viewer)
+    );
+    "#,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus
@@ -217,8 +230,11 @@ pub struct StoredThread {
     /// Argus' id (stable; derived from the review and the platform id).
     pub thread_id: ThreadId,
     pub review_id: ReviewId,
-    /// Started by the current user.
+    /// The user's thread: started by them or with a comment of theirs in it
+    /// ([`Thread::is_mine`]).
     pub mine: bool,
+    /// Started by the user ([`Thread::started_by`]), within [`mine`](Self::mine).
+    pub started_by_me: bool,
     #[serde(flatten)]
     pub thread: Thread,
 }
@@ -643,7 +659,7 @@ pub(crate) fn write_threads(
                 t.resolved,
                 t.outdated,
                 anchor,
-                t.author.eq_ignore_ascii_case(me),
+                t.is_mine(me),
             ],
         )?;
         let mut note_ids: Vec<&str> = Vec::with_capacity(t.notes.len());
@@ -681,6 +697,16 @@ pub(crate) fn write_threads(
 
 /// The stored threads of `review` (see [`Store::threads`]).
 pub(crate) fn read_threads(conn: &Connection, review: ReviewId) -> CoreResult<Vec<StoredThread>> {
+    // Who "me" is for `started_by_me`: the user the threads were last
+    // written for (`write_threads` gets the same name).
+    let viewer: String = conn
+        .query_row(
+            "SELECT viewer FROM reviews WHERE id = ?1",
+            [review.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
     let mut stmt = conn.prepare(
         "SELECT id, provider_thread_id, author, created_at, resolved, outdated,
             anchor_json, mine
@@ -729,6 +755,7 @@ pub(crate) fn read_threads(conn: &Connection, review: ReviewId) -> CoreResult<Ve
             thread_id: id.parse().map_err(|_| invalid("thread id"))?,
             review_id: review,
             mine,
+            started_by_me: !viewer.is_empty() && thread.started_by(&viewer),
             thread,
         });
     }

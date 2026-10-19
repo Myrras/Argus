@@ -112,8 +112,10 @@ export interface Note {
 export interface StoredThread {
   threadId: ThreadId;
   reviewId: ReviewId;
-  /** Started by the current user. */
+  /** The user's thread: started by them or with a comment of theirs in it. */
   mine: boolean;
+  /** Started by the user (implies `mine`). */
+  startedByMe: boolean;
   id: string;
   author: string;
   createdAt: Timestamp;

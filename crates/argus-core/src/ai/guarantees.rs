@@ -92,15 +92,31 @@ struct Recorder {
     calls: Mutex<Vec<(&'static str, bool)>>,
 }
 
+fn said(id: &str, author: &str, body: &str, day: u32, hour: u32) -> Note {
+    Note {
+        id: id.into(),
+        author: author.into(),
+        body: body.into(),
+        created_at: at(day, hour),
+        system: false,
+    }
+}
+
 impl Recorder {
+    /// The user's own thread on line 10.
     fn new() -> Arc<Self> {
+        Self::with_thread(vec![said(MY_THREAD, ME, "Why does line 10 stay?", 10, 11)])
+    }
+
+    /// One thread on line 10 with `notes` (the first is the root).
+    fn with_thread(notes: Vec<Note>) -> Arc<Self> {
         let mut d = detail("c1");
         d.base_sha = "b0".into();
         d.commits = vec![commit("c1", 10)];
         let mine = Thread {
             id: MY_THREAD.into(),
-            author: ME.into(),
-            created_at: at(10, 11),
+            author: notes[0].author.clone(),
+            created_at: notes[0].created_at,
             resolved: false,
             outdated: false,
             anchor: Some(Anchor {
@@ -116,13 +132,7 @@ impl Recorder {
                 diff_hunk: None,
                 current_line: None,
             }),
-            notes: vec![Note {
-                id: MY_THREAD.into(),
-                author: ME.into(),
-                body: "Why does line 10 stay?".into(),
-                created_at: at(10, 11),
-                system: false,
-            }],
+            notes,
         };
         Arc::new(Self {
             detail: Mutex::new(d),
@@ -405,6 +415,60 @@ fn ai_runs_only_read_and_findings_post_only_when_asked() {
         FindingPostOutcome::Posted { .. }
     ));
     assert_eq!(recorder.writes(), ["post_comment"]);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_thread_the_user_replied_in_is_judged_in_the_next_round() {
+    // A colleague's thread the user answered: theirs for the AI pass too.
+    let recorder = Recorder::with_thread(vec![
+        said(MY_THREAD, "dana-fixture", "Line 10 looks unused.", 10, 10),
+        said("4002", ME, "Agreed, it should go.", 10, 11),
+    ]);
+    let agent = Agent::new();
+    let core = core_over(&recorder, agent.settings.clone());
+    core.ai.set_executor(agent.executor());
+    let id = the_review(&core).id;
+    let replied = ThreadId::from_key(id, MY_THREAD);
+    let stored = core.threads(id).unwrap();
+    assert!(stored[0].mine && !stored[0].started_by_me);
+
+    agent.answer(serde_json::json!({"findings": [], "checklist": [], "verdicts": []}));
+    assert_eq!(core.on_refresh_report(&report()), vec![id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(20)));
+
+    // The author answers in it after the user's reply: a reason for a round.
+    core.mark_reviewed(id).unwrap();
+    recorder.push_c2_and_reply();
+    core.refresh();
+    assert_eq!(
+        the_review(&core).round_reasons,
+        [RoundReason::NewCommits, RoundReason::AuthorReplied]
+    );
+    agent.answer(serde_json::json!({
+        "findings": [],
+        "checklist": [],
+        "verdicts": [{"threadId": replied.to_string(), "label": "addressed",
+                      "reason": "Line 10 is gone in c2."}]
+    }));
+    assert_eq!(core.on_refresh_report(&report()), vec![id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(20)));
+    let st = core.ai_state(id).unwrap();
+    assert_eq!(st.last_done_round, Some(2), "{:?}", st.error);
+    let prompt = agent.prompt();
+    let (_, open) = prompt.split_once("# Your open threads").unwrap();
+    assert!(open.contains(&format!("threadId: {replied}")));
+    assert!(open.contains("Agreed, it should go."));
+    let verdicts = core.verdicts(id).unwrap();
+    assert_eq!(verdicts.len(), 1);
+    assert_eq!(verdicts[0].thread_id, replied);
+    assert_eq!(verdicts[0].ai_label, Some(VerdictLabel::Addressed));
+
+    let v = core
+        .set_verdict_override(replied, Some(VerdictLabel::Partly))
+        .unwrap();
+    assert_eq!(v.label, Some(VerdictLabel::Partly));
+    assert_eq!(recorder.writes(), Vec::<&str>::new());
 }
 
 #[test]

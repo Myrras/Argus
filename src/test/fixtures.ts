@@ -51,6 +51,8 @@ export function thread(overrides: Partial<StoredThread> = {}): StoredThread {
     threadId: uuid(1000 + seq),
     reviewId: uuid(1),
     mine: false,
+    // Builders mostly mean "the user's own" by `mine`.
+    startedByMe: overrides.mine ?? false,
     id: String(seq),
     author: "bob-fixture",
     createdAt: "2026-10-15T09:00:00Z",

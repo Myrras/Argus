@@ -270,6 +270,34 @@ pub struct Thread {
     pub notes: Vec<Note>,
 }
 
+/// Usernames compare without case on both platforms.
+pub(crate) fn same_user(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+impl Thread {
+    /// Started by `me`.
+    pub fn started_by(&self, me: &str) -> bool {
+        same_user(&self.author, me)
+    }
+
+    /// The user's thread: started by `me` or with a comment from `me` in it.
+    /// A system note (a GitLab "resolved", "changed this line") is the
+    /// platform's, not a comment, so it does not make a thread anyone's.
+    /// The one rule for "mine": stored as [`StoredThread::mine`], it orders
+    /// and opens threads in the UI, scopes the round reasons and the
+    /// untouched count, and picks the threads the AI pass judges.
+    ///
+    /// [`StoredThread::mine`]: crate::store::StoredThread::mine
+    pub fn is_mine(&self, me: &str) -> bool {
+        self.started_by(me)
+            || self
+                .notes
+                .iter()
+                .any(|n| !n.system && same_user(&n.author, me))
+    }
+}
+
 /// How a file changed in a diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -376,5 +404,56 @@ mod tests {
             "changesRequested"
         );
         assert_eq!(r.key(), "gitlab|gitlab.example.test|grp/proj|7");
+    }
+
+    fn note(author: &str, system: bool) -> Note {
+        Note {
+            id: "n".into(),
+            author: author.into(),
+            body: "b".into(),
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            system,
+        }
+    }
+
+    fn thread(author: &str, notes: Vec<Note>) -> Thread {
+        Thread {
+            id: "t".into(),
+            author: author.into(),
+            created_at: DateTime::<Utc>::UNIX_EPOCH,
+            resolved: false,
+            outdated: false,
+            anchor: None,
+            notes,
+        }
+    }
+
+    #[test]
+    fn a_thread_is_mine_when_i_started_it_or_commented_in_it() {
+        let me = "rev-fixture";
+        let started = thread(me, vec![note(me, false)]);
+        assert!(started.is_mine(me) && started.started_by(me));
+        // Case does not matter on either platform.
+        assert!(started.is_mine("Rev-Fixture"));
+
+        let replied = thread(
+            "dana-fixture",
+            vec![note("dana-fixture", false), note(me, false)],
+        );
+        assert!(replied.is_mine(me));
+        assert!(!replied.started_by(me));
+
+        // Only a system note of mine (a resolve): still someone else's.
+        let resolved = thread(
+            "dana-fixture",
+            vec![note("dana-fixture", false), note(me, true)],
+        );
+        assert!(!resolved.is_mine(me));
+
+        let theirs = thread(
+            "dana-fixture",
+            vec![note("dana-fixture", false), note("alice-fixture", false)],
+        );
+        assert!(!theirs.is_mine(me));
     }
 }
