@@ -116,6 +116,8 @@ pub(crate) struct RunOutput {
     /// run over the commits since the last review).
     pub head_sha: Option<String>,
     pub base_sha: Option<String>,
+    /// What the run gave the agent besides the diff (stored with the run).
+    pub context: super::model::RunContext,
 }
 
 /// Parse `text` into a valid answer, or say what is wrong with it.

@@ -23,6 +23,7 @@ export function aiRun(overrides: Partial<AiRunState> = {}): AiRunState {
     droppedDuplicates: 0,
     skippedChecklist: 0,
     readOnlyGuaranteed: true,
+    context: null,
     ...overrides,
   };
 }

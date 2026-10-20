@@ -58,8 +58,9 @@ pub(crate) struct Adapter {
 pub(crate) struct RunDirs<'a> {
     /// The working directory: the run's own temp dir.
     pub temp: &'a Path,
-    /// The local clone, given as a read-only extra directory (never the
-    /// working directory: a checkout's own agent config must not load).
+    /// The review's worktree in the local clone (else the clone itself),
+    /// given as a read-only extra directory (never the working directory: a
+    /// checkout's own agent config must not load).
     pub clone: Option<&'a Path>,
     /// Claude's `--settings` file (see [`claude_settings`]).
     pub settings: Option<&'a Path>,
@@ -72,7 +73,9 @@ pub(crate) struct RunDirs<'a> {
 /// in print mode). Read-only: `--tools` limits the built-in tools to
 /// `Read,Grep,Glob` and `--disallowedTools` denies the writing, shell and
 /// web tools on top (deny rules win over any allow rule in the user's own
-/// settings). `--strict-mcp-config` without `--mcp-config` loads no MCP
+/// settings), and `Skill`: a skill in the checkout it reads (the branch
+/// under review can ship one) is never loaded; the review skill Argus
+/// chose comes in the prompt, read from the target branch. `--strict-mcp-config` without `--mcp-config` loads no MCP
 /// server at all, so no GitLab/GitHub MCP write tool is reachable. In print
 /// mode nothing can answer a permission prompt, so anything else is denied.
 /// `--no-session-persistence` keeps these one-shot runs out of the user's
@@ -96,7 +99,7 @@ pub(crate) const CLAUDE: Adapter = Adapter {
         "--tools",
         "Read,Grep,Glob",
         "--disallowedTools",
-        "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch",
+        "Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Skill",
         "--strict-mcp-config",
         "--no-session-persistence",
     ],
@@ -882,9 +885,8 @@ mod tests {
         let joined = args.join(" ");
         assert!(joined.starts_with("--print --output-format stream-json --verbose"));
         assert!(joined.contains("--tools Read,Grep,Glob"));
-        assert!(
-            joined.contains("--disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch")
-        );
+        assert!(joined
+            .contains("--disallowedTools Bash,Edit,Write,NotebookEdit,WebFetch,WebSearch,Skill"));
         assert!(joined.contains("--strict-mcp-config"));
         assert!(joined.contains(
             "--add-dir /src/widgets --setting-sources user --settings /tmp/argus-ai-x/claude-settings.json"

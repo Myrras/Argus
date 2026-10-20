@@ -322,6 +322,15 @@ export interface AiSettings {
   binary?: string | null;
 }
 
+/**
+ * `settings::ReviewSkillChoice`: which review skill a repository's AI runs
+ * follow. `auto` takes the project's own (an exact `code-review` first).
+ */
+export type ReviewSkillChoice =
+  | { kind: "auto" }
+  | { kind: "none" }
+  | { kind: "skill"; source: SkillSource; name: string };
+
 /** `settings::Settings` (settings.json). Never holds a secret. */
 export interface Settings {
   github: GithubSettings;
@@ -337,6 +346,11 @@ export interface Settings {
   editorOverrides?: Record<string, string>;
   /** The app for every other file; `null` is the OS default. */
   defaultEditor?: string | null;
+  /**
+   * The review skill per repository, keyed `host/repo` like `clonePaths`;
+   * a repository without an entry is `auto`. Optional like the others.
+   */
+  reviewSkills?: Record<string, ReviewSkillChoice>;
 }
 
 /** `poll::RefreshError`: one failure during a refresh. */
@@ -564,6 +578,50 @@ export interface AiRunState {
    * `auggie`, whose user-configured MCP tools cannot be turned off.
    */
   readOnlyGuaranteed: boolean;
+  /**
+   * What the latest successful run was given besides the diff: rules files,
+   * review skill, worktree. `null` before one.
+   */
+  context: RunContext | null;
+}
+
+/** `ai::RunContext`: what a run was given besides the diff and threads. */
+export interface RunContext {
+  /** The rules files it carried (repository paths, from the target branch). */
+  rulesFiles: string[];
+  /** The review skill whose criteria it applied. */
+  skill: UsedSkill | null;
+  /** The agent read a worktree checked out at the review's head. */
+  worktree: boolean;
+  /** What did not go as set up (no worktree and why, a gone skill, …). */
+  notes: string[];
+}
+
+/** `settings::SkillSource`: where a review skill comes from. */
+export type SkillSource = "user" | "plugin" | "project";
+
+/** `ai::UsedSkill`: the review skill a run used. */
+export interface UsedSkill {
+  name: string;
+  source: SkillSource;
+}
+
+/** `ai::ReviewSkill`: one skill the Settings picker offers. */
+export interface ReviewSkill {
+  name: string;
+  /** The SKILL.md frontmatter's description. */
+  description: string | null;
+  source: SkillSource;
+}
+
+/** `ai::ReviewSkillList`: what `list_review_skills` returns. */
+export interface ReviewSkillList {
+  /** Skills whose name says "review": the user's, plugins', the project's. */
+  skills: ReviewSkill[];
+  /** The project skill Auto picks now; `null` when the project has none. */
+  autoPick: string | null;
+  /** The project's own skills were listed (a usable clone is set). */
+  projectListed: boolean;
 }
 
 /** `ai::Severity`. */

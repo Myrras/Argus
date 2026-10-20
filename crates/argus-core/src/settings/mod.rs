@@ -1,4 +1,5 @@
-//! `settings.json`: hosts and accounts, polling, AI, local clones.
+//! `settings.json`: hosts and accounts, polling, AI, local clones, the
+//! review skill per repository.
 //!
 //! Load is forgiving (a missing or corrupt file is the defaults, a missing
 //! field is its default) and save is atomic (temp file + rename), as in
@@ -9,7 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{CoreError, CoreResult};
 use crate::provider::gitlab::normalize_base_url;
@@ -41,6 +42,72 @@ pub struct Settings {
     pub editor_overrides: BTreeMap<String, String>,
     /// The application for every other file; `None` is the OS default.
     pub default_editor: Option<String>,
+    /// The code-review skill the AI pass follows, per repository (keyed
+    /// like [`clone_paths`](Self::clone_paths)). A repository without an
+    /// entry is [`ReviewSkillChoice::Auto`]; an older settings file has
+    /// none, so it needs no migration step.
+    pub review_skills: BTreeMap<String, ReviewSkillChoice>,
+}
+
+/// Where a review skill comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillSource {
+    /// `~/.claude/skills/<dir>/SKILL.md`.
+    User,
+    /// An installed Claude Code plugin's `skills/<dir>/SKILL.md`, named
+    /// `plugin:skill`.
+    Plugin,
+    /// The repository's own `.claude/skills/<dir>/SKILL.md`, read at the
+    /// review's target branch.
+    Project,
+}
+
+impl SkillSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkillSource::User => "user",
+            SkillSource::Plugin => "plugin",
+            SkillSource::Project => "project",
+        }
+    }
+}
+
+/// Which code-review skill the AI pass of a repository's reviews follows.
+/// On the wire `{"kind":"auto"}`, `{"kind":"none"}` or
+/// `{"kind":"skill","source":"user","name":"code-review"}`. Read leniently:
+/// an entry Argus cannot read (hand-edited, from a newer Argus) is `Auto`,
+/// never a reason to drop the whole settings file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ReviewSkillChoice {
+    /// The repository's own review skill when it has one, else none.
+    #[default]
+    Auto,
+    /// No skill: Argus' own review instructions only.
+    None,
+    /// This skill; when it is gone at run time, `Auto` (the run says so).
+    Skill { source: SkillSource, name: String },
+}
+
+impl<'de> Deserialize<'de> for ReviewSkillChoice {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "camelCase")]
+        enum Strict {
+            Auto,
+            None,
+            Skill { source: SkillSource, name: String },
+        }
+        let value = serde_json::Value::deserialize(d)?;
+        Ok(match serde_json::from_value::<Strict>(value) {
+            Ok(Strict::None) => ReviewSkillChoice::None,
+            Ok(Strict::Skill { source, name }) if !name.trim().is_empty() => {
+                ReviewSkillChoice::Skill { source, name }
+            }
+            _ => ReviewSkillChoice::Auto,
+        })
+    }
 }
 
 impl Default for Settings {
@@ -53,6 +120,7 @@ impl Default for Settings {
             clone_paths: BTreeMap::new(),
             editor_overrides: BTreeMap::new(),
             default_editor: None,
+            review_skills: BTreeMap::new(),
         }
     }
 }
@@ -243,6 +311,25 @@ impl Settings {
             .default_editor
             .map(|a| a.trim().to_string())
             .filter(|a| !a.is_empty());
+        // Only what differs from the default is kept: keys trimmed like a
+        // clone's, skill names trimmed, `Auto` (and a blank name) dropped.
+        self.review_skills = std::mem::take(&mut self.review_skills)
+            .into_iter()
+            .filter_map(|(repo, choice)| {
+                let repo = repo.trim().to_string();
+                let choice = match choice {
+                    ReviewSkillChoice::Skill { source, name } => {
+                        let name = name.trim().to_string();
+                        if name.is_empty() {
+                            return None;
+                        }
+                        ReviewSkillChoice::Skill { source, name }
+                    }
+                    other => other,
+                };
+                (!repo.is_empty() && choice != ReviewSkillChoice::Auto).then_some((repo, choice))
+            })
+            .collect();
         Ok(self)
     }
 
@@ -255,12 +342,26 @@ impl Settings {
         Duration::from_secs(self.poll_interval_secs.max(MIN_POLL_INTERVAL_SECS))
     }
 
+    /// The review skill choice for `review`'s repository (`Auto` unless set).
+    pub fn review_skill(&self, review: &ReviewRef) -> ReviewSkillChoice {
+        self.review_skills
+            .get(&repo_key(review))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The local clone for `review`'s repository, if one is set.
     pub fn clone_path(&self, review: &ReviewRef) -> Option<&Path> {
         self.clone_paths
-            .get(&format!("{}/{}", review.host, review.repo))
+            .get(&repo_key(review))
             .map(PathBuf::as_path)
     }
+}
+
+/// The key of per-repository settings: `host/repo`, as the provider reports
+/// them.
+pub fn repo_key(review: &ReviewRef) -> String {
+    format!("{}/{}", review.host, review.repo)
 }
 
 #[cfg(test)]
@@ -450,6 +551,125 @@ mod tests {
             let err = s.validated().unwrap_err();
             assert!(err.to_string().contains("http://"), "{bad}: {err}");
         }
+    }
+
+    fn widgets(number: u64) -> ReviewRef {
+        ReviewRef {
+            provider: ProviderId::Github,
+            host: "github.com".into(),
+            repo: "acme-fixture/widgets".into(),
+            number,
+            url: String::new(),
+            title: String::new(),
+            author: String::new(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn review_skills_round_trip_per_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        s.review_skills.insert(
+            "github.com/acme-fixture/widgets".into(),
+            ReviewSkillChoice::Skill {
+                source: SkillSource::Plugin,
+                name: "fixture-tools:code-review".into(),
+            },
+        );
+        s.review_skills.insert(
+            "gitlab.example.test/acme-fixture/api".into(),
+            ReviewSkillChoice::None,
+        );
+        s.save(&path).unwrap();
+        assert_eq!(Settings::load(&path), s);
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw["reviewSkills"]["github.com/acme-fixture/widgets"],
+            serde_json::json!({"kind": "skill", "source": "plugin", "name": "fixture-tools:code-review"})
+        );
+        assert_eq!(
+            raw["reviewSkills"]["gitlab.example.test/acme-fixture/api"],
+            serde_json::json!({"kind": "none"})
+        );
+        assert_eq!(
+            s.review_skill(&widgets(1)),
+            ReviewSkillChoice::Skill {
+                source: SkillSource::Plugin,
+                name: "fixture-tools:code-review".into()
+            }
+        );
+        let mut other = widgets(1);
+        other.repo = "acme-fixture/gadgets".into();
+        assert_eq!(s.review_skill(&other), ReviewSkillChoice::Auto);
+    }
+
+    #[test]
+    fn older_or_garbled_review_skills_load_as_auto() {
+        // A settings.json from before review skills: every repository auto.
+        let old: Settings = serde_json::from_str(r#"{"pollIntervalSecs": 60}"#).unwrap();
+        assert!(old.review_skills.is_empty());
+        assert_eq!(old.review_skill(&widgets(1)), ReviewSkillChoice::Auto);
+        // A hand-edited or future entry never costs the other settings.
+        let s: Settings = serde_json::from_str(
+            r#"{"pollIntervalSecs": 60, "reviewSkills": {
+                "github.com/acme-fixture/widgets": {"kind": "fromTheFuture"},
+                "github.com/acme-fixture/a": {"kind": "skill", "source": "user"},
+                "github.com/acme-fixture/b": "code-review",
+                "github.com/acme-fixture/c": {"kind": "skill", "source": "user", "name": "  "},
+                "github.com/acme-fixture/d": {"kind": "none"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(s.poll_interval_secs, 60);
+        for repo in ["widgets", "a", "b", "c"] {
+            assert_eq!(
+                s.review_skills[&format!("github.com/acme-fixture/{repo}")],
+                ReviewSkillChoice::Auto,
+                "{repo}"
+            );
+        }
+        assert_eq!(
+            s.review_skills["github.com/acme-fixture/d"],
+            ReviewSkillChoice::None
+        );
+    }
+
+    #[test]
+    fn validation_keeps_only_review_skill_choices_that_differ_from_auto() {
+        let mut s = Settings::default();
+        s.review_skills.insert(
+            " github.com/acme-fixture/widgets ".into(),
+            ReviewSkillChoice::None,
+        );
+        s.review_skills
+            .insert("github.com/acme-fixture/a".into(), ReviewSkillChoice::Auto);
+        s.review_skills.insert(
+            "github.com/acme-fixture/b".into(),
+            ReviewSkillChoice::Skill {
+                source: SkillSource::User,
+                name: " code-review ".into(),
+            },
+        );
+        let s = s.validated().unwrap();
+        assert_eq!(
+            s.review_skills.into_iter().collect::<Vec<_>>(),
+            [
+                (
+                    "github.com/acme-fixture/b".to_string(),
+                    ReviewSkillChoice::Skill {
+                        source: SkillSource::User,
+                        name: "code-review".into()
+                    }
+                ),
+                (
+                    "github.com/acme-fixture/widgets".to_string(),
+                    ReviewSkillChoice::None
+                ),
+            ]
+        );
     }
 
     #[test]

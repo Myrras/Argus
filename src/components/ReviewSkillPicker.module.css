@@ -1,0 +1,117 @@
+/* Settings → AI → Review skill. The repository cards are SettingsModal's
+   own (.card, .cardHeader); this is the picker inside one. */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* The scrolling well of choices: a step down from the card, like an input. */
+.list {
+  display: flex;
+  flex-direction: column;
+  max-height: 264px;
+  overflow-y: auto;
+  padding: var(--sp-1);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overscroll-behavior: contain;
+}
+
+.option {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  column-gap: var(--sp-2);
+  align-items: start;
+  width: 100%;
+  padding: var(--sp-2);
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+.option:hover {
+  background: var(--surface-hover);
+}
+
+.option:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.option[aria-checked="true"] {
+  background: var(--selection);
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  height: 16px; /* one line of the name */
+  color: var(--accent);
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.name {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* Skill names are identifiers (`plugin:skill`), like the repository. */
+.skillName {
+  font-family: var(--font-mono);
+}
+
+.help {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+/* "Your skills", "Plugin skills", "This project": where the rows below come
+   from. */
+.group {
+  display: flex;
+  flex-direction: column;
+}
+
+.groupLabel {
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.divider {
+  height: 1px;
+  margin: var(--sp-1) var(--sp-2);
+  background: var(--border);
+}
+
+.note {
+  margin: 0;
+  padding: var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.gone {
+  color: var(--warning);
+}

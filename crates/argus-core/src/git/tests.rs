@@ -225,12 +225,12 @@ fn git_runs_without_a_shell_with_the_clean_environment() {
 // ------------------------------------------------------- real repositories
 
 /// A fixture repository, through a git isolated from the user's config.
-struct Fixture {
-    _dir: tempfile::TempDir,
-    path: PathBuf,
+pub(crate) struct Fixture {
+    pub(crate) _dir: tempfile::TempDir,
+    pub(crate) path: PathBuf,
 }
 
-fn git_in(path: &Path, args: &[&str]) -> String {
+pub(crate) fn git_in(path: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .args(args)
         .current_dir(path)
@@ -249,7 +249,7 @@ fn git_in(path: &Path, args: &[&str]) -> String {
 }
 
 impl Fixture {
-    fn new() -> Option<Fixture> {
+    pub(crate) fn new() -> Option<Fixture> {
         if Command::new("git").arg("--version").output().is_err() || git_binary().is_none() {
             eprintln!("skipping: git is not installed");
             return None;
@@ -261,7 +261,7 @@ impl Fixture {
         Some(Fixture { _dir: dir, path })
     }
 
-    fn commit(&self, file: &str, text: &str, message: &str) -> String {
+    pub(crate) fn commit(&self, file: &str, text: &str, message: &str) -> String {
         let p = self.path.join(file);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
@@ -273,7 +273,7 @@ impl Fixture {
     }
 
     /// A clone of the repository as it is now, next to it.
-    fn clone_now(&self) -> PathBuf {
+    pub(crate) fn clone_now(&self) -> PathBuf {
         let to = self.path.parent().unwrap().join("local");
         let (from, dest) = (self.path.to_str().unwrap(), to.to_str().unwrap());
         git_in(self.path.parent().unwrap(), &["clone", "-q", from, dest]);
@@ -995,6 +995,7 @@ fn a_removed_line_posts_against_the_left_side_the_clone_found() {
             provider: p.clone(),
             timeout: Duration::from_secs(20),
             child: Default::default(),
+            claude_dir: None,
         };
         let record = core.review(id).unwrap();
         let out = crate::ai::job::execute(

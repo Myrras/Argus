@@ -89,6 +89,51 @@ describe("AiStatus", () => {
     );
   });
 
+  it("says in the chip's tooltip which rules, skill and worktree the last run used", async () => {
+    run = aiRun({
+      reviewId: r.id,
+      context: {
+        rulesFiles: ["CLAUDE.md", "src/api/CLAUDE.md"],
+        skill: { name: "code-review", source: "project" },
+        worktree: true,
+        notes: [
+          "The review skill strict-review (user) was not found; Auto used the project's own (code-review)",
+        ],
+      },
+    });
+    render(<AiStatus review={r} />);
+    await waitFor(() =>
+      expect(chip()).toHaveAttribute(
+        "title",
+        [
+          "AI: done · 1 finding — claude, round 1",
+          "Rules: CLAUDE.md, src/api/CLAUDE.md",
+          "Review skill: code-review (project)",
+          "Read a worktree at the review's head",
+          "The review skill strict-review (user) was not found; Auto used the project's own (code-review)",
+        ].join("\n"),
+      ),
+    );
+    // A run without a worktree, rules or skill says so, with the reason.
+    run = aiRun({
+      reviewId: r.id,
+      context: {
+        rulesFiles: [],
+        skill: null,
+        worktree: false,
+        notes: [
+          "Couldn't create a review worktree: git worktree add failed; reviewed without it",
+        ],
+      },
+    });
+    useAiStore.setState({ runs: { [r.id]: run } });
+    await waitFor(() =>
+      expect(chip().getAttribute("title")).toContain(
+        "Rules: none found\nReview skill: none\nCouldn't create a review worktree: git worktree add failed; reviewed without it",
+      ),
+    );
+  });
+
   it("shows a running run with a spinner and Cancel", async () => {
     run = aiRun({ reviewId: r.id, status: "running" });
     const { container } = render(<AiStatus review={r} />);

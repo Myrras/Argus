@@ -118,6 +118,7 @@ mod tests {
             dropped_duplicates: 0,
             skipped_checklist: 0,
             read_only_guaranteed: true,
+            context: None,
         }
     }
 

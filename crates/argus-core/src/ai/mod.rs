@@ -9,7 +9,11 @@
 //! - [`dedupe`]: sets aside findings and checklist items the review
 //!   already makes (an existing thread, a posted finding): the agent's own
 //!   `relatedThreadIds`, checked against the text, plus a text net.
-//! - [`job`]: one run end to end (diff, workspace, prompt, retry).
+//! - [`context`]: the repository's rules files, read at the target branch.
+//! - [`skills`]: review skills (the user's, plugins', the project's) and
+//!   the one a run follows.
+//! - [`job`]: one run end to end (diff, review worktree, rules and skill,
+//!   prompt, retry).
 //! - [`runtime`]: queueing (per review serial, two at once), `ai:state`,
 //!   and the shutdown that kills running agents on quit.
 //! - `store`: SQLite (the v1 tables plus `ai_runs`, migration 5, and the
@@ -22,11 +26,13 @@
 
 pub(crate) mod adapter;
 mod api;
+pub(crate) mod context;
 pub(crate) mod dedupe;
 pub(crate) mod job;
 pub(crate) mod output;
 pub mod prompt;
 pub(crate) mod runtime;
+pub mod skills;
 pub(crate) mod store;
 
 pub mod model;
@@ -34,11 +40,12 @@ pub mod model;
 pub use job::sweep_stale_temp_dirs;
 pub use model::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost,
-    FindingPostOutcome, FindingPostResult, RelatedRef, RepeatOf, RepeatReason, Severity, Verdict,
-    VerdictLabel,
+    FindingPostOutcome, FindingPostResult, RelatedRef, RepeatOf, RepeatReason, RunContext,
+    Severity, UsedSkill, Verdict, VerdictLabel,
 };
 pub use prompt::ThreadSnapshot;
 pub use runtime::AiStateCallback;
+pub use skills::{ReviewSkill, ReviewSkillList};
 
 use std::time::Duration;
 

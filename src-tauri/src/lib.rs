@@ -174,6 +174,16 @@ pub fn run() {
             state
                 .core
                 .set_opener(std::sync::Arc::new(opener::DesktopOpener));
+            // Review worktrees a previous Argus left in the clones (it quit
+            // mid-run): only its own, marked ones. Off the main thread (git
+            // deletes their files); a run sweeps its clone first anyway.
+            let core = std::sync::Arc::clone(&state.core);
+            std::thread::spawn(move || {
+                let swept = core.sweep_review_worktrees();
+                if swept > 0 {
+                    tracing::info!("removed {swept} stale review worktree(s)");
+                }
+            });
             start_polling(app.handle().clone(), &state);
             app.manage(state);
             Ok(())
@@ -215,6 +225,7 @@ pub fn run() {
             commands::ai::set_checklist_checked,
             commands::ai::set_verdict_override,
             commands::ai::post_findings,
+            commands::ai::list_review_skills,
             commands::open::local_files,
             commands::open::open_in_editor,
             commands::open::reveal_local_file,

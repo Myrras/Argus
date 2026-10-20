@@ -55,8 +55,8 @@ use chrono::Utc;
 
 pub use ai::{
     AiRunState, AiRunStatus, AiStateCallback, ChecklistId, ChecklistItem, Finding, FindingId,
-    FindingPost, FindingPostOutcome, FindingPostResult, RepeatOf, RepeatReason, Severity, Verdict,
-    VerdictLabel,
+    FindingPost, FindingPostOutcome, FindingPostResult, RepeatOf, RepeatReason, ReviewSkill,
+    ReviewSkillList, RunContext, Severity, UsedSkill, Verdict, VerdictLabel,
 };
 pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
@@ -71,7 +71,7 @@ pub use provider::{
     GithubStatus, GitlabProblem, GitlabStatus, MyReviewState, ProviderStatus, ReviewVerdict,
 };
 pub use review::{ReviewStatus, RoundReason};
-pub use settings::Settings;
+pub use settings::{ReviewSkillChoice, Settings, SkillSource};
 pub use store::{ReviewRecord, StoredThread};
 
 use provider::ReviewProvider;
@@ -164,6 +164,10 @@ pub struct Core {
     shut_down: AtomicBool,
     /// Opens a clone's file in an editor ([`open`]); the shell sets it.
     opener: Mutex<Arc<dyn open::Opener>>,
+    /// Claude Code's config directory, where the user's and plugins' review
+    /// skills are ([`ai::skills`]). The real app's is `~/.claude` (or
+    /// `CLAUDE_CONFIG_DIR`); an in-memory core has none.
+    claude_dir: Mutex<Option<PathBuf>>,
 }
 
 impl Default for Core {
@@ -190,12 +194,9 @@ impl Core {
         });
         // Gone either way: what it said is in settings.json now, or re-checked.
         let _ = std::fs::remove_file(settings_path.with_file_name(LEGACY_TOKEN_MOVED_MARKER));
-        Ok(Self::with_parts(
-            store,
-            Some(settings_path.to_path_buf()),
-            settings,
-            None,
-        ))
+        let core = Self::with_parts(store, Some(settings_path.to_path_buf()), settings, None);
+        core.set_claude_dir(ai::skills::claude_config_dir());
+        Ok(core)
     }
 
     /// A core over explicit providers (tests, or a shell that builds its
@@ -233,7 +234,55 @@ impl Core {
             ai,
             shut_down: AtomicBool::new(false),
             opener: Mutex::new(Arc::new(open::NoOpener)),
+            claude_dir: Mutex::new(None),
         }
+    }
+
+    /// Where Claude Code's user config lives (the review skills of the user
+    /// and of installed plugins); `None` looks for none. [`Core::open`] sets
+    /// the real one; tests point it at a fixture.
+    pub fn set_claude_dir(&self, dir: Option<PathBuf>) {
+        *self.claude_dir.lock().expect("claude dir lock poisoned") = dir;
+    }
+
+    pub(crate) fn claude_dir(&self) -> Option<PathBuf> {
+        self.claude_dir
+            .lock()
+            .expect("claude dir lock poisoned")
+            .clone()
+    }
+
+    /// The review skills the picker offers for `repo` (`host/repo`, keyed
+    /// like [`Settings::clone_paths`]): every skill of the user and of
+    /// installed plugins whose name says "review", and the repository's own
+    /// from its clone's default branch (`origin/HEAD`, else `HEAD`), when a
+    /// clone is set. Read-only.
+    pub fn list_review_skills(&self, repo: Option<&str>) -> CoreResult<ai::ReviewSkillList> {
+        let settings = self.settings();
+        let clone = repo
+            .and_then(|r| settings.clone_paths.get(r.trim()))
+            .and_then(|p| git::LocalClone::open(p));
+        let head = clone.as_ref().and_then(|c| c.default_branch_head());
+        let base = head
+            .as_ref()
+            .map(|sha| ai::context::BaseFiles::new(sha.clone(), clone.as_ref(), None));
+        Ok(ai::skills::list(
+            self.claude_dir().as_deref(),
+            base.as_ref(),
+        ))
+    }
+
+    /// Remove the review worktrees an earlier Argus left in the configured
+    /// clones (it quit or crashed mid-run): only the ones it marked, never
+    /// one a run of this process uses. How many went. For startup (the shell
+    /// runs it off the main thread); each run also sweeps its clone first.
+    pub fn sweep_review_worktrees(&self) -> usize {
+        self.settings()
+            .clone_paths
+            .values()
+            .filter_map(|p| git::LocalClone::open(p))
+            .map(|c| c.sweep_review_worktrees())
+            .sum()
     }
 
     fn providers(&self) -> Vec<Arc<dyn ReviewProvider>> {

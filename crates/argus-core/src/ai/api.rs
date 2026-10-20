@@ -300,6 +300,7 @@ impl Core {
             provider: self.provider_for(record)?,
             timeout: RUN_TIMEOUT,
             child: Default::default(),
+            claude_dir: self.claude_dir(),
         })
     }
 }

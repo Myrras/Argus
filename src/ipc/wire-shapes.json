@@ -64,6 +64,11 @@
       "agentMarked",
       "similar"
     ],
+    "ReviewSkillChoice.kind": [
+      "auto",
+      "none",
+      "skill"
+    ],
     "ReviewState": [
       "open",
       "merged",
@@ -95,6 +100,11 @@
       "old",
       "new"
     ],
+    "SkillSource": [
+      "user",
+      "plugin",
+      "project"
+    ],
     "SnapshotSource": [
       "file",
       "diffHunk"
@@ -114,6 +124,13 @@
   "structs": {
     "AiRunState": [
       "adapter",
+      "context",
+      "context.notes",
+      "context.rulesFiles",
+      "context.skill",
+      "context.skill.name",
+      "context.skill.source",
+      "context.worktree",
       "droppedDuplicates",
       "droppedFindings",
       "droppedVerdicts",
@@ -360,6 +377,25 @@
       "review.url",
       "review.viewer"
     ],
+    "ReviewSkillChoice:auto": [
+      "kind"
+    ],
+    "ReviewSkillChoice:none": [
+      "kind"
+    ],
+    "ReviewSkillChoice:skill": [
+      "kind",
+      "name",
+      "source"
+    ],
+    "ReviewSkillList": [
+      "autoPick",
+      "projectListed",
+      "skills",
+      "skills[].description",
+      "skills[].name",
+      "skills[].source"
+    ],
     "Settings": [
       "ai",
       "ai.adapter",
@@ -375,7 +411,8 @@
       "github.host",
       "gitlab",
       "gitlab.baseUrl",
-      "pollIntervalSecs"
+      "pollIntervalSecs",
+      "reviewSkills"
     ],
     "StoredThread": [
       "anchor",

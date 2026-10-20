@@ -202,6 +202,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE reviews ADD COLUMN my_reviewed_at TEXT;
     ALTER TABLE reviews ADD COLUMN my_reviewed_sha TEXT;
     "#,
+    // 14: what an AI run was given besides the diff (rules files, review
+    // skill, worktree, notes; see `ai::store`).
+    crate::ai::store::MIGRATION_14,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus

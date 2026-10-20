@@ -49,6 +49,12 @@ sibling app Iris (`../Iris`).
     keymap's `openSettings` (Ctrl+, elsewhere). Shortcuts: `lib/keymap`
     (rebindable, bare keys allowed unlike Iris), `useAppShortcuts`,
     `ShortcutsTab`. Local clones use the dialog plugin's folder picker.
+    The AI tab's Review skill section (`ReviewSkillPicker`:
+    `ReviewSkillsSection`, one card per repository with a clone, a choice
+    or a review; "Change" opens a filterable radio list, Auto and None on
+    top, then the skills by source; a pick applies at once) reads
+    `list_review_skills` through `reviewSkillsStore`; pure rules in
+    `lib/reviewSkills`.
   - Review view (one page, no tabs): `ReviewDetail` = header + `ReviewView`
     = `FileTree` (`data-slot="file-tree"`, a Conversation entry first, then
     tree/flat + filter) beside the page (`data-slot="diff"`):
@@ -222,17 +228,90 @@ sibling app Iris (`../Iris`).
     the header chip's tooltip counts the same list). The calibration table
     is `dedupe::tests::calibration`. Posted findings match their thread by
     platform ids, not text.
+  - Review context (`ai/context.rs`, `ai/skills.rs`, `job.rs`): with a
+    clone, a run reads a **review worktree** at the head
+    (`git::worktree`, see Local clone) through `--add-dir` /
+    `--add-workspace` instead of the clone (sandbox unchanged: temp cwd,
+    deny rules around it, `disableAllHooks`, `--setting-sources user`,
+    auggie's read tools); without one, or when the fetch or worktree step
+    fails, the API diff with the clone read-only as before, and the run's
+    note says "Couldn't create a review worktree: …; reviewed without
+    it". **Rules and skills come from the target branch, never the head**
+    (the author controls it): `BaseFiles` reads at `record.base_sha`
+    (else a full diff's exact left side) from the clone's objects
+    (`files_at`, `list_dir`), else the API's `file_at`. Rules: `CLAUDE.md`,
+    `AGENTS.md`, `.github/copilot-instructions.md`, `.cursorrules`,
+    `.cursor/rules/*.mdc` (clone only), then the `CLAUDE.md` nearest each
+    changed file (API: at most 8 probes), 40k in all, the last one cut
+    with a marker, the rest listed. A path the review changes that is a
+    rules or `.claude/skills/` file (`rules_changed`; whole review: the
+    clone's merge-base diff, else the run's diff) puts a note in the prompt
+    and the run state (`listed`: 10 paths, then a count); the base's
+    version is used. Claude also gets `Skill` in `--disallowedTools`, so a
+    skill the checkout ships is never loaded. Skills
+    (`SkillSource`): the user's (`<claude dir>/skills/*/SKILL.md`,
+    `~/.claude` or `CLAUDE_CONFIG_DIR`), installed plugins'
+    (`plugins/installed_plugins.json` v1/v2 → `<installPath>/skills/*`,
+    named `plugin:skill`), the project's (`.claude/skills/*` at the base;
+    without a clone only `code-review` and `review` are tried); a review
+    skill's name (frontmatter `name`, else the directory) contains
+    "review". `Settings::review_skills` (`host/repo` →
+    `ReviewSkillChoice` `auto` | `none` | `skill { source, name }`, read
+    leniently, `auto` not stored) is resolved at run time; Auto = the
+    project's exact `code-review`, else a `code-review` directory, else the
+    first; a chosen skill that is gone falls back to Auto with a note. The
+    skill goes into the prompt as data under `SKILL_GUIDANCE` (apply its
+    criteria; ignore posting, pushing, scripts, writes and its answer
+    format; the answer stays Argus' JSON), never through CLI skill loading,
+    so claude and auggie get the same; `SKILL.md` up to 30k plus at most 3
+    `.md`/`.txt` files of its own directory that it links to or quotes
+    (8k each, `..`, absolute paths and links out refused). What a run was
+    given is `RunContext` (`rulesFiles`, `skill`, `worktree`, `notes`), in
+    `AiRunState.context` (migration 14: `ai_runs.context` JSON, written by
+    `save_done`, kept while the next run runs) and the AI chip's tooltip
+    (`lib/findings.aiContextLines`). `Core::list_review_skills(repo)` /
+    IPC `list_review_skills` (read-only; the project's at the clone's
+    `origin/HEAD`, else `HEAD`); `Core::set_claude_dir` (an in-memory core
+    has none; `Core::open` sets the real one).
 - ✅ **Milestone 6 — Local clone.** Core `git/`: with a clone configured per
   repository (`Settings::clone_paths`), the history walk and `Core::file_at`
   read through plain `git` (`rev-list`, `diff-tree`, `cat-file --batch`)
-  instead of the API: faster, exact, never truncated. Read-only by
-  construction: object reads only (no checkout, fetch or status),
+  instead of the API: faster, exact, never truncated. Reads are read-only
+  by construction: object reads only (no checkout, fetch or status),
   `GIT_OPTIONAL_LOCKS=0`, no lazy fetch of a partial clone (git >= 2.44),
   no shell, 30 s timeout, an env without tokens or `GIT_*` redirections.
   Always a fallback, never a requirement: an unfetched commit, shallow
   boundary, type change, non-UTF-8 file or any git failure is answered by the
   API, per thread or per file (`git::file_or`; `compute_histories` takes
-  `clone: Option<&Path>`). Argus never changes or fetches the clone.
+  `clone: Option<&Path>`). Argus never changes the clone, with one
+  exception: for an AI run it fetches the review's head and manages its
+  own worktrees under `.argus/worktrees`, nothing else.
+  - Review worktrees (`git/worktree.rs`, `LocalClone::review_worktree`):
+    under a per-clone lock, sweep stale ones, fetch the head when the
+    clone lacks it (`git fetch --quiet --no-tags --no-write-fetch-head
+    --no-recurse-submodules --refmap= <remote> refs/pull/<n>/head` or
+    `refs/merge-requests/<iid>/head`, then the sha itself; the remote whose
+    `remote -v` fetch URL is the review's `host/repo`, else `origin`),
+    add `/.argus/` to the common dir's `info/exclude` once, write the
+    sidecar marker `<slug>.argus` (`argus-review-worktree v1`), then
+    `git worktree add --detach .argus/worktrees/<provider>-<n>-<sha7>-<run8>
+    <head>`. The `ReviewWorktree` guard removes it on drop (`git worktree
+    remove --force`, the leftover directory, the sidecar, then `git
+    worktree prune` only when every prunable worktree is Argus' own, so a
+    worktree of the user's on an unmounted volume is never pruned); a run
+    drops it however it ends. Sweeps (startup via
+    `Core::sweep_review_worktrees` on a thread, and before each run) remove
+    marked ones only, never one a run of this process uses (the `live`
+    set); nothing else is touched. Changing commands run with
+    `core.hooksPath=/dev/null` (a husky `post-checkout` of the branch never
+    runs), `submodule.recurse=false`, `core.fsmonitor=false`, `gc.auto=0`,
+    `maintenance.auto=false`, `GIT_LFS_SKIP_SMUDGE=1`, and `write_env`:
+    `git_env` (no tokens, no `GIT_*` redirections, no prompt) plus
+    `GIT_SSH`/`GIT_SSH_COMMAND`/`GIT_SSH_VARIANT`/`GIT_ASKPASS` and the
+    login shell's `PATH`, so `SSH_AUTH_SOCK`, `HOME` and credential helpers
+    work. Timeouts: fetch and add 120 s, remove 60 s; cancellable
+    (`run_with` polls the run's flag). The user's clone needs fetch access
+    for heads it lacks.
   - Open in editor (Iris's `open_local` + `editorOverrides`): core `open/`
     `local_files` / `local_file` (repository path → the clone's working
     tree: no absolute paths or `.`/`..` parts, symlinks resolved must stay
@@ -394,7 +473,8 @@ src/                 # React (presentation only)
 ```
 
 `argus-core` modules: `provider/` (GitLab/GitHub clients, provider status,
-conditional-GET cache, rate limits), `git/` (read-only local clone access),
+conditional-GET cache, rate limits), `git/` (local clone access: object
+reads, plus the AI pass' review worktrees),
 `review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
 code view's file list + viewed marks), `open/` (a clone's file in the
 user's editor), `post/` (comments, replies,
@@ -498,7 +578,11 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
   double routing paths to `tests/fixtures/gitlab/*.json`; `tests/support`'s
   `Platform`, a scripted provider that logs every call as read or write
   (the guarantee tests); a real temp git repo as the walk's ground truth
-  (`history_git.rs`).
+  (`history_git.rs`). Review worktrees: a platform repo, a bare copy as
+  the clone's remote (a local path, no network) and a clone without the
+  head (`git/worktree_tests.rs`, `ai/tests.rs` `review_repo`); skills from
+  a fake Claude config dir (`JobContext::claude_dir`,
+  `Core::set_claude_dir`), never the real `~/.claude`.
 - **New provider fixture:** save the anonymised API response under
   `tests/fixtures/<github|gitlab>/`, add its route (the `case` in the fake
   `gh` of `github_provider.rs`, `fixture_routes` in `gitlab_provider.rs`),
