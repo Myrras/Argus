@@ -62,7 +62,7 @@ pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
 pub use history::{LineStatus, ThreadHistory};
 pub use ids::{ReviewId, ThreadId};
-pub use open::{LocalFile, Opener};
+pub use open::{CloneStatus, LocalFile, Opener};
 pub use poll::{RefreshError, RefreshReport, ReviewRefresh};
 pub use post::{
     CommentableLines, NewComment, PostError, PostErrorKind, PostResult, PostedComment, PostedNote,

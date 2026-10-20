@@ -690,3 +690,17 @@ export interface LocalFile {
   /** The clone is on the review's head commit. */
   matchesReviewHead: boolean;
 }
+
+/** `open::CloneStatus`: the clone set for a review's repository. */
+export interface CloneStatus {
+  /** A clone is set for the repository in Settings. */
+  configured: boolean;
+  /** The folder as set; `null` when not configured. */
+  path: string | null;
+  /** The folder is there and is a git repository. */
+  found: boolean;
+  /** The clone's checked-out commit; `null` when not found or unknown. */
+  head: string | null;
+  /** The clone is on the review's head commit. */
+  matchesReviewHead: boolean;
+}

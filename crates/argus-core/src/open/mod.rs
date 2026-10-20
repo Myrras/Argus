@@ -76,6 +76,23 @@ pub struct LocalFile {
     pub matches_review_head: bool,
 }
 
+/// The clone set for a review's repository, as the header chip shows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneStatus {
+    /// A clone is set for the review's repository in Settings.
+    pub configured: bool,
+    /// The folder as it is set; `None` when not configured.
+    pub path: Option<PathBuf>,
+    /// The folder is there and is a git repository.
+    pub found: bool,
+    /// The commit the clone has checked out; `None` when not found or git
+    /// could not tell.
+    pub head: Option<String>,
+    /// The clone is on the review's head commit.
+    pub matches_review_head: bool,
+}
+
 /// Where a repository path is in the clone at `root` (canonical).
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Resolved {
@@ -228,6 +245,45 @@ impl Core {
             .and_then(|dir| std::fs::canonicalize(dir).ok())
             .filter(|dir| dir.is_dir());
         Ok((record, root))
+    }
+
+    /// What is set and found for the review's repository: nothing set, a
+    /// folder that is gone or no repository, or a repository with its head
+    /// (blocking: one `git rev-parse HEAD`). Read-only, like the rest of
+    /// this module.
+    pub fn clone_status(&self, id: ReviewId) -> CoreResult<CloneStatus> {
+        let record = self.review(id)?;
+        let settings = self.settings();
+        let Some(dir) = settings.clone_path(&record.review) else {
+            return Ok(CloneStatus::default());
+        };
+        let root = std::fs::canonicalize(dir).ok().filter(|d| d.is_dir());
+        let clone = root.as_deref().and_then(git::LocalClone::open);
+        // `LocalClone::open` also says no for a git that is missing or too
+        // old for a partial clone: a `.git` entry still makes it a repository.
+        let found = root
+            .as_ref()
+            .is_some_and(|r| clone.is_some() || r.join(".git").exists());
+        let head = clone.and_then(|c| c.head());
+        let matches_review_head = head.as_deref() == Some(record.head_sha.as_str());
+        Ok(CloneStatus {
+            configured: true,
+            path: Some(dir.to_path_buf()),
+            found,
+            head,
+            matches_review_head,
+        })
+    }
+
+    /// Show the review's clone folder in the file manager. Only the folder
+    /// the user set for the repository (resolved here, never taken from the
+    /// webview).
+    pub fn reveal_clone(&self, id: ReviewId) -> CoreResult<()> {
+        let (_, root) = self.clone_root(id)?;
+        let root = root.ok_or_else(|| {
+            CoreError::InvalidInput("no local clone is set for this repository".into())
+        })?;
+        self.opener().reveal(&root)
     }
 
     /// The review's files `paths` in its local clone (blocking: one

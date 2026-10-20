@@ -410,3 +410,140 @@ fn a_core_without_an_opener_says_so() {
     let err = core.open_in_editor(id, "a.rs", false).unwrap_err();
     assert!(err.to_string().contains("not set up"), "{err}");
 }
+
+// ----------------------------------------------------------- clone status
+
+/// Every file under `dir` with its size and mtime: a read must change none.
+fn fingerprint(dir: &Path) -> Vec<(PathBuf, u64, Option<std::time::SystemTime>)> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for entry in std::fs::read_dir(&d).unwrap() {
+            let path = entry.unwrap().path();
+            let meta = std::fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                todo.push(path);
+            } else {
+                out.push((path, meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn no_clone_set_is_not_configured() {
+    let (core, id, _) = core_at("h1", None);
+    assert_eq!(core.clone_status(id).unwrap(), CloneStatus::default());
+    assert!(!core.clone_status(id).unwrap().configured);
+}
+
+#[test]
+fn a_clone_folder_that_is_gone_is_configured_but_not_found() {
+    let gone = Path::new("/nonexistent/argus-fixture/widgets");
+    let (core, id, _) = core_at("h1", Some(gone));
+    let status = core.clone_status(id).unwrap();
+    assert!(status.configured);
+    assert_eq!(status.path.as_deref(), Some(gone));
+    assert!(!status.found);
+    assert_eq!(status.head, None);
+    assert!(!status.matches_review_head);
+}
+
+#[test]
+fn a_folder_that_is_no_repository_is_configured_but_not_found() {
+    let (_dir, root) = canonical_tempdir();
+    std::fs::write(root.join("a.rs"), "a").unwrap();
+    let (core, id, _) = core_at("h1", Some(&root));
+    let status = core.clone_status(id).unwrap();
+    assert!(status.configured);
+    assert_eq!(status.path.as_deref(), Some(root.as_path()));
+    assert!(!status.found);
+    assert_eq!(status.head, None);
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_repository_is_found_with_its_head_and_whether_it_matches() {
+    let Some((_dir, root, head)) = repo() else {
+        eprintln!("skipping: git is not installed");
+        return;
+    };
+    let (core, id, _) = core_at(&head, Some(&root));
+    let status = core.clone_status(id).unwrap();
+    assert_eq!(
+        status,
+        CloneStatus {
+            configured: true,
+            path: Some(root.clone()),
+            found: true,
+            head: Some(head.clone()),
+            matches_review_head: true,
+        }
+    );
+
+    // The clone moves on: still found, no longer at the review's head.
+    std::fs::write(root.join("README.md"), "# widgets 2\n").unwrap();
+    git(&root, &["commit", "-q", "-am", "c2"]).unwrap();
+    let moved = core.clone_status(id).unwrap();
+    assert!(moved.found);
+    assert!(!moved.matches_review_head);
+    assert_ne!(moved.head.as_deref(), Some(head.as_str()));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn reading_the_status_changes_nothing_in_the_clone() {
+    let Some((_dir, root, head)) = repo() else {
+        eprintln!("skipping: git is not installed");
+        return;
+    };
+    let (core, id, opener) = core_at(&head, Some(&root));
+    let before = fingerprint(&root);
+    core.clone_status(id).unwrap();
+    core.clone_status(id).unwrap();
+    assert_eq!(fingerprint(&root), before);
+    // Reading never launches anything either.
+    assert!(opener.opened.lock().unwrap().is_empty());
+    assert!(opener.revealed.lock().unwrap().is_empty());
+}
+
+#[test]
+fn revealing_the_clone_shows_its_folder_only() {
+    let (_dir, root) = canonical_tempdir();
+    let (core, id, opener) = core_at("h1", Some(&root));
+    core.reveal_clone(id).unwrap();
+    assert_eq!(
+        *opener.revealed.lock().unwrap(),
+        std::slice::from_ref(&root)
+    );
+    assert!(opener.opened.lock().unwrap().is_empty());
+}
+
+#[test]
+fn there_is_no_clone_to_reveal_without_a_folder() {
+    let (core, id, opener) = core_at("h1", None);
+    assert!(matches!(
+        core.reveal_clone(id),
+        Err(CoreError::InvalidInput(_))
+    ));
+    let (core, id, _) = core_at("h1", Some(Path::new("/nonexistent/argus-fixture")));
+    assert!(matches!(
+        core.reveal_clone(id),
+        Err(CoreError::InvalidInput(_))
+    ));
+    assert!(opener.revealed.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_file_set_as_the_clone_is_not_revealed() {
+    let (_dir, root) = canonical_tempdir();
+    std::fs::write(root.join("a.rs"), "a").unwrap();
+    let (core, id, opener) = core_at("h1", Some(&root.join("a.rs")));
+    assert!(matches!(
+        core.reveal_clone(id),
+        Err(CoreError::InvalidInput(_))
+    ));
+    assert!(opener.revealed.lock().unwrap().is_empty());
+}
