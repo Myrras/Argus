@@ -88,24 +88,26 @@ type ProviderBuilder = Box<dyn Fn(&Settings) -> Vec<Arc<dyn ReviewProvider>> + S
 /// own).
 type TokenWriter = Box<dyn Fn(&str, &str) -> CoreResult<()> + Send + Sync>;
 
-/// The file next to `settings.json` that says the one-time move of a
-/// plain-http GitLab token to its own keychain entry ran (see
-/// [`provider::gitlab::gitlab_migrate_plain_http_token`]).
-const PLAIN_HTTP_TOKEN_MOVED: &str = "gitlab-http-token-moved";
+/// The file next to `settings.json` that earlier builds wrote after the
+/// one-time plain-http token move, even when the move had failed. It proves
+/// nothing: the move is checked again (see [`run_once`]) and the file goes.
+const LEGACY_TOKEN_MOVED_MARKER: &str = "gitlab-http-token-moved";
 
-/// Run `f` unless `marker` exists, then create it. A marker that cannot be
-/// written is logged: `f` runs again on the next start, which only matters
-/// if the GitLab URL went from https to http in between.
-fn once(marker: &Path, f: impl FnOnce()) {
-    if marker.exists() {
+/// Run the one-time step `name` unless `settings.json` at `settings_path`
+/// records it, and record it only once it succeeded: a failure (a denied
+/// keychain prompt, say) is logged and tried again on the next start. A
+/// record that cannot be written is logged too: the step runs again next
+/// start, which only matters if the GitLab URL went from https to http in
+/// between.
+fn run_once(settings_path: &Path, name: &str, f: impl FnOnce() -> CoreResult<()>) {
+    if settings::migration_done(settings_path, name) {
         return;
     }
-    f();
-    let written = marker
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(marker, "done\n"));
-    if written.is_err() {
+    if f().is_err() {
+        tracing::warn!("the one-time GitLab token move failed; it is tried again next start");
+        return;
+    }
+    if settings::record_migration(settings_path, name).is_err() {
         tracing::warn!("could not record the one-time GitLab token move");
     }
 }
@@ -167,10 +169,11 @@ impl Core {
         let store = Store::open(db_path)?;
         let settings = Settings::load(settings_path);
         // Before any provider reads the token.
-        once(
-            &settings_path.with_file_name(PLAIN_HTTP_TOKEN_MOVED),
-            || provider::gitlab::gitlab_migrate_plain_http_token(&settings.gitlab.base_url),
-        );
+        run_once(settings_path, settings::GITLAB_HTTP_TOKEN, || {
+            provider::gitlab::gitlab_migrate_plain_http_token(&settings.gitlab.base_url)
+        });
+        // Gone either way: what it said is in settings.json now, or re-checked.
+        let _ = std::fs::remove_file(settings_path.with_file_name(LEGACY_TOKEN_MOVED_MARKER));
         Ok(Self::with_parts(
             store,
             Some(settings_path.to_path_buf()),
@@ -623,22 +626,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_plain_http_token_move_runs_once_ever() {
+    fn the_plain_http_token_move_is_recorded_only_once_it_succeeded() {
         let dir = tempfile::tempdir().unwrap();
-        let marker = dir.path().join(PLAIN_HTTP_TOKEN_MOVED);
+        let path = dir.path().join("settings.json");
         let runs = Cell::new(0);
-        once(&marker, || runs.set(runs.get() + 1));
-        once(&marker, || runs.set(runs.get() + 1));
-        assert_eq!(runs.get(), 1);
-        assert!(marker.exists());
-        // Opening a core leaves the marker next to its settings: a later
-        // switch from https to http is never "moved" to plain http.
-        let other = tempfile::tempdir().unwrap();
-        Core::open(
-            &other.path().join("argus.db"),
-            &other.path().join("settings.json"),
-        )
-        .unwrap();
-        assert!(other.path().join(PLAIN_HTTP_TOKEN_MOVED).exists());
+        // A failure (a denied keychain prompt) is not recorded: retried.
+        let fail = || {
+            runs.set(runs.get() + 1);
+            Err(CoreError::Provider("could not read the keychain".into()))
+        };
+        run_once(&path, settings::GITLAB_HTTP_TOKEN, fail);
+        run_once(&path, settings::GITLAB_HTTP_TOKEN, fail);
+        assert_eq!(runs.get(), 2);
+        assert!(!settings::migration_done(
+            &path,
+            settings::GITLAB_HTTP_TOKEN
+        ));
+        // A success is, in settings.json, and never runs again.
+        let ok = || {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        run_once(&path, settings::GITLAB_HTTP_TOKEN, ok);
+        run_once(&path, settings::GITLAB_HTTP_TOKEN, ok);
+        assert_eq!(runs.get(), 3);
+        assert!(settings::migration_done(&path, settings::GITLAB_HTTP_TOKEN));
+    }
+
+    #[test]
+    fn opening_a_core_records_the_move_and_drops_the_old_marker_file() {
+        // An earlier build wrote its marker even after a failed move: it
+        // proves nothing, so the move is checked again and the file goes.
+        let dir = tempfile::tempdir().unwrap();
+        let settings_path = dir.path().join("settings.json");
+        let marker = dir.path().join(LEGACY_TOKEN_MOVED_MARKER);
+        std::fs::write(&marker, "done\n").unwrap();
+        // No GitLab URL: nothing to move (the keychain is not touched), and
+        // a later switch from https to http is never "moved" to plain http.
+        Core::open(&dir.path().join("argus.db"), &settings_path).unwrap();
+        assert!(settings::migration_done(
+            &settings_path,
+            settings::GITLAB_HTTP_TOKEN
+        ));
+        assert!(!marker.exists());
     }
 }

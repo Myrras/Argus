@@ -39,7 +39,10 @@ sweep:
 dev-signed: _signed-conf
     #!/usr/bin/env bash
     set -euo pipefail
-    export CARGO_TARGET_DIR="$(just _target-dir)"
+    # Assigned apart from the export, so a failed lookup stops the recipe
+    # (`export X="$(…)"` takes export's status and hides it from set -e).
+    target_dir="$(just _target-dir)"
+    export CARGO_TARGET_DIR="$target_dir"
     pnpm tauri build --debug --bundles app --config src-tauri/tauri.dev-signed.conf.json
     just sweep
     open "$CARGO_TARGET_DIR/debug/bundle/macos/Argus.app"
@@ -81,7 +84,10 @@ install-signed: _build-signed
 _build-signed: _signed-conf
     #!/usr/bin/env bash
     set -euo pipefail
-    export CARGO_TARGET_DIR="$(just _target-dir)"
+    # Assigned apart from the export, so a failed lookup stops the recipe
+    # (`export X="$(…)"` takes export's status and hides it from set -e).
+    target_dir="$(just _target-dir)"
+    export CARGO_TARGET_DIR="$target_dir"
     pnpm install
     pnpm tauri build --bundles app --config src-tauri/tauri.dev-signed.conf.json
     just sweep

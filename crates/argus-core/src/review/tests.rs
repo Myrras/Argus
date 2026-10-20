@@ -13,6 +13,17 @@ fn step(
     advance(prev, d, threads, ME, true, now)
 }
 
+/// Fetch → record, from `prev` stored with `stored` threads.
+fn step_over(
+    prev: &ReviewRecord,
+    stored: &[Thread],
+    d: &ReviewDetail,
+    threads: &[Thread],
+    now: DateTime<Utc>,
+) -> ReviewRecord {
+    advance_with(Some((prev, stored)), d, threads, ME, true, now, None)
+}
+
 /// A review the user marked reviewed at head `h1` on day 10, 12:00.
 fn reviewed() -> (ReviewRecord, ReviewDetail) {
     let d = detail("h1");
@@ -542,21 +553,96 @@ fn a_reply_found_unanswered_stays_so_until_the_user_acts() {
     flagged.status = ReviewStatus::NeedsReReview;
     flagged.round_reasons = vec![RoundReason::AuthorReplied];
     flagged.round = 2;
+    flagged.untouched_threads = 0;
     // Later fetches would take the 11:08 note as the answer: nothing the
     // user did since says so.
-    let later = step(Some(&flagged), &d, &threads, at(11, 12));
+    let later = step_over(&flagged, &threads, &d, &threads, at(11, 12));
     assert_eq!(later.status, ReviewStatus::NeedsReReview);
     assert_eq!(later.round_reasons, [RoundReason::AuthorReplied]);
     assert_eq!(later.round, 2);
+    // And the thread with the reply is not "untouched" either.
+    assert_eq!(later.untouched_threads, 0);
     // A new note of the user's does.
     let mut answered = threads.clone();
     answered[0].notes.push(note("4", ME, at(11, 13)));
-    let after = step(Some(&later), &d, &answered, at(11, 15));
+    let after = step_over(&later, &threads, &d, &answered, at(11, 15));
     assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(after.untouched_threads, 1);
     // And so does marking it reviewed.
     let done = mark_reviewed(&later, &threads, at(11, 14));
     assert_eq!(
-        step(Some(&done), &d, &threads, at(11, 15)).status,
+        step_over(&done, &threads, &d, &threads, at(11, 15)).status,
         ReviewStatus::WaitingOnAuthor
+    );
+}
+
+#[test]
+fn what_the_user_wrote_since_is_told_by_note_ids_not_clocks() {
+    let (r, d) = reviewed();
+    // The platform's clock runs ahead of this machine's: the user's note
+    // stored by the 11:09 fetch carries 11:10.
+    let threads = vec![thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(10, 11)),
+            note("2", AUTHOR, at(11, 7)),
+            note("3", ME, at(11, 10)),
+        ],
+    )];
+    let mut flagged = step(Some(&r), &d, &threads, at(11, 9));
+    flagged.status = ReviewStatus::NeedsReReview;
+    flagged.round_reasons = vec![RoundReason::AuthorReplied];
+    let later = step_over(&flagged, &threads, &d, &threads, at(11, 12));
+    assert_eq!(later.round_reasons, [RoundReason::AuthorReplied]);
+    // A note the stored threads lack is new, whatever its time (a clock
+    // behind, or a note the last fetch did not bring).
+    let mut answered = threads.clone();
+    answered[0].notes.push(note("4", ME, at(11, 5)));
+    let after = step_over(&later, &threads, &d, &answered, at(11, 15));
+    assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn the_untouched_count_agrees_with_a_reply_kept_unanswered() {
+    let threads = [thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(10, 11)),
+            note("2", AUTHOR, at(11, 7)),
+            note("3", ME, at(11, 8)),
+        ],
+    )];
+    let input = RoundInput {
+        state: ReviewState::Open,
+        head_sha: "h1",
+        last_reviewed_sha: Some("h1"),
+        last_reviewed_at: Some(at(11, 0)),
+        approved_at: None,
+        rerequested_at: None,
+        threads: &threads,
+        me: ME,
+        seen_at: None,
+    };
+    // Read as the notes say, the 11:08 note answered the reply.
+    assert_eq!(untouched_agreeing(&input, &[], None), 1);
+    // Kept unanswered: written over the view at the watermark.
+    assert_eq!(
+        untouched_agreeing(&input, &[RoundReason::AuthorReplied], None),
+        0
+    );
+    // A reply the notes show unanswered needs no second reading.
+    let mut open = threads.clone();
+    open[0].notes.pop();
+    let input = RoundInput {
+        threads: &open,
+        ..input
+    };
+    assert_eq!(
+        untouched_agreeing(&input, &[RoundReason::AuthorReplied], None),
+        0
     );
 }

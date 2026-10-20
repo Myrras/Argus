@@ -340,11 +340,19 @@ pub(crate) fn persist(
             return Ok(false);
         }
         let prev = store::read_review(conn, id)?;
+        // What the user wrote since is told against the stored threads.
+        let stored: Vec<Thread> = match &prev {
+            Some(_) => store::read_threads(conn, id)?
+                .into_iter()
+                .map(|t| t.thread)
+                .collect(),
+            None => Vec::new(),
+        };
         // The cached line walks at this head sharpen the untouched count;
         // none (or a failed read) falls back to the approximation.
         let touches = read_line_touches(conn, id, &detail.head_sha).ok();
         let mut next = advance_with(
-            prev.as_ref(),
+            prev.as_ref().map(|p| (p, stored.as_slice())),
             detail,
             threads,
             me,

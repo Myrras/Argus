@@ -86,10 +86,12 @@ sibling app Iris (`../Iris`).
     and non-empty submitted review bodies are anchor-less threads
     (`issuecomment-<id>`, `pullrequestreview-<id>`); threading by Argus's
     hidden marker (`<!-- argus:reply-to <thread> -->`, last line, honoured
-    only for an earlier entry of the same PR), by quote (`>` block of whole
-    lines of an earlier entry; one line needs >= 12 chars; alerts and
-    indented `>` are not quotes) or the PR author's first real answer after
-    the user (not `/commands`, not remarks to someone else); replies post an
+    only on the user's own entries and for an earlier entry of the same
+    PR), by quote (`>` block of lines of an earlier entry: whole, or >= 24
+    chars of one from a word on; bullets ignored; one line needs >= 12
+    chars; alerts and indented `>` are not quotes) or the PR author's very
+    next real answer after the user, wherever filed (not `/commands`, not
+    remarks to someone else; code is skipped); replies post an
     issue comment quoting the thread's root (`@` defused, HTML skipped) plus
     the marker.
 - ✅ **Milestone 4 — Posting.** Core `post/`: `post_comments` (one by one,

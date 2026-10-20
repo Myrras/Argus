@@ -6,6 +6,8 @@
 //! Argus join in M4) — a review submitted on the platform itself does not
 //! move it.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -175,14 +177,7 @@ pub fn classify_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> R
     if input.head_sha != sha {
         reasons.push(RoundReason::NewCommits);
     }
-    // Someone else's note in one of the user's threads (started or replied
-    // in) after the watermark and after the user's own last note there.
-    let replied = input
-        .threads
-        .iter()
-        .filter(|t| t.is_mine(input.me))
-        .any(|t| replied_since(t, input.me, new_since(t, input.me, Some(at), input.seen_at)));
-    if replied {
+    if author_replied(input) {
         reasons.push(RoundReason::AuthorReplied);
     }
     if input.rerequested_at.is_some_and(|r| r > at) {
@@ -193,6 +188,44 @@ pub fn classify_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> R
     } else {
         round(ReviewStatus::NeedsReReview, reasons)
     }
+}
+
+/// Someone else's note in one of the user's threads (started or replied
+/// in) after the watermark and after the user's own last note there.
+/// `false` before any watermark.
+fn author_replied(input: &RoundInput<'_>) -> bool {
+    let Some(at) = input.last_reviewed_at else {
+        return false;
+    };
+    input
+        .threads
+        .iter()
+        .filter(|t| t.is_mine(input.me))
+        .any(|t| replied_since(t, input.me, new_since(t, input.me, Some(at), input.seen_at)))
+}
+
+/// [`untouched_with`] as it agrees with the stored `reasons`. A
+/// [`RoundReason::AuthorReplied`] that the notes alone (`seen_at` unknown)
+/// no longer show was kept by [`keep_unanswered`]: the user's later notes
+/// were written over the view at the watermark (a post sets the watermark
+/// to that view), so they are read that way here too, and the thread with
+/// the reply is not counted untouched.
+pub(crate) fn untouched_agreeing(
+    input: &RoundInput<'_>,
+    reasons: &[RoundReason],
+    touches: Option<&LineTouches>,
+) -> u32 {
+    if input.seen_at.is_none()
+        && reasons.contains(&RoundReason::AuthorReplied)
+        && !author_replied(input)
+    {
+        let as_seen = RoundInput {
+            seen_at: input.last_reviewed_at,
+            ..*input
+        };
+        return untouched_with(&as_seen, touches);
+    }
+    untouched_with(input, touches)
 }
 
 /// The user's unresolved threads that look untouched, without line walks:
@@ -254,6 +287,9 @@ pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> 
 ///   not on the platform) is not one.
 /// - `round` starts at 1 and goes up each time the review enters
 ///   [`ReviewStatus::NeedsReReview`].
+///
+/// `prev`'s stored threads are taken as none: every note of the user's is
+/// new to it (see [`advance_with`]).
 pub fn advance(
     prev: Option<&ReviewRecord>,
     detail: &ReviewDetail,
@@ -262,13 +298,22 @@ pub fn advance(
     listed: bool,
     now: DateTime<Utc>,
 ) -> ReviewRecord {
-    advance_with(prev, detail, threads, me, listed, now, None)
+    advance_with(
+        prev.map(|p| (p, &[][..])),
+        detail,
+        threads,
+        me,
+        listed,
+        now,
+        None,
+    )
 }
 
-/// [`advance`] with the cached line walks at the fetched head (see
-/// [`untouched_with`]).
+/// [`advance`] from the stored record with the threads stored with it
+/// (what tells a note of the user's as new, see [`keep_unanswered`]), and
+/// the cached line walks at the fetched head (see [`untouched_with`]).
 pub fn advance_with(
-    prev: Option<&ReviewRecord>,
+    prev: Option<(&ReviewRecord, &[Thread])>,
     detail: &ReviewDetail,
     threads: &[Thread],
     me: &str,
@@ -276,6 +321,8 @@ pub fn advance_with(
     now: DateTime<Utc>,
     touches: Option<&LineTouches>,
 ) -> ReviewRecord {
+    let stored = prev.map_or(&[][..], |(_, t)| t);
+    let prev = prev.map(|(p, _)| p);
     // `now` is when the fetch started: an approval stored after that (from
     // Argus, while this fetch was on its way) is newer than what the fetch
     // saw, so it stands until a fetch that started later disagrees.
@@ -291,21 +338,19 @@ pub fn advance_with(
     };
     let last_reviewed_sha = prev.and_then(|p| p.last_reviewed_sha.clone());
     let last_reviewed_at = prev.and_then(|p| p.last_reviewed_at);
-    let round = classify_with(
-        &RoundInput {
-            state: detail.state,
-            head_sha: &detail.head_sha,
-            last_reviewed_sha: last_reviewed_sha.as_deref(),
-            last_reviewed_at,
-            approved_at,
-            rerequested_at,
-            threads,
-            me,
-            seen_at: None,
-        },
-        touches,
-    );
-    let round = keep_unanswered(prev, round, threads, me);
+    let input = RoundInput {
+        state: detail.state,
+        head_sha: &detail.head_sha,
+        last_reviewed_sha: last_reviewed_sha.as_deref(),
+        last_reviewed_at,
+        approved_at,
+        rerequested_at,
+        threads,
+        me,
+        seen_at: None,
+    };
+    let round = classify_with(&input, touches);
+    let round = keep_unanswered(prev, stored, round, &input, touches);
     let prev_round = prev.map_or(1, |p| p.round);
     let entered = round.status == ReviewStatus::NeedsReReview
         && prev.is_none_or(|p| p.status != ReviewStatus::NeedsReReview);
@@ -375,13 +420,17 @@ pub fn mark_reviewed(
 /// only what the user saw when a note was posted right after the post
 /// ([`RoundInput::seen_at`]); the fetches after it would take the user's
 /// note as the answer. So [`RoundReason::AuthorReplied`] stands while the
-/// watermark is where it was and the user wrote nothing since the last
-/// fetch (a new note of theirs is classified afresh).
+/// watermark is where it was and the user wrote nothing the stored threads
+/// lack (a new note of theirs is classified afresh). New is by note id, not
+/// time: the platform's clock and this machine's need not agree. The
+/// untouched count is then read as the kept reason says
+/// ([`untouched_agreeing`]).
 fn keep_unanswered(
     prev: Option<&ReviewRecord>,
+    stored: &[Thread],
     mut round: Round,
-    threads: &[Thread],
-    me: &str,
+    input: &RoundInput<'_>,
+    touches: Option<&LineTouches>,
 ) -> Round {
     let Some(p) = prev else {
         return round;
@@ -390,10 +439,16 @@ fn keep_unanswered(
         round.status,
         ReviewStatus::NeedsReReview | ReviewStatus::WaitingOnAuthor
     );
-    let wrote_since = threads
+    let known: HashSet<&str> = stored
         .iter()
         .flat_map(|t| &t.notes)
-        .any(|n| !n.system && same_user(&n.author, me) && n.created_at > p.fetched_at);
+        .map(|n| n.id.as_str())
+        .collect();
+    let wrote_since = input
+        .threads
+        .iter()
+        .flat_map(|t| &t.notes)
+        .any(|n| !n.system && same_user(&n.author, input.me) && !known.contains(n.id.as_str()));
     if !reviewed
         || wrote_since
         || p.status != ReviewStatus::NeedsReReview
@@ -405,6 +460,7 @@ fn keep_unanswered(
     round.reasons.push(RoundReason::AuthorReplied);
     round.reasons.sort();
     round.status = ReviewStatus::NeedsReReview;
+    round.untouched_threads = untouched_agreeing(input, &round.reasons, touches);
     round
 }
 
