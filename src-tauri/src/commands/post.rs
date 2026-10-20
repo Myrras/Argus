@@ -9,6 +9,7 @@ use tauri::{AppHandle, State};
 
 use argus_core::{
     CommentableLines, NewComment, PostErrorKind, PostResult, PostedNote, ReviewId, ReviewRecord,
+    ReviewVerdict,
 };
 
 use super::{blocking, blocking_post, parse_review_id, parse_thread_id};
@@ -119,6 +120,34 @@ pub async fn commentable_lines(
 ) -> Result<CommentableLines, IpcError> {
     let id = parse_review_id(&review_id)?;
     blocking(state, move |core| core.commentable_lines(id, &path)).await
+}
+
+// --- Submit review ---------------------------------------------------------
+
+/// Submit the user's review: `verdict` (approve, request changes, or on
+/// GitHub a comment review) pinned to `head_sha` (the head shown in the
+/// dialog), with an optional markdown `summary`. One review-state write on
+/// the platform (plus the summary note on GitLab); `headMoved` when the
+/// review got new commits since, `unsupported` when the platform cannot.
+/// The pending comments are posted before it by `post_comments`.
+#[tauri::command]
+pub async fn submit_review(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    review_id: String,
+    head_sha: String,
+    verdict: ReviewVerdict,
+    summary: Option<String>,
+) -> Result<ReviewRecord, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    let record = blocking_post(state, move |core| {
+        core.submit_review(id, verdict, &head_sha, summary.as_deref())
+    })
+    .await;
+    emit_if_head_moved(&app, id, &record);
+    let record = record?;
+    events::emit_changed(&app, record.id);
+    Ok(record)
 }
 
 #[cfg(test)]

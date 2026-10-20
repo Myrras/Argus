@@ -28,6 +28,7 @@ import { useLayoutStore } from "../state/layoutStore";
 import { useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useHistoryStore } from "../state/historyStore";
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import {
@@ -127,6 +128,10 @@ function runFilesAction(
     case "toggleFindingSelected":
       if (!useAiStore.getState().runs[review]?.enabled) return false;
       return useAiStore.getState().toggleFocused(review);
+    case "submitReview":
+      // Opens the dialog only; its button submits.
+      useOverlayStore.getState().ask({ kind: "submit", reviewId: review });
+      return true;
     default:
       return runFlowAction(action, review, target, key) ?? false;
   }

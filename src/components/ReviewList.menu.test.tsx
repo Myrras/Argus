@@ -20,6 +20,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useToastStore } from "../state/toastStore";
 import { review } from "../test/fixtures";
@@ -53,11 +54,7 @@ describe("ReviewList context menu", () => {
     });
     mockInvoke.mockImplementation(((cmd: string) =>
       Promise.resolve(
-        cmd === "mark_reviewed"
-          ? { ...fresh, status: "waitingOnAuthor" }
-          : cmd === "list_reviews"
-            ? [fresh, waiting]
-            : null,
+        cmd === "list_reviews" ? [fresh, waiting] : null,
       )) as typeof invoke);
   });
 
@@ -104,31 +101,35 @@ describe("ReviewList context menu", () => {
     ).toBeInTheDocument();
   });
 
-  it("marks a round reviewed only while one is open", async () => {
+  it("opens Submit review for an open review, never posting by itself", async () => {
     render(<ReviewList now={NOW} />);
-    act(() => useReviewStore.getState().setTab("waitingOnAuthor"));
-    expect(
-      within(openMenu("Waiting")).getByRole("menuitem", {
-        name: "Mark round reviewed",
-      }),
-    ).toBeDisabled();
-    act(() => {
-      fireEvent.keyDown(window, { key: "Escape" });
-    });
-    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
-    act(() => useReviewStore.getState().setTab("needsReview"));
-
     fireEvent.click(
       within(openMenu("First look")).getByRole("menuitem", {
-        name: "Mark round reviewed",
+        name: "Submit review…",
       }),
     );
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith("mark_reviewed", {
-        reviewId: fresh.id,
-      }),
+    expect(useOverlayStore.getState().confirm).toEqual({
+      kind: "submit",
+      reviewId: fresh.id,
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "submit_review",
+      expect.anything(),
     );
-    await waitFor(() => expect(useReviewStore.getState().marking).toBeNull());
+    act(() => useOverlayStore.getState().closeConfirm());
+  });
+
+  it("shows a just-approved review as Approved ✓ in its tab", () => {
+    const approved = { ...fresh, status: "approved" as const };
+    useReviewStore.setState({
+      reviews: [approved, waiting],
+      justApproved: { [fresh.id]: "needsReview" },
+    });
+    render(<ReviewList now={NOW} />);
+    expect(screen.getByText("First look")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Approved ✓");
+    act(() => useReviewStore.setState({ justApproved: {} }));
+    expect(screen.queryByText("First look")).toBeNull();
   });
 
   it("closes on a click or right-click outside it", async () => {

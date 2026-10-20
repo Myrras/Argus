@@ -40,11 +40,12 @@ const other = review({ title: "Fixture docs tweak", status: "needsReReview" });
 const t = thread({ reviewId: r.id, author: "bob-fixture", anchor: null });
 const mockInvoke = vi.mocked(invoke);
 
-/** The four writes; the palette never runs one by itself. */
+/** The writes; the palette never runs one by itself. */
 const WRITES = [
   "post_comments",
   "reply_to_thread",
   "approve_review",
+  "submit_review",
   "post_findings",
 ];
 const noWrites = () => {
@@ -291,15 +292,18 @@ describe("CommandPalette", () => {
     expect(screen.queryByText("File")).toBeNull();
   });
 
-  it("Approve… opens the same confirmation as the button; nothing posts", () => {
+  it("Approve… opens Submit review with Approve chosen; nothing posts", () => {
     render(<Shell />);
     const field = openPalette();
     fireEvent.change(field, { target: { value: "approve" } });
     fireEvent.keyDown(field, { key: "Enter" });
     const dialog = screen.getByRole("dialog", {
-      name: `Approve acme-fixture/widgets#${r.number}`,
+      name: `Submit review — acme-fixture/widgets#${r.number}`,
     });
     expect(dialog).toBeVisible();
+    expect(
+      within(dialog).getByRole("radio", { name: /Approve/ }),
+    ).toBeChecked();
     noWrites();
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(useOverlayStore.getState().confirm).toBeNull();

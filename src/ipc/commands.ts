@@ -26,6 +26,7 @@ import type {
   ReviewFiles,
   ReviewId,
   ReviewRecord,
+  ReviewVerdict,
   Settings,
   StoredThread,
   ThreadHistory,
@@ -116,11 +117,6 @@ export function lastRefresh(): Promise<RefreshReport | null> {
   return invoke("last_refresh");
 }
 
-/** The user finished this round: the watermark moves to the current head. */
-export function markReviewed(reviewId: ReviewId): Promise<ReviewRecord> {
-  return invoke("mark_reviewed", { reviewId });
-}
-
 // --- Posting. The only writes to a platform: call these from a button or
 // shortcut handler only, never from an effect or a timer.
 
@@ -153,6 +149,21 @@ export function approveReview(
   headSha: string,
 ): Promise<ReviewRecord> {
   return invoke("approve_review", { reviewId, headSha });
+}
+
+/**
+ * Submit the user's review: `verdict` pinned to `headSha` (the head the
+ * dialog showed), with an optional markdown `summary`. Sets the review
+ * state on the platform; rejects with `headMoved` when it got new commits
+ * since, `unsupported` when the platform cannot. Never merges.
+ */
+export function submitReview(
+  reviewId: ReviewId,
+  headSha: string,
+  verdict: ReviewVerdict,
+  summary: string | null,
+): Promise<ReviewRecord> {
+  return invoke("submit_review", { reviewId, headSha, verdict, summary });
 }
 
 /** The lines of `path` a new comment can go on (read only). */

@@ -4,8 +4,8 @@
  * wrapper, then re-reads; the refresh events (`subscribeReviewEvents`) keep
  * it current between user actions.
  *
- * A failed call (loading the list, a refresh, marking a round) is an error
- * toast, the family's way. Refresh errors are not: they live in
+ * A failed call (loading the list, a refresh, submitting a review) is an
+ * error toast, the family's way. Refresh errors are not: they live in
  * `lastRefresh.errors`, per provider, show in the sidebar's Providers
  * section and never block the list.
  */
@@ -13,12 +13,11 @@
 import { create } from "zustand";
 
 import {
-  approveReview,
   getReview,
   lastRefresh,
   listReviews,
-  markReviewed,
   refreshReviews,
+  submitReview,
   toIpcError,
 } from "../ipc/commands";
 import { onReviewChanged, onReviewsRefreshed } from "../ipc/events";
@@ -27,9 +26,15 @@ import type {
   RefreshReport,
   ReviewId,
   ReviewRecord,
+  ReviewVerdict,
 } from "../ipc/types";
 import { latestOnly } from "../lib/latest";
-import { reviewRef, reviewsInTab, type ReviewTab } from "../lib/reviews";
+import {
+  VERDICT_DONE,
+  reviewRef,
+  reviewsInTab,
+  type ReviewTab,
+} from "../lib/reviews";
 import { toastError, toastSuccess } from "./toastStore";
 
 interface ReviewStoreState {
@@ -42,22 +47,33 @@ interface ReviewStoreState {
   cursorId: ReviewId | null;
   /** A manual refresh is running. */
   refreshing: boolean;
-  /** The review whose round is being marked reviewed. */
-  marking: ReviewId | null;
-  /** The review being approved. */
+  /** The review whose review is being submitted (approve included). */
   approving: ReviewId | null;
+  /**
+   * Reviews just approved from Argus, with the tab they were in: they stay
+   * there as "Approved ✓" for `APPROVED_LINGER_MS`, then leave (unless a
+   * refresh shows the approval gone, which brings them back as usual).
+   */
+  justApproved: Partial<Record<ReviewId, ReviewTab>>;
   lastRefresh: RefreshReport | null;
   /** Initial load: the list plus the last refresh the backend saw. */
   load: () => Promise<void>;
   reloadList: () => Promise<void>;
   /** Refresh every provider now (the button and `r`). */
   refresh: () => Promise<void>;
-  markReviewed: (id: ReviewId) => Promise<void>;
   /**
-   * Approve on the platform at `headSha` (the head the confirmation named);
-   * resolves to the error, or null once approved (the review then leaves
-   * the active lists). While another approval runs: a `busy` error.
+   * Submit the user's review on the platform: `verdict` at `headSha` (the
+   * head the dialog named), with an optional summary. Resolves to the
+   * error, or null once submitted. An approval leaves the active lists
+   * after `APPROVED_LINGER_MS`. While another submit runs: a `busy` error.
    */
+  submit: (
+    id: ReviewId,
+    headSha: string,
+    verdict: ReviewVerdict,
+    summary?: string | null,
+  ) => Promise<IpcError | null>;
+  /** `submit` with "approve" and no summary. */
   approve: (id: ReviewId, headSha: string) => Promise<IpcError | null>;
   setTab: (tab: ReviewTab) => void;
   /** Open a review in the detail pane (moves the cursor there too). */
@@ -96,6 +112,25 @@ function withNewer(
   return merged;
 }
 
+/**
+ * `listed` plus the reviews still lingering as approved (the list leaves
+ * approved ones out), each at the place it had in `current`.
+ */
+function withLingering(
+  listed: ReviewRecord[],
+  current: ReviewRecord[],
+  lingering: Partial<Record<ReviewId, ReviewTab>>,
+): ReviewRecord[] {
+  const out = [...listed];
+  const ids = new Set(listed.map((r) => r.id));
+  current.forEach((r, i) => {
+    if (lingering[r.id] && !ids.has(r.id)) {
+      out.splice(Math.min(i, out.length), 0, r);
+    }
+  });
+  return out;
+}
+
 export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   reviews: [],
   loaded: false,
@@ -103,8 +138,8 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   selectedId: null,
   cursorId: null,
   refreshing: false,
-  marking: null,
   approving: null,
+  justApproved: {},
   lastRefresh: null,
 
   load: async () => {
@@ -122,7 +157,11 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
         }));
         return;
       }
-      const merged = withNewer(reviews, get().reviews, moved);
+      const merged = withLingering(
+        withNewer(reviews, get().reviews, moved),
+        get().reviews,
+        get().justApproved,
+      );
       set((s) => ({
         reviews: merged,
         loaded: true,
@@ -142,7 +181,11 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
       const reviews = await listReviews();
       if (current()) {
         set({
-          reviews: withNewer(reviews, get().reviews, moved),
+          reviews: withLingering(
+            withNewer(reviews, get().reviews, moved),
+            get().reviews,
+            get().justApproved,
+          ),
           loaded: true,
         });
       }
@@ -165,32 +208,36 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
     }
   },
 
-  markReviewed: async (id) => {
-    set({ marking: id });
-    try {
-      const record = await markReviewed(id);
-      toastSuccess(`Marked ${reviewRef(record)} reviewed`);
-      await get().reloadList();
-    } catch (e) {
-      toastError("Could not mark the round reviewed", toIpcError(e).message);
-    } finally {
-      set({ marking: null });
-    }
-  },
-
-  approve: async (id, headSha) => {
+  submit: async (id, headSha, verdict, summary = null) => {
     if (get().approving) {
-      return { kind: "busy", message: "Another approval is still running." };
+      return {
+        kind: "busy",
+        message: "Another review is still being submitted.",
+      };
     }
+    const before = get().reviews.find((r) => r.id === id);
     set({ approving: id });
     try {
-      const record = await approveReview(id, headSha);
-      toastSuccess(`Approved ${reviewRef(record)} at ${headSha.slice(0, 7)}`);
+      const record = await submitReview(
+        id,
+        headSha,
+        verdict,
+        summary?.trim() ? summary : null,
+      );
+      toastSuccess(
+        `${VERDICT_DONE[verdict]} ${reviewRef(record)} at ${headSha.slice(0, 7)}`,
+      );
+      set((s) => ({
+        reviews: s.reviews.map((r) => (r.id === id ? record : r)),
+      }));
+      if (verdict === "approve" && before && before.status !== "approved") {
+        lingerApproved(id, before.status);
+      }
       await get().reloadList();
       return null;
     } catch (e) {
       const err = toIpcError(e);
-      toastError("Could not approve", err.message);
+      toastError("Could not submit the review", err.message);
       // A moved head: show what the backend has now.
       if (err.kind === "headMoved") await get().reloadList();
       return err;
@@ -199,12 +246,14 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
     }
   },
 
+  approve: (id, headSha) => get().submit(id, headSha, "approve"),
+
   setTab: (tab) => set({ tab, cursorId: null }),
   select: (id) => set({ selectedId: id, cursorId: id }),
 
   moveCursor: (delta) => {
-    const { reviews, tab, cursorId, selectedId } = get();
-    const visible = reviewsInTab(reviews, tab);
+    const { reviews, tab, cursorId, selectedId, justApproved } = get();
+    const visible = reviewsInTab(reviews, tab, justApproved);
     if (visible.length === 0) return;
     const at = visible.findIndex((r) => r.id === (cursorId ?? selectedId));
     const next =
@@ -240,6 +289,24 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
     await get().reloadList();
   },
 }));
+
+/** How long an approved review stays in its tab as "Approved ✓". */
+export const APPROVED_LINGER_MS = 3000;
+
+/** Keep `id` in `tab` as approved for a moment, then let it go. */
+function lingerApproved(id: ReviewId, tab: ReviewTab) {
+  useReviewStore.setState((s) => ({
+    justApproved: { ...s.justApproved, [id]: tab },
+  }));
+  setTimeout(() => {
+    useReviewStore.setState((s) => {
+      if (!(id in s.justApproved)) return {};
+      const next = { ...s.justApproved };
+      delete next[id];
+      return { justApproved: next };
+    });
+  }, APPROVED_LINGER_MS);
+}
 
 /**
  * The later of two reports by time. Compared as instants, not strings: the

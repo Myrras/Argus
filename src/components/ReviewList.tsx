@@ -3,7 +3,8 @@
  * and the reviews of the current tab. Keyboard handling (↑/↓, Enter, 1–4)
  * lives in `App`; this renders the store's cursor and selection. A row's
  * context menu (Iris's `ContextMenu`) opens it in the browser, copies its
- * link or marks its round reviewed.
+ * link or opens Submit review. A review just approved from Argus stays in
+ * its tab as "Approved ✓" for a moment, then leaves.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -21,6 +22,7 @@ import {
   untouchedLabel,
 } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { toastError, toastSuccess } from "../state/toastStore";
 import { AiRunIndicator } from "./AiStatus";
@@ -36,15 +38,16 @@ export function ReviewList({ now }: { now: number }) {
   const cursorId = useReviewStore((s) => s.cursorId);
   const setTab = useReviewStore((s) => s.setTab);
   const select = useReviewStore((s) => s.select);
-  const markReviewed = useReviewStore((s) => s.markReviewed);
+  const justApproved = useReviewStore((s) => s.justApproved);
+  const ask = useOverlayStore((s) => s.ask);
   const [menu, setMenu] = useState<{
     review: ReviewRecord;
     x: number;
     y: number;
   } | null>(null);
 
-  const counts = tabCounts(reviews);
-  const visible = reviewsInTab(reviews, tab);
+  const counts = tabCounts(reviews, justApproved);
+  const visible = reviewsInTab(reviews, tab, justApproved);
 
   return (
     <div className={styles.pane}>
@@ -99,7 +102,13 @@ export function ReviewList({ now }: { now: number }) {
         open={menu !== null}
         x={menu?.x ?? 0}
         y={menu?.y ?? 0}
-        items={menu ? menuItems(menu.review, markReviewed) : []}
+        items={
+          menu
+            ? menuItems(menu.review, () =>
+                ask({ kind: "submit", reviewId: menu.review.id }),
+              )
+            : []
+        }
         onClose={() => setMenu(null)}
       />
     </div>
@@ -108,7 +117,7 @@ export function ReviewList({ now }: { now: number }) {
 
 function menuItems(
   r: ReviewRecord,
-  markReviewed: (id: ReviewRecord["id"]) => Promise<void>,
+  submitReview: () => void,
 ): ContextMenuItem[] {
   return [
     {
@@ -124,9 +133,9 @@ function menuItems(
           .catch(() => toastError("Could not copy the link")),
     },
     {
-      label: "Mark round reviewed",
-      disabled: r.status !== "needsReview" && r.status !== "needsReReview",
-      onSelect: () => void markReviewed(r.id),
+      label: "Submit review…",
+      disabled: r.state !== "open" || r.status === "approved",
+      onSelect: submitReview,
     },
   ];
 }
@@ -186,6 +195,11 @@ function ReviewItem({
             <Badge tone={r.state === "merged" ? "accent" : "neutral"}>
               {r.state === "merged" ? "Merged" : "Closed"}
             </Badge>
+          )}
+          {r.status === "approved" && (
+            <span className={styles.approved} role="status">
+              Approved ✓
+            </span>
           )}
         </span>
         {showRound && (

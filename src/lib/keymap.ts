@@ -51,7 +51,8 @@ export type ActionId =
   | "editFinding"
   | "dismissFinding"
   | "openPalette"
-  | "showShortcuts";
+  | "showShortcuts"
+  | "submitReview";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
@@ -287,6 +288,15 @@ export const ACTIONS: ActionDef[] = [
     scope: "list",
     defaults: ["Shift+Slash"],
     note: "Lists the shortcuts that work where you are.",
+  },
+  // Submit review: opens the dialog; only its button writes.
+  {
+    id: "submitReview",
+    label: "Submit review…",
+    group: "Comments",
+    scope: "files",
+    defaults: ["Shift+KeyS"],
+    note: "Opens Submit review (Approve / Request changes). It writes only from the dialog's button.",
   },
 ];
 

@@ -4,9 +4,11 @@
  */
 
 import type {
+  MyReviewState,
   ProviderId,
   ReviewRecord,
   ReviewStatus,
+  ReviewVerdict,
   RoundReason,
   StoredThread,
 } from "../ipc/types";
@@ -29,15 +31,82 @@ export const EMPTY_TAB: Record<ReviewTab, string> = {
   closedWithoutApproval: "Nothing was merged or closed without your approval.",
 };
 
+/**
+ * The reviews of `tab`. `lingering` (review id → tab) keeps a review just
+ * approved from Argus in the tab it was in for a moment ("Approved ✓");
+ * one the platform no longer shows approved is in its own tab as usual.
+ */
 export function reviewsInTab(
   reviews: readonly ReviewRecord[],
   tab: ReviewTab,
+  lingering: Partial<Record<string, ReviewTab>> = {},
 ): ReviewRecord[] {
-  return reviews.filter((r) => r.status === tab);
+  return reviews.filter(
+    (r) =>
+      r.status === tab || (r.status === "approved" && lingering[r.id] === tab),
+  );
 }
+
+/** What a submitted verdict did, for the toast ("Approved owner/repo#12"). */
+export const VERDICT_DONE: Record<ReviewVerdict, string> = {
+  approve: "Approved",
+  requestChanges: "Requested changes on",
+  comment: "Reviewed",
+};
+
+/** The verdicts a platform's Submit review offers, in order. */
+export function verdictsFor(provider: ProviderId): ReviewVerdict[] {
+  return provider === "github"
+    ? ["approve", "requestChanges", "comment"]
+    : ["approve", "requestChanges"];
+}
+
+/** Whether `verdict` needs a summary on `r`'s platform (GitHub's API). */
+export function needsSummary(
+  r: Pick<ReviewRecord, "provider">,
+  verdict: ReviewVerdict | null,
+): boolean {
+  return (
+    r.provider === "github" &&
+    (verdict === "requestChanges" || verdict === "comment")
+  );
+}
+
+/** Each verdict's option label and its button. */
+export const VERDICT_LABEL: Record<
+  ReviewVerdict,
+  { option: string; button: string; hint: string }
+> = {
+  approve: {
+    option: "Approve",
+    button: "Approve",
+    hint: "Approve the changes. Leaves your lists once done.",
+  },
+  requestChanges: {
+    option: "Request changes",
+    button: "Request changes",
+    hint: "The author's move: back in your lists after new commits or a reply.",
+  },
+  comment: {
+    option: "Comment",
+    button: "Submit comment",
+    hint: "Feedback without a verdict (GitHub). A summary is required.",
+  },
+};
+
+/** The user's own review state on the platform, for the header. */
+export const MY_STATE_LABEL: Record<MyReviewState, string | null> = {
+  awaitingReview: "Awaiting your review",
+  reviewStarted: "Review started",
+  requestedChanges: "You requested changes",
+  commented: "You reviewed",
+  approved: "You approved",
+  notReviewer: null,
+};
 
 export function tabCounts(
   reviews: readonly ReviewRecord[],
+  lingering: Partial<Record<string, ReviewTab>> = {},
 ): Record<ReviewTab, number> {
   const counts: Record<ReviewTab, number> = {
     needsReview: 0,
@@ -47,6 +116,7 @@ export function tabCounts(
   };
   for (const r of reviews) {
     if (r.status !== "approved") counts[r.status] += 1;
+    else if (lingering[r.id]) counts[lingering[r.id]!] += 1;
   }
   return counts;
 }
@@ -117,8 +187,8 @@ export function splitThreads(threads: readonly StoredThread[]): {
 }
 
 /**
- * Whether "since my last review" applies: a round was marked reviewed and
- * the head moved on since.
+ * Whether "since my last review" applies: the user reviewed a head (Argus'
+ * watermark) and the head moved on since.
  */
 export function canDiffSinceLastReview(
   r: Pick<ReviewRecord, "lastReviewedSha" | "headSha">,

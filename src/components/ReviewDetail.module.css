@@ -76,6 +76,20 @@
   color: var(--warning);
 }
 
+/* The user's review state on the platform. */
+.myState {
+  color: var(--text-muted);
+}
+
+.myState[data-state="awaitingReview"],
+.myState[data-state="reviewStarted"] {
+  color: var(--accent);
+}
+
+.myState[data-state="approved"] {
+  color: var(--success);
+}
+
 .actions {
   display: flex;
   align-items: center;
@@ -99,33 +113,4 @@
 
 .failed {
   color: var(--warning);
-}
-
-.modalText {
-  margin: 0;
-  line-height: 1.55;
-}
-
-.modalText code {
-  padding: 0 2px;
-  background: var(--surface-2);
-  border-radius: var(--radius-sm);
-}
-
-.modalWarning {
-  margin: var(--sp-3) 0 0;
-  padding: var(--sp-2) var(--sp-3);
-  color: var(--warning);
-  background: var(--warning-bg);
-  border-radius: var(--radius-sm);
-}
-
-.modalError {
-  margin: var(--sp-3) 0 0;
-  padding: var(--sp-2) var(--sp-3);
-  color: var(--danger);
-  background: var(--danger-bg);
-  border-radius: var(--radius-sm);
-  -webkit-user-select: text;
-  user-select: text;
 }
