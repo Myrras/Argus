@@ -234,6 +234,34 @@ describe("CommandPalette", () => {
     );
   });
 
+  it("refreshes the open review alone from “Refresh this review”", () => {
+    render(<Shell />);
+    const field = openPalette();
+    fireEvent.change(field, { target: { value: "refresh this review" } });
+    const first = screen.getAllByRole("option")[0];
+    expect(first).toHaveTextContent("Refresh this review");
+    expect(within(first).getByText("Alt+R")).toBeInTheDocument();
+    fireEvent.keyDown(field, { key: "Enter" });
+    expect(mockInvoke).toHaveBeenCalledWith("refresh_review", {
+      reviewId: r.id,
+    });
+    expect(mockInvoke).not.toHaveBeenCalledWith("refresh_reviews");
+    noWrites();
+  });
+
+  it("offers “Refresh this review” only with a review open", () => {
+    useReviewStore.setState({ selectedId: null });
+    render(<Shell />);
+    fireEvent.change(openPalette(), {
+      target: { value: "refresh this review" },
+    });
+    expect(
+      screen
+        .queryAllByRole("option")
+        .some((o) => o.textContent?.includes("Refresh this review")),
+    ).toBe(false);
+  });
+
   it("shows a rebound shortcut", () => {
     useSettingsStore.getState().setShortcut("nextFile", ["Mod+KeyJ"]);
     render(<Shell />);

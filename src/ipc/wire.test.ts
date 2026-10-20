@@ -31,6 +31,7 @@ import type {
   ProviderId,
   ProviderStatus,
   RefreshReport,
+  ReviewRefresh,
   RepeatReason,
   ReviewFiles,
   ReviewRecord,
@@ -397,6 +398,8 @@ const findingFailed: FindingPostResult = {
   message: "GitHub: refused",
 };
 
+const reviewRefresh: ReviewRefresh = { review: record, changed: true };
+
 const localFile: LocalFile = {
   path: "src/cache.rs",
   absolutePath: "/Users/fixture/widgets/src/cache.rs",
@@ -415,6 +418,7 @@ const structs: Record<string, unknown> = {
   "PostResult:failed": failed,
   PostedNote: postedNote,
   RefreshReport: report,
+  ReviewRefresh: reviewRefresh,
   Settings: settings,
   ProviderStatus: status,
   ThreadHistory: history,

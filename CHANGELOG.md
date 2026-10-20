@@ -267,6 +267,10 @@ when it merges.
   words), the way GitLab collapses them: when a review opens and as soon
   as you resolve one; reopening a thread unfolds it again. Click it, reply
   or open its then/now history to read it in full.
+- Refresh a single merge request or pull request without refreshing them
+  all: the refresh button in its header, Refresh in its right-click menu,
+  "Refresh this review" in the command palette, or ⌥R (Alt+R). Its row
+  shows it refreshing; a rate limit says until when.
 
 ### Changed
 

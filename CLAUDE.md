@@ -288,8 +288,14 @@ sibling app Iris (`../Iris`).
     diff's `.cm-content` picks lines), `Enter`/`t`
     open or fold the thread, `r` reply, `s` resolve or reopen, `h`
     then/now, `c` comment, `v` viewed, `a` AI panel, `x` select, `e` edit,
-    `d` dismiss finding; composer `Mod+Enter` submit, `Esc` (fixed)
-    cancel.
+    `d` dismiss finding, `Alt+R` refresh this review (`refreshReview`);
+    composer `Mod+Enter` submit, `Esc` (fixed) cancel.
+  - Refresh one review: `reviewStore.refreshOne` (busy per review in
+    `refreshingOne`, never blocks `refreshing`; applies the returned record,
+    re-reads the list when changed; failures toast, a rate limit with its
+    time) from the header's refresh `iconButton` beside the platform link,
+    the row menu's Refresh (the row shows a small turning glyph, `aria-busy`),
+    the palette's "Refresh this review" and `Alt+R`.
 
 - ✅ **Review state — the platform decides the tabs; Submit review.**
   Providers report the user's own reviewer state (`MyReviewState`:
@@ -389,6 +395,18 @@ After every refresh (poll or `refresh_reviews`) the shell emits
 `review:changed { reviewId }` per changed review, then one
 `reviews:refreshed` with the `RefreshReport` (time + per-provider errors).
 `last_refresh` returns the latest report for a webview that subscribed late.
+`refresh_review(reviewId)` (`Core::refresh_review`, `poll::refresh_review`)
+re-reads one review through `persist` (no list call, its `listed` kept):
+it takes the refresh lock like any refresh (waits for a poll under way; a
+poll waits for it), joins one that read the review after the ask
+(`Store::fetched_since`, ticket taken before the wait; then `changed:
+false`), and never calls a rate-limited provider (checked before and after
+the wait). Returns `ReviewRefresh { review, changed }`; the shell emits
+`review:changed` when changed, hands `report()` to `on_refresh_report`, and
+leaves `last_refresh` alone (the global report). A rate-limited
+`CoreError` maps to IpcError kind `rateLimited` with the bare "… rate
+limited until HH:MM" text. The post path's own refetch
+(`refetch_after_write`) takes no lock; tickets order it.
 After a successful post, reply, approval or resolve (or a posted AI finding) the
 shell emits `review:changed` for that review too, and after a history call
 that moved the review's untouched count.

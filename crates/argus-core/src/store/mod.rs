@@ -361,6 +361,13 @@ impl Store {
         true
     }
 
+    /// Whether a fetch of review `id` that started after ticket `seq` has
+    /// been stored (a one-review refresh joining a full one).
+    pub(crate) fn fetched_since(&self, id: ReviewId, seq: u64) -> bool {
+        let stored = self.stored_fetch.lock().expect("fetch order lock poisoned");
+        stored.get(&id).is_some_and(|newest| *newest > seq)
+    }
+
     pub(crate) fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("store lock poisoned")
     }

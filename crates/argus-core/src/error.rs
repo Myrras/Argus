@@ -52,6 +52,12 @@ impl CoreError {
             CoreError::GithubUnavailable | CoreError::GitlabNotConfigured | CoreError::GitlabAuth
         )
     }
+
+    /// Whether the platform rate-limited the provider: the message then says
+    /// until when ("GitHub is rate limited until 14:05").
+    pub fn is_rate_limited(&self) -> bool {
+        crate::provider::is_rate_limited(self)
+    }
 }
 
 impl From<rusqlite::Error> for CoreError {

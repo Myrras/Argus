@@ -140,6 +140,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Refreshing on its own: a small turning glyph right before the age, in
+   the age's faint tone, so the row reads unchanged at a glance. */
+.refreshing {
+  display: inline-flex;
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.refreshing svg {
+  animation: spin var(--dur-spin) linear infinite;
+}
+
+.refreshing + .age {
+  margin-left: 0;
+}
+
 .title {
   color: var(--text);
   font-weight: 500;

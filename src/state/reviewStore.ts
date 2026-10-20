@@ -16,6 +16,7 @@ import {
   getReview,
   lastRefresh,
   listReviews,
+  refreshReview,
   refreshReviews,
   submitReview,
   toIpcError,
@@ -47,6 +48,12 @@ interface ReviewStoreState {
   cursorId: ReviewId | null;
   /** A manual refresh is running. */
   refreshing: boolean;
+  /**
+   * Reviews being refreshed on their own (header button, row menu, key,
+   * palette). Separate from `refreshing`: one review never blocks the full
+   * refresh, nor the other way round (the backend runs them in turn).
+   */
+  refreshingOne: Partial<Record<ReviewId, true>>;
   /** The review whose review is being submitted (approve included). */
   approving: ReviewId | null;
   /**
@@ -61,6 +68,13 @@ interface ReviewStoreState {
   reloadList: () => Promise<void>;
   /** Refresh every provider now (the button and `r`). */
   refresh: () => Promise<void>;
+  /**
+   * Refresh one review now. Applies the record the backend stored and,
+   * when it changed, re-reads the list (the other stores follow the
+   * `review:changed` it emits). A failure is a toast; a rate limit says
+   * until when. While that review refreshes, asking again does nothing.
+   */
+  refreshOne: (id: ReviewId) => Promise<void>;
   /**
    * Submit the user's review on the platform: `verdict` at `headSha` (the
    * head the dialog named), with an optional summary. Resolves to the
@@ -138,6 +152,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   selectedId: null,
   cursorId: null,
   refreshing: false,
+  refreshingOne: {},
   approving: null,
   justApproved: {},
   lastRefresh: null,
@@ -205,6 +220,34 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
       toastError("Could not refresh", toIpcError(e).message);
     } finally {
       set({ refreshing: false });
+    }
+  },
+
+  refreshOne: async (id) => {
+    if (get().refreshingOne[id]) return;
+    const before = get().reviews.find((r) => r.id === id);
+    set((s) => ({ refreshingOne: { ...s.refreshingOne, [id]: true } }));
+    const current = reads.begin(id);
+    try {
+      const { review, changed } = await refreshReview(id);
+      if (current()) {
+        set((s) => ({
+          reviews: s.reviews.map((r) => (r.id === id ? review : r)),
+        }));
+      }
+      if (changed) await get().reloadList();
+    } catch (e) {
+      const err = toIpcError(e);
+      toastError(
+        before ? `Could not refresh ${reviewRef(before)}` : "Could not refresh",
+        err.message,
+      );
+    } finally {
+      set((s) => {
+        const next = { ...s.refreshingOne };
+        delete next[id];
+        return { refreshingOne: next };
+      });
     }
   },
 

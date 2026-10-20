@@ -595,3 +595,97 @@ fn refresh_reports_never_carry_the_token() {
         assert_clean(GL_TOKEN, status, &json);
     }
 }
+
+/// `r` as stored after an earlier refresh: what a one-review refresh reads.
+fn stored(r: ReviewRef) -> argus_core::ReviewRecord {
+    argus_core::ReviewRecord {
+        id: r.id(),
+        review: r,
+        state: argus_core::provider::ReviewState::Open,
+        draft: false,
+        head_sha: HEAD.into(),
+        base_sha: BASE.into(),
+        last_reviewed_sha: None,
+        last_reviewed_at: None,
+        approved_at: None,
+        round: 1,
+        round_reasons: Vec::new(),
+        status: argus_core::ReviewStatus::NeedsReview,
+        untouched_threads: 0,
+        requested: true,
+        rerequested_at: None,
+        my_review_state: argus_core::MyReviewState::AwaitingReview,
+        my_reviewed_at: None,
+        my_reviewed_sha: None,
+        listed: true,
+        viewer: "rev-fixture".into(),
+        fingerprint: String::new(),
+        fetched_at: chrono::Utc::now(),
+    }
+}
+
+/// A core holding `r`, over `provider`.
+fn core_holding(r: ReviewRef, provider: Arc<dyn ReviewProvider>) -> Core {
+    let store = Store::in_memory().unwrap();
+    store.upsert_review(&stored(r)).unwrap();
+    Core::with_providers(store, vec![provider])
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn refreshing_one_github_review_never_carries_the_token() {
+    for status in [
+        "401 Unauthorized",
+        "404 Not Found",
+        "500 Internal Server Error",
+    ] {
+        let (dir, gh) = fake_gh(Some("work"));
+        std::fs::write(dir.path().join("status"), status).unwrap();
+        let core = core_holding(github_pr(), Arc::new(gh));
+        let id = github_pr().id();
+        for body in bodies() {
+            std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
+            std::fs::write(
+                dir.path().join("stderr"),
+                format!("gh: {} {GH_TOKEN}", status),
+            )
+            .unwrap();
+            let e = core.refresh_review(id).unwrap_err();
+            assert_clean(GH_TOKEN, status, &format!("{e} / {e:?}"));
+        }
+    }
+}
+
+#[test]
+fn refreshing_one_gitlab_review_never_carries_the_token() {
+    let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
+    let base = serve(route.clone());
+    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let core = core_holding(gitlab_mr(&base), Arc::new(gl));
+    let id = gitlab_mr(&base).id();
+    let mut checked = 0;
+    for body in bodies() {
+        // No 429: its pause would stop every call after it.
+        for status in [
+            "400 Bad Request",
+            "401 Unauthorized",
+            "403 Forbidden",
+            "404 Not Found",
+            "500 Internal Server Error",
+        ] {
+            *route.lock().unwrap() = (status.to_string(), body.replace("{T}", GL_TOKEN));
+            let e = core.refresh_review(id).unwrap_err();
+            assert_clean(GL_TOKEN, status, &format!("{e} / {e:?}"));
+            checked += 1;
+        }
+    }
+    // A rate limit's message is clean too.
+    *route.lock().unwrap() = (
+        "429 Too Many Requests".into(),
+        format!(r#"{{"message":"slow down {GL_TOKEN}"}}"#),
+    );
+    let e = core.refresh_review(id).unwrap_err();
+    assert!(e.is_rate_limited(), "{e}");
+    assert_clean(GL_TOKEN, "429", &format!("{e} / {e:?}"));
+    assert!(checked > 50);
+}

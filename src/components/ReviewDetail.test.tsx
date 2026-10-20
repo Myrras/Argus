@@ -32,6 +32,7 @@ import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { ReviewDetail } from "./ReviewDetail";
 import { ReviewDialogs } from "./ReviewDialogs";
+import { Toasts } from "./Toasts";
 
 const mockInvoke = vi.mocked(invoke);
 const initialReviews = useReviewStore.getState();
@@ -253,6 +254,73 @@ describe("ReviewDetail", () => {
     fireEvent.click(screen.getByRole("button", { name: /Open in GitHub/ }));
     expect(openUrl).toHaveBeenCalledWith(r.url);
     await screen.findAllByRole("article");
+  });
+
+  it("refreshes this review from its header: a spinner while busy, nothing written", async () => {
+    let answer!: (v: unknown) => void;
+    backend({
+      refresh_review: () => new Promise((resolve) => (answer = resolve)),
+    });
+    render(<ReviewDetail now={NOW} />);
+    const button = screen.getByRole("button", { name: "Refresh this review" });
+    expect(button).toHaveAttribute("title", "Refresh this review (Alt+R)");
+    expect(button).not.toHaveAttribute("aria-busy", "true");
+    fireEvent.click(button);
+    expect(mockInvoke).toHaveBeenCalledWith("refresh_review", {
+      reviewId: r.id,
+    });
+    expect(button).toHaveAttribute("aria-busy", "true");
+    expect(button).toHaveAttribute("data-spinning", "true");
+    expect(button).toBeDisabled();
+    // The full refresh is a separate flag: untouched.
+    expect(useReviewStore.getState().refreshing).toBe(false);
+    answer({ review: r, changed: false });
+    await waitFor(() => expect(button).not.toHaveAttribute("aria-busy"));
+    expect(button).toBeEnabled();
+    expect(writes()).toEqual([]);
+    await screen.findAllByRole("article");
+  });
+
+  it("is busy only for its own review", async () => {
+    const other = review({ title: "Another one" });
+    useReviewStore.setState({
+      reviews: [r, other],
+      refreshingOne: { [other.id]: true },
+    });
+    render(<ReviewDetail now={NOW} />);
+    const button = screen.getByRole("button", { name: "Refresh this review" });
+    expect(button).toBeEnabled();
+    expect(button).not.toHaveAttribute("aria-busy");
+    await screen.findAllByRole("article");
+  });
+
+  it("toasts a rate-limited refresh with the time it lifts", async () => {
+    backend({
+      refresh_review: () => {
+        throw {
+          kind: "rateLimited",
+          message: "GitHub is rate limited until 14:05; Argus tries again then",
+        };
+      },
+    });
+    render(
+      <>
+        <ReviewDetail now={NOW} />
+        <Toasts />
+      </>,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh this review" }),
+    );
+    expect(
+      await screen.findByText(/rate limited until 14:05/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Could not refresh/)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh this review" }),
+      ).toBeEnabled(),
+    );
   });
 
   it("offers Submit review only on an open review", async () => {

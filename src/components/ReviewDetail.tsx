@@ -10,7 +10,9 @@
  * status with the round, the user's review state on the platform, the
  * reasons, GitLab's "N unresolved threads" (every thread of the review)
  * and what is untouched. Under a narrow island the actions move
- * below (container query).
+ * below (container query). Beside the ref: open it on the platform, and
+ * refresh this review alone (spinning while it runs; the full refresh in
+ * the title bar stays free).
  *
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
  * its own explicit action in `SubmitReviewModal`: it names the head being
@@ -46,6 +48,7 @@ import {
   NextThreadIcon,
   OpenThreadIcon,
   PrevThreadIcon,
+  RefreshIcon,
   ResolvedIcon,
 } from "./icons";
 import { ReviewView } from "./ReviewView";
@@ -99,6 +102,9 @@ function ReviewHeader({
   const postAll = useCommentStore((s) => s.postAll);
   const ask = useOverlayStore((s) => s.ask);
   const canSubmit = r.state === "open";
+  const refreshingThis = useReviewStore((s) => !!s.refreshingOne[r.id]);
+  const refreshOne = useReviewStore((s) => s.refreshOne);
+  const keymap = useKeymap();
   const myState = MY_STATE_LABEL[r.myReviewState];
 
   return (
@@ -155,6 +161,18 @@ function ReviewHeader({
               title={`Open in ${PROVIDER_LABEL[r.provider]}: ${r.url}`}
             >
               <ExternalLinkIcon />
+            </button>
+            <button
+              type="button"
+              className={`iconButton ${styles.open} ${styles.refresh}`}
+              onClick={() => void refreshOne(r.id)}
+              disabled={refreshingThis}
+              aria-busy={refreshingThis || undefined}
+              data-spinning={refreshingThis ? "true" : undefined}
+              aria-label="Refresh this review"
+              title={withHint("Refresh this review", keymap, "refreshReview")}
+            >
+              <RefreshIcon size={13} />
             </button>
           </span>
           {r.draft && <Badge>Draft</Badge>}

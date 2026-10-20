@@ -18,7 +18,8 @@
  * focus keys (`n`/`p`, `r`, `e`, `d`, M6; `s` resolves) are bare by default.
  * ↑/↓ are the list's only: on the review page they scroll natively
  * (`keyboardFlow.onReviewPage`); the unresolved-thread jumps have no
- * default key (the header's arrow buttons).
+ * default key (the header's arrow buttons). ⌥R (Alt+R) refreshes the open
+ * review alone; ⇧R / Mod+R refresh them all.
  * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
  * `files` actions likewise, and only while a review is open; `composer`
  * actions only inside a comment composer (`CommentComposer`).
@@ -33,6 +34,7 @@ export type ActionId =
   | "prevReview"
   | "openReview"
   | "refresh"
+  | "refreshReview"
   | "showNeedsReview"
   | "showNeedsReReview"
   | "showWaitingOnAuthor"
@@ -121,6 +123,16 @@ export const ACTIONS: ActionDef[] = [
     scope: "list",
     // Bare R replies to the focused thread (M6); refresh moved to ⇧R.
     defaults: ["Shift+KeyR", "Mod+KeyR"],
+  },
+  {
+    id: "refreshReview",
+    label: "Refresh this review",
+    group: "Navigate",
+    scope: "files",
+    // R replies, ⇧R and Mod+R refresh everything, Mod+Alt+R shows in
+    // Finder: Option/Alt+R is the free one next to them.
+    defaults: ["Alt+KeyR"],
+    note: "Reads the open review again from its platform, without waiting for the next poll.",
   },
   {
     id: "showNeedsReview",
