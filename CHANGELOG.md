@@ -271,6 +271,34 @@ when it merges.
   all: the refresh button in its header, Refresh in its right-click menu,
   "Refresh this review" in the command palette, or ⌥R (Alt+R). Its row
   shows it refreshing; a rate limit says until when.
+- With a local clone set, the AI pass reviews the merge request's own code:
+  it checks out the review's head in a temporary worktree under
+  `.argus/worktrees` in your clone, lets the agent read that, and removes it
+  when the run ends (also when it fails or you cancel it; leftovers of a
+  crash are cleaned up at the next start). When the clone lacks the head,
+  Argus fetches just that ref (`refs/pull/<n>/head` or
+  `refs/merge-requests/<iid>/head`) with your own git login; nothing else in
+  the clone changes, no branch is checked out and nothing is pushed, and
+  `.argus/` is added to the clone's `info/exclude` so `git status` stays
+  clean. If the fetch or checkout fails, the run reviews without it and
+  says why.
+- The AI pass follows the project's own review rules: `CLAUDE.md`,
+  `AGENTS.md`, `.github/copilot-instructions.md`, `.cursorrules`,
+  `.cursor/rules/*.mdc` and the `CLAUDE.md` nearest each changed file,
+  together up to 40,000 characters. With a code-review skill in the project
+  (`.claude/skills/…`, an exact `code-review` first), the agent applies its
+  checks too, without following its instructions to post, push or run
+  anything. Rules and skills are always read from the target branch, so a
+  merge request cannot rewrite them for its own review; when it changes
+  them, the AI is told to review that change instead. Claude never loads a
+  skill from the code under review.
+- Choose the review skill per repository in Settings → AI → Review skill:
+  Auto (the project's own, if it has one), None, or any installed skill with
+  "review" in its name, yours or a plugin's, in a list you can filter. If a
+  chosen skill is uninstalled later, runs fall back to Auto and say so.
+- The AI chip's tooltip shows which rules files and review skill the last
+  run used, whether it read a worktree, and anything that did not go as set
+  up.
 
 ### Changed
 
