@@ -21,6 +21,7 @@ import type { Placement } from "../lib/diffThreads";
 import { EditorView, type WidgetType } from "@codemirror/view";
 
 import { diffEditorFor, threadBlockKey } from "../lib/diffEditors";
+import { useLayoutStore } from "../state/layoutStore";
 import { thread } from "../test/fixtures";
 import { DiffEditor } from "./DiffEditor";
 
@@ -551,9 +552,70 @@ describe("DiffEditor: switching the layout", () => {
       container: column.appendChild(document.createElement("div")),
     });
     expect(scroll).not.toHaveBeenCalled();
+    // The setting changes first; the page re-renders the editors after.
+    act(() => useLayoutStore.getState().setDiffLayout("split"));
     rerender(<DiffEditor {...props} layout="split" />);
     // Line 3 of the head ("fn c() {}") starts at 21 in `modified`.
     expect(scroll).toHaveBeenCalledWith(21, { y: "start", yMargin: 140 });
     column.remove();
+    useLayoutStore.getState().setDiffLayout("unified");
+  });
+
+  it("takes the next line when the one at the edge starts above the column", async () => {
+    const column = document.createElement("div");
+    column.dataset.slot = "diff";
+    column.appendChild(document.createElement("div"));
+    document.body.appendChild(column);
+    column.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 800, height: 800 }) as DOMRect;
+    vi.spyOn(EditorView.prototype, "documentTop", "get").mockReturnValue(-60);
+    vi.spyOn(EditorView.prototype, "contentHeight", "get").mockReturnValue(
+      2000,
+    );
+    // Line 1 and a tall thread under it reach past the edge from above.
+    vi.spyOn(EditorView.prototype, "lineBlockAtHeight").mockImplementation(
+      function (this: EditorView) {
+        const l = this.state.doc.line(1);
+        return { from: l.from, to: l.to, top: 0 } as never;
+      },
+    );
+    vi.spyOn(EditorView.prototype, "lineBlockAt").mockImplementation(function (
+      this: EditorView,
+      pos: number,
+    ) {
+      const l = this.state.doc.lineAt(pos);
+      return { from: l.from, to: l.to, top: 150 } as never;
+    });
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    const props = {
+      path: "src/straddle.rs",
+      original,
+      modified,
+      placements: [],
+      renderThread: () => null,
+    };
+    useLayoutStore.getState().setDiffLayout("split");
+    const { rerender } = render(<DiffEditor {...props} layout="split" />, {
+      container: column.appendChild(document.createElement("div")),
+    });
+    act(() => useLayoutStore.getState().setDiffLayout("unified"));
+    rerender(<DiffEditor {...props} layout="unified" />);
+    // Line 2 ("fn b2() {}" starts at 10), 90px under the column's top.
+    expect(scroll).toHaveBeenCalledWith(10, { y: "start", yMargin: 90 });
+    column.remove();
+  });
+
+  it("leaves the page alone on a rebuild that is no layout switch", async () => {
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    const props = {
+      path: "src/rebuilt.rs",
+      original,
+      placements: [],
+      renderThread: () => null,
+      layout: "unified" as const,
+    };
+    const { rerender } = render(<DiffEditor {...props} modified={modified} />);
+    rerender(<DiffEditor {...props} modified={`${modified}fn d() {}\n`} />);
+    expect(scroll).not.toHaveBeenCalled();
   });
 });

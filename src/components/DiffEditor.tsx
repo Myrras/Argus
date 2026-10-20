@@ -68,8 +68,8 @@ import {
   rememberBlockHeight,
   threadBlockKey,
 } from "../lib/diffEditors";
-import { readingEdge } from "../lib/scrollAnchor";
-import type { DiffLayout } from "../state/layoutStore";
+import { pauseScrollAnchor, readingEdge } from "../lib/scrollAnchor";
+import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
 import { useThemeStore } from "../state/themeStore";
 
 const COLLAPSE = { margin: 3, minSize: 4 };
@@ -584,14 +584,58 @@ function readingLine(views: readonly EditorView[]): ReadingLine | null {
   const edge = readingEdge(column);
   const top = view.documentTop;
   if (edge < top || edge > top + view.contentHeight) return null;
-  const block = view.lineBlockAtHeight(edge - top);
+  const columnTop = column.getBoundingClientRect().top;
+  let block = view.lineBlockAtHeight(edge - top);
+  // A line whose blocks (a thread, a finding) straddle the edge starts
+  // above the column: take the next line, whose top is in view.
+  if (top + block.top < columnTop && block.to < view.state.doc.length) {
+    block = view.lineBlockAt(block.to + 1);
+  }
   return {
     line: view.state.doc.lineAt(block.from).number,
-    offset: Math.max(
-      0,
-      Math.round(top + block.top - column.getBoundingClientRect().top),
-    ),
+    offset: Math.max(0, Math.round(top + block.top - columnTop)),
   };
+}
+
+/** Frames to hold a restored line while the rebuilt page measures. */
+const HOLD_FRAMES = 30;
+
+/**
+ * Keep the line at `pos` `offset` px under the page column's top while
+ * the rebuilt editors measure their widgets (the heights above it change
+ * for a few frames after CodeMirror scrolled there). Stops once it held
+ * still for a few frames, after `HOLD_FRAMES`, or when the reader scrolls.
+ */
+function holdLine(view: EditorView, pos: number, offset: number) {
+  const column = view.dom.closest<HTMLElement>('[data-slot="diff"]');
+  if (!column || typeof requestAnimationFrame !== "function") return;
+  let frames = 0;
+  let still = 0;
+  const stop = () => {
+    column.removeEventListener("wheel", stop);
+    column.removeEventListener("keydown", stop);
+    frames = HOLD_FRAMES;
+  };
+  column.addEventListener("wheel", stop, { passive: true });
+  column.addEventListener("keydown", stop);
+  const tick = () => {
+    if (frames++ >= HOLD_FRAMES || !view.dom.isConnected) return stop();
+    pauseScrollAnchor(100);
+    // Where the line really is (drawn), else where the height map has it.
+    const drawn = view.coordsAtPos(pos, 1)?.top;
+    const top =
+      (drawn ?? view.documentTop + view.lineBlockAt(pos).top) -
+      column.getBoundingClientRect().top;
+    const delta = top - offset;
+    if (Math.abs(delta) >= 1) {
+      column.scrollTop += delta;
+      still = 0;
+    } else if (++still >= 3) {
+      return stop();
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 /** Each block key's editor index and line. */
@@ -662,9 +706,19 @@ export function DiffEditor({
   const views = useRef<EditorView[]>([]);
   // Where each block sits (editor index, line), for `reveal`.
   const where = useRef(new Map<string, { view: number; line: number }>());
-  // The line being read when the editor was last torn down (a layout
-  // switch): the rebuilt one puts it back at the same height.
+  // The line being read when the layout switched: the rebuilt editor puts
+  // it back at the same height. Noted as the setting changes, before any
+  // editor of the page is torn down (each one gone shifts the others).
   const reading = useRef<ReadingLine | null>(null);
+  useEffect(
+    () =>
+      useLayoutStore.subscribe((s, prev) => {
+        if (s.diffLayout !== prev.diffLayout) {
+          reading.current = readingLine(views.current);
+        }
+      }),
+    [],
+  );
   const theme = useRef(new Compartment());
   const language = useRef(new Compartment());
   // The latest props for the (re)build effect without rebuilding on each.
@@ -734,7 +788,6 @@ export function DiffEditor({
 
     return () => {
       cancelled = true;
-      reading.current = readingLine(views.current);
       for (const off of unlisten) off();
       merge?.destroy();
       unified?.destroy();
@@ -790,6 +843,7 @@ export function DiffEditor({
           yMargin: keep.offset,
         }),
       });
+      holdLine(head, at, keep.offset);
     }
   }, [placements, items, original, modified, layout]);
 
