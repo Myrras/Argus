@@ -24,6 +24,7 @@
 //! - [`ai`] — the AI pass: headless agent runs, findings, checklist, verdicts.
 //! - [`git`] — a configured local clone, read-only: history walks and file
 //!   contents without the API, which stays the fallback.
+//! - [`open`] — a review's file from the local clone in the user's editor.
 
 #![forbid(unsafe_code)]
 
@@ -33,6 +34,7 @@ pub mod files;
 pub mod git;
 pub mod history;
 pub mod ids;
+pub mod open;
 mod platform;
 pub mod poll;
 pub mod post;
@@ -60,6 +62,7 @@ pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};
 pub use history::{LineStatus, ThreadHistory};
 pub use ids::{ReviewId, ThreadId};
+pub use open::{LocalFile, Opener};
 pub use poll::{RefreshError, RefreshReport};
 pub use post::{
     CommentableLines, NewComment, PostError, PostErrorKind, PostResult, PostedComment, PostedNote,
@@ -157,6 +160,8 @@ pub struct Core {
     ai: ai::runtime::AiRuntime,
     /// Set by [`shutdown`](Self::shutdown): no poll loop starts afterwards.
     shut_down: AtomicBool,
+    /// Opens a clone's file in an editor ([`open`]); the shell sets it.
+    opener: Mutex<Arc<dyn open::Opener>>,
 }
 
 impl Default for Core {
@@ -225,6 +230,7 @@ impl Core {
             commentable: Mutex::new(None),
             ai,
             shut_down: AtomicBool::new(false),
+            opener: Mutex::new(Arc::new(open::NoOpener)),
         }
     }
 

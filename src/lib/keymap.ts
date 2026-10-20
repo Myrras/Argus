@@ -56,7 +56,10 @@ export type ActionId =
   | "nextOpenThread"
   | "prevOpenThread"
   | "openPalette"
-  | "showShortcuts";
+  | "showShortcuts"
+  // Open in editor
+  | "openInEditor"
+  | "showInFinder";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
@@ -318,6 +321,23 @@ export const ACTIONS: ActionDef[] = [
     scope: "list",
     defaults: ["Shift+Slash"],
     note: "Lists the shortcuts that work where you are.",
+  },
+  // -- Open in editor (Iris's keys: E there, O here, as E edits findings) --
+  {
+    id: "openInEditor",
+    label: "Open in editor",
+    group: "Files",
+    scope: "files",
+    defaults: ["KeyO"],
+    note: "Opens the focused file from your local clone (Settings → Editors).",
+  },
+  {
+    id: "showInFinder",
+    label: "Show in Finder / Explorer",
+    group: "Files",
+    scope: "files",
+    defaults: ["Mod+Alt+KeyR"],
+    note: "Shows the focused file of your local clone in the file manager.",
   },
 ];
 

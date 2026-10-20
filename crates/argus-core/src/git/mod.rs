@@ -9,7 +9,8 @@
 //! instead, per thread or per file. See [`file_or`] and the walk in
 //! [`history::api`](crate::history::api).
 //!
-//! Read-only by construction: only object reads run (`rev-parse --verify`,
+//! Read-only by construction: only object reads run (`rev-parse --verify`
+//! (also of `HEAD`, for opening a file in an editor),
 //! `merge-base` (`--is-ancestor` too), `rev-list`, `diff-tree`, `cat-file --batch`;
 //! no checkout, no fetch, no status), with `GIT_OPTIONAL_LOCKS=0` so no
 //! read takes the index lock, lazy fetches of a partial clone off, and no
@@ -430,6 +431,17 @@ impl LocalClone {
             .expect("commits lock")
             .insert(sha.to_string(), present);
         present
+    }
+
+    /// The commit the clone has checked out (`git rev-parse --verify HEAD`,
+    /// a ref read like the others); `None` on an unborn branch or when git
+    /// failed.
+    pub fn head(&self) -> Option<String> {
+        let out = self
+            .git_ok(&["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+            .ok()?;
+        let sha = String::from_utf8(out).ok()?.trim().to_string();
+        is_sha(&sha).then_some(sha)
     }
 
     /// The merge base of commits `a` and `b` (`git merge-base`, an object

@@ -456,3 +456,69 @@ describe("SettingsModal — AI tab", () => {
     );
   });
 });
+
+describe("SettingsModal — Editors tab", () => {
+  it("sets an editor per extension with the app picker, as in Iris", async () => {
+    await renderTab("Editors");
+    expect(screen.getByText("System default")).toBeInTheDocument();
+    expect(
+      screen.getByText("No editors per extension set."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add editor" }));
+    fireEvent.change(screen.getByLabelText("Extension"), {
+      target: { value: "tar.gz" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("single extension");
+    fireEvent.change(screen.getByLabelText("Extension"), {
+      target: { value: " .MD " },
+    });
+    vi.mocked(openDialog).mockResolvedValueOnce("/Applications/Typora.app");
+    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Application")).toHaveValue(
+        "/Applications/Typora.app",
+      ),
+    );
+    expect(openDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ directory: false }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(updates()).toEqual([
+        {
+          ...settings(),
+          editorOverrides: { md: "/Applications/Typora.app" },
+        },
+      ]),
+    );
+    expect(await screen.findByText("Typora")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove the .md editor" }),
+    );
+    await waitFor(() =>
+      expect(updates()[updates().length - 1]?.editorOverrides).toEqual({}),
+    );
+  });
+
+  it("chooses and resets the default editor", async () => {
+    await renderTab("Editors");
+    vi.mocked(openDialog).mockResolvedValueOnce(
+      "/Applications/Visual Studio Code.app",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Choose the default editor" }),
+    );
+    expect(await screen.findByText("Visual Studio Code")).toBeInTheDocument();
+    expect(updates()[0]?.defaultEditor).toBe(
+      "/Applications/Visual Studio Code.app",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Use the system default" }),
+    );
+    await waitFor(() =>
+      expect(updates()[updates().length - 1]?.defaultEditor).toBeNull(),
+    );
+    expect(await screen.findByText("System default")).toBeInTheDocument();
+  });
+});

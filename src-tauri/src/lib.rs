@@ -14,6 +14,7 @@
 mod commands;
 mod error;
 mod events;
+mod opener;
 mod state;
 
 use std::path::Path;
@@ -169,6 +170,10 @@ pub fn run() {
             state
                 .core
                 .on_ai_state(move |ai| events::emit_ai_state(&handle, ai));
+            // Open in editor: files go to the editor from Rust, not the webview.
+            state
+                .core
+                .set_opener(std::sync::Arc::new(opener::DesktopOpener));
             start_polling(app.handle().clone(), &state);
             app.manage(state);
             Ok(())
@@ -209,6 +214,9 @@ pub fn run() {
             commands::ai::set_checklist_checked,
             commands::ai::set_verdict_override,
             commands::ai::post_findings,
+            commands::open::local_files,
+            commands::open::open_in_editor,
+            commands::open::reveal_local_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

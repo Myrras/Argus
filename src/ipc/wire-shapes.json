@@ -197,6 +197,13 @@
       "kind",
       "reason"
     ],
+    "LocalFile": [
+      "absolutePath",
+      "cloneHead",
+      "exists",
+      "matchesReviewHead",
+      "path"
+    ],
     "NewComment": [
       "baseSha",
       "body",
@@ -304,6 +311,8 @@
       "ai.binary",
       "ai.enabled",
       "clonePaths",
+      "defaultEditor",
+      "editorOverrides",
       "github",
       "github.account",
       "github.enabled",

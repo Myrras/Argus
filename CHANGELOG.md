@@ -157,6 +157,14 @@ when it merges.
 - Thread history and file contents now read from your local clone when one is
   set for the repository: faster and exact. Commits you haven't fetched still
   come from GitHub/GitLab, and Argus never changes or fetches the clone.
+- Open in editor: with a local clone set for the repository, each file in the
+  file tree and each file's header has a button that opens the file from your
+  clone in your editor (also `o` on the focused file, line or thread, and in
+  the command palette). Right-click a file for Open With Default App and Show
+  in Finder (⌘⌥R). A file your clone doesn't have is greyed out, and the
+  tooltip says when your clone is on another commit than the review. Choose a
+  default editor and editors per extension in Settings → Editors; files that
+  would run instead of open (scripts, apps) only open in an editor you chose.
 - Review a merge request without the mouse: `n`/`p` move through threads and
   AI findings in page order, `j`/`k` still move between files. The focused
   item gets a focus ring. `Enter` or `t` opens or folds the focused thread,

@@ -35,6 +35,12 @@ pub struct Settings {
     /// read (never written, never fetched) for faster, exact thread history
     /// and file contents; never required: what it lacks comes from the API.
     pub clone_paths: BTreeMap<String, PathBuf>,
+    /// Per-extension editor (Iris's `editorOverrides`): lower-case
+    /// extension without the dot (`"md"`) → the application to open a
+    /// review's file from the local clone with. See [`crate::open`].
+    pub editor_overrides: BTreeMap<String, String>,
+    /// The application for every other file; `None` is the OS default.
+    pub default_editor: Option<String>,
 }
 
 impl Default for Settings {
@@ -45,6 +51,8 @@ impl Default for Settings {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             ai: AiSettings::default(),
             clone_paths: BTreeMap::new(),
+            editor_overrides: BTreeMap::new(),
+            default_editor: None,
         }
     }
 }
@@ -221,6 +229,20 @@ impl Settings {
                 )
             })?
         };
+        // As Iris tidies them: extensions trimmed, lower-cased and without
+        // a leading dot; rows with a blank extension or app dropped.
+        self.editor_overrides = std::mem::take(&mut self.editor_overrides)
+            .into_iter()
+            .map(|(ext, app)| {
+                let ext = ext.trim().trim_start_matches('.').to_lowercase();
+                (ext, app.trim().to_string())
+            })
+            .filter(|(ext, app)| !ext.is_empty() && !app.is_empty())
+            .collect();
+        self.default_editor = self
+            .default_editor
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty());
         Ok(self)
     }
 
@@ -428,5 +450,29 @@ mod tests {
             let err = s.validated().unwrap_err();
             assert!(err.to_string().contains("http://"), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn editor_settings_are_tidied_like_iris() {
+        let mut s = Settings::default();
+        assert!(s.editor_overrides.is_empty() && s.default_editor.is_none());
+        s.editor_overrides = [
+            ("  .MD ", "  /Applications/Typora.app  "),
+            ("txt", "   "),
+            ("  ", "/usr/bin/vim"),
+        ]
+        .into_iter()
+        .map(|(e, a)| (e.to_string(), a.to_string()))
+        .collect();
+        s.default_editor = Some("   ".into());
+        let s = s.validated().unwrap();
+        assert_eq!(
+            s.editor_overrides.into_iter().collect::<Vec<_>>(),
+            [("md".to_string(), "/Applications/Typora.app".to_string())]
+        );
+        assert_eq!(s.default_editor, None);
+        // An older settings.json without them loads with none set.
+        let old: Settings = serde_json::from_str(r#"{"pollIntervalSecs": 60}"#).unwrap();
+        assert!(old.editor_overrides.is_empty() && old.default_editor.is_none());
     }
 }
