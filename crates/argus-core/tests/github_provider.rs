@@ -344,7 +344,7 @@ fn the_conversation_and_review_summaries_are_threads_without_an_anchor() {
                 "issuecomment-8002".into(),
                 "rev-fixture".into(),
                 // The PR author's plain answer, then another reviewer's
-                // quote reply.
+                // quote reply (of the whole line: part of one is no quote).
                 owned(&[
                     "issuecomment-8002",
                     "issuecomment-8004",

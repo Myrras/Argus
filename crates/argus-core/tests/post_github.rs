@@ -288,11 +288,12 @@ fn replies_in_the_conversation_with_a_quoting_pr_comment() {
         )
     );
     // Exactly one write: a PR comment quoting the thread's first comment,
-    // read just before.
+    // read just before, and ending with the marker that files it under the
+    // thread (invisible on GitHub).
     assert_eq!(
         fake.bodies(),
         [json!({
-            "body": "> Should the TTL come from settings instead of a constant?\n\nSettings it is."
+            "body": "> Should the TTL come from settings instead of a constant?\n\nSettings it is.\n\n<!-- argus:reply-to issuecomment-8002 -->"
         })]
     );
     let calls = fake.calls();
@@ -313,7 +314,7 @@ fn replies_in_the_conversation_with_a_quoting_pr_comment() {
     assert_eq!(note.provider_thread_id, "pullrequestreview-7004");
     assert_eq!(
         fake.bodies()[1],
-        json!({ "body": "> One more nit.\n\nFixed." })
+        json!({ "body": "> One more nit.\n\nFixed.\n\n<!-- argus:reply-to pullrequestreview-7004 -->" })
     );
     assert!(fake
         .calls()

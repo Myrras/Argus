@@ -1458,8 +1458,9 @@ impl GithubProvider {
 impl GithubProvider {
     /// GitHub's conversation has no threads: a reply is a new PR comment
     /// that opens with a quote of the thread's first entry, as GitHub's own
-    /// "Quote reply" does, which files it under that thread on the next
-    /// fetch (see [`conversation::quote`]). The first entry is read for that
+    /// "Quote reply" does, and ends with a hidden marker naming the thread,
+    /// which files it under that thread on the next fetch (see
+    /// [`conversation::reply_text`]). The first entry is read for the quote
     /// (a conditional GET) right before the one write.
     fn reply_in_conversation(
         &self,
@@ -1477,10 +1478,7 @@ impl GithubProvider {
                     .body
             }
         };
-        let text = match conversation::quote(root.as_deref().unwrap_or_default()) {
-            Some(q) => format!("{q}\n\n{body}"),
-            None => body.to_string(),
-        };
+        let text = conversation::reply_text(id, root.as_deref().unwrap_or_default(), body);
         let posted: GhPosted = self.post_json(
             &format!("repos/{}/issues/{}/comments", r.repo, r.number),
             &serde_json::json!({ "body": text }),
