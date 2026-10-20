@@ -213,7 +213,8 @@ when it merges.
   reply), and only the author's very next real answer after your comment
   counts as a reply to you: not `/retest`, `@dependabot rebase` or a remark
   to someone else (a mention inside code, like `@Nullable`, is no remark),
-  and not a later comment after the author answered someone else.
+  and not a later comment after the author answered someone else, also by
+  quote and with a mention ("> their line" then "@carol fixed").
 
 ## [0.1.0] - 2026-10-16
 
