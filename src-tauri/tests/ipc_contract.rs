@@ -215,6 +215,36 @@ fn every_command_has_a_wrapper_with_its_arguments() {
     }
 }
 
+/// The commands that write to a platform, each in the shell's `post` (or
+/// `ai`) module with the arguments its button sends; the frontend's write
+/// lists (`App.flow.test.tsx`, `keyboardFlow.test.tsx`) name the same.
+#[test]
+fn the_platform_writes_are_the_known_commands() {
+    let commands = registered();
+    let writes: [(&str, &str, &[&str]); 5] = [
+        ("post_comments", "post", &["reviewId", "comments"]),
+        ("reply_to_thread", "post", &["reviewId", "threadId", "body"]),
+        ("approve_review", "post", &["reviewId", "headSha"]),
+        (
+            "resolve_thread",
+            "post",
+            &["reviewId", "threadId", "resolved"],
+        ),
+        ("post_findings", "ai", &["reviewId", "posts"]),
+    ];
+    let wrappers = ts_invokes(&read("src/ipc/commands.ts"), "commands.ts");
+    for (name, module, args) in writes {
+        assert_eq!(
+            commands.get(name).map(String::as_str),
+            Some(module),
+            "{name} registered from commands::{module}"
+        );
+        let args: BTreeSet<String> = args.iter().map(|a| a.to_string()).collect();
+        assert_eq!(rust_args(module, name), args, "{name}'s parameters");
+        assert_eq!(wrappers[name], args, "{name}'s wrapper");
+    }
+}
+
 /// Every `.ts`/`.tsx` file under `src/` that is not a test.
 fn frontend_sources() -> Vec<(String, String)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
