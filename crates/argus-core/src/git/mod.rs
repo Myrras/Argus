@@ -11,19 +11,26 @@
 //!
 //! Read-only by construction: only object reads run (`rev-parse --verify`
 //! (also of `HEAD`, for opening a file in an editor),
-//! `merge-base` (`--is-ancestor` too), `rev-list`, `diff-tree`, `cat-file --batch`;
-//! no checkout, no fetch, no status), with `GIT_OPTIONAL_LOCKS=0` so no
-//! read takes the index lock, lazy fetches of a partial clone off, and no
-//! shell, a timeout, and an environment without tokens or `GIT_*`
-//! redirections.
+//! `merge-base` (`--is-ancestor` too), `rev-list`, `diff-tree`, `ls-tree`,
+//! `cat-file --batch`, `remote -v`; no checkout, no fetch, no status), with
+//! `GIT_OPTIONAL_LOCKS=0` so no read takes the index lock, lazy fetches of
+//! a partial clone off, and no shell, a timeout, and an environment without
+//! tokens or `GIT_*` redirections.
+//!
+//! The one exception is [`worktree`]: before an AI run it fetches the
+//! review's head commit when the clone lacks it and checks it out in a
+//! worktree of Argus' own under `<clone>/.argus/worktrees`, removed after
+//! the run. Nothing else in the clone changes.
 
 mod diff;
+pub mod worktree;
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -128,9 +135,11 @@ struct Output {
 /// Why a git command gave no output. Argus' own text; git's stderr is
 /// never read, so nothing it prints reaches a log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GitError {
+pub enum GitError {
     Spawn,
     Timeout,
+    /// The run it was part of was cancelled, and git was stopped.
+    Cancelled,
     TooLarge,
     Exit(Option<i32>),
     TypeChange,
@@ -141,7 +150,8 @@ impl std::fmt::Display for GitError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GitError::Spawn => write!(f, "git could not be started"),
-            GitError::Timeout => write!(f, "git took longer than {}s", TIMEOUT.as_secs()),
+            GitError::Timeout => write!(f, "git did not finish in time and was stopped"),
+            GitError::Cancelled => write!(f, "cancelled"),
             GitError::TooLarge => write!(f, "git's output is too large"),
             GitError::Exit(Some(c)) => write!(f, "git exited with status {c}"),
             GitError::Exit(None) => write!(f, "git was killed"),
@@ -204,7 +214,7 @@ fn hide_console_window(cmd: &mut Command) {
 fn hide_console_window(_cmd: &mut Command) {}
 
 /// Run `git [-C dir] <args>` (no shell), feeding `stdin`, killed after
-/// `timeout`.
+/// `timeout`, with [`git_env`] of Argus' own environment.
 fn run(
     git: &Path,
     dir: Option<&Path>,
@@ -212,13 +222,42 @@ fn run(
     stdin: Option<Vec<u8>>,
     timeout: Duration,
 ) -> Result<Output, GitError> {
+    run_with(
+        git,
+        dir,
+        args,
+        stdin,
+        timeout,
+        &git_env(std::env::vars_os()),
+        None,
+    )
+}
+
+/// How often a cancellable git command checks its run's cancel flag.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
+/// [`run`] with the complete environment `env`, and stopped (killed) as
+/// soon as `cancel` is set.
+fn run_with(
+    git: &Path,
+    dir: Option<&Path>,
+    args: &[&str],
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    env: &[(OsString, OsString)],
+    cancel: Option<&AtomicBool>,
+) -> Result<Output, GitError> {
+    let cancelled = || cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    if cancelled() {
+        return Err(GitError::Cancelled);
+    }
     let mut cmd = Command::new(git);
     if let Some(dir) = dir {
         cmd.arg("-C").arg(dir);
     }
     cmd.args(args)
         .env_clear()
-        .envs(git_env(std::env::vars_os()))
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -252,12 +291,29 @@ fn run(
         Err(e)
     };
     // Waiting on the reader, not polling the process: a millisecond
-    // command returns in milliseconds.
-    let stdout = match rx.recv_timeout(timeout) {
-        Ok(Ok(buf)) if buf.len() <= MAX_OUTPUT => buf,
-        Ok(Ok(_)) => return stop(&mut child, GitError::TooLarge),
-        Ok(Err(_)) => return stop(&mut child, GitError::Spawn),
-        Err(_) => return stop(&mut child, GitError::Timeout),
+    // command returns in milliseconds. A cancellable one wakes up now and
+    // then to look at its flag.
+    let stdout = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let slice = if cancel.is_some() {
+            left.min(CANCEL_POLL)
+        } else {
+            left
+        };
+        match rx.recv_timeout(slice) {
+            Ok(Ok(buf)) if buf.len() <= MAX_OUTPUT => break buf,
+            Ok(Ok(_)) => return stop(&mut child, GitError::TooLarge),
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return stop(&mut child, GitError::Spawn)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if cancelled() => {
+                return stop(&mut child, GitError::Cancelled)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                return stop(&mut child, GitError::Timeout)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
     };
     // stdout is closed: git is exiting.
     loop {
@@ -431,6 +487,116 @@ impl LocalClone {
             .expect("commits lock")
             .insert(sha.to_string(), present);
         present
+    }
+
+    /// Forget what [`has_commit`](Self::has_commit) found for `sha`: after
+    /// a fetch, a commit that was missing may be here.
+    pub(crate) fn forget_commit(&self, sha: &str) {
+        self.commits.lock().expect("commits lock").remove(sha);
+    }
+
+    /// The commit the remote's default branch points at
+    /// (`refs/remotes/origin/HEAD`), else the clone's own `HEAD`: where a
+    /// listing without a review reads the project's skills from.
+    pub fn default_branch_head(&self) -> Option<String> {
+        for rev in ["refs/remotes/origin/HEAD^{commit}", "HEAD^{commit}"] {
+            if let Ok(out) = self.git_ok(&["rev-parse", "--verify", "--quiet", rev]) {
+                let sha = String::from_utf8_lossy(&out).trim().to_string();
+                if is_sha(&sha) {
+                    return Some(sha);
+                }
+            }
+        }
+        None
+    }
+
+    /// The entries of the directory `dir` (`""`: the root) at `sha`, as
+    /// (name, is a directory), from the object database (`ls-tree`).
+    /// Empty when the commit has no such directory; `None` when the commit
+    /// is not here or git failed.
+    pub fn list_dir(&self, sha: &str, dir: &str) -> Option<Vec<(String, bool)>> {
+        if !self.has_commit(sha) || dir.contains(['\n', '\0']) {
+            return None;
+        }
+        let dir = dir.trim_matches('/');
+        let mut args = vec!["ls-tree", "-z", sha];
+        let spec = format!("{dir}/");
+        if !dir.is_empty() {
+            args.extend(["--", spec.as_str()]);
+        }
+        let out = self.git_ok(&args).ok()?;
+        Some(
+            out.split(|b| *b == 0)
+                .filter_map(|entry| {
+                    // `<mode> SP <type> SP <oid> TAB <path>`
+                    let entry = std::str::from_utf8(entry).ok()?;
+                    let (meta, path) = entry.split_once('\t')?;
+                    let kind = meta.split(' ').nth(1)?;
+                    let name = path.rsplit('/').next()?.to_string();
+                    Some((name, kind == "tree"))
+                })
+                .collect(),
+        )
+    }
+
+    /// The contents of each of `paths` at `sha`, read in one `cat-file
+    /// --batch`: `None` for a path that is no UTF-8 file there. `None` as a
+    /// whole when the commit is not here or git failed.
+    pub fn files_at(&self, sha: &str, paths: &[String]) -> Option<Vec<Option<String>>> {
+        if !is_sha(sha)
+            || paths
+                .iter()
+                .any(|p| p.is_empty() || p.contains(['\n', '\0']))
+        {
+            return None;
+        }
+        let mut input = format!("{sha}^{{commit}}\n");
+        for p in paths {
+            input.push_str(&format!("{sha}:{p}\n"));
+        }
+        let out = self
+            .git(&["cat-file", "--batch"], Some(input.into_bytes()))
+            .ok()
+            .filter(|o| o.code == Some(0))?
+            .stdout;
+        let mut rest = out.as_slice();
+        if batch_record(&mut rest)?.0 != BatchKind::Object("commit") {
+            return None;
+        }
+        let mut files = Vec::with_capacity(paths.len());
+        for _ in paths {
+            files.push(match batch_record(&mut rest)? {
+                (BatchKind::Object("blob"), content) => String::from_utf8(content.to_vec()).ok(),
+                _ => None,
+            });
+        }
+        Some(files)
+    }
+
+    /// The paths changed from `from` to `to` (two-dot; a rename as its new
+    /// path and its old one). `None` when either commit is not here or git
+    /// failed.
+    pub fn changed_paths(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        if !self.has_commit(from) || !self.has_commit(to) {
+            return None;
+        }
+        let out = self
+            .git_ok(&[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--name-only",
+                "--no-renames",
+                from,
+                to,
+            ])
+            .ok()?;
+        Some(
+            out.split(|b| *b == 0)
+                .filter(|p| !p.is_empty())
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect(),
+        )
     }
 
     /// The commit the clone has checked out (`git rev-parse --verify HEAD`,
@@ -639,4 +805,4 @@ pub(crate) fn file_or(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

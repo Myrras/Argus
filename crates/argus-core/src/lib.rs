@@ -236,6 +236,19 @@ impl Core {
         }
     }
 
+    /// Remove the review worktrees an earlier Argus left in the configured
+    /// clones (it quit or crashed mid-run): only the ones it marked, never
+    /// one a run of this process uses. How many went. For startup (the shell
+    /// runs it off the main thread); each run also sweeps its clone first.
+    pub fn sweep_review_worktrees(&self) -> usize {
+        self.settings()
+            .clone_paths
+            .values()
+            .filter_map(|p| git::LocalClone::open(p))
+            .map(|c| c.sweep_review_worktrees())
+            .sum()
+    }
+
     fn providers(&self) -> Vec<Arc<dyn ReviewProvider>> {
         self.providers
             .lock()
