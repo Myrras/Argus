@@ -1,12 +1,15 @@
 /* Submit review: the verdicts, the summary (Write / Preview), the drafts
    switch and the outcome. Tokens only. */
 .body {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
 }
 
 .verdicts {
+  /* A fieldset defaults to min-width: min-content, which can push the dialog wider. */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-1);
@@ -39,11 +42,17 @@
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
+/* global.css stretches inputs to 100% with padding; undo it for the radio. */
 .verdict input {
-  margin-top: 3px;
+  width: auto;
+  flex: none;
+  margin: 3px 0 0;
+  padding: 0;
 }
 
 .verdictText {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -135,6 +144,13 @@
   align-items: center;
   gap: var(--sp-2);
   font-size: var(--fs-sm);
+}
+
+.drafts input {
+  width: auto;
+  flex: none;
+  margin: 0;
+  padding: 0;
 }
 
 .text {
