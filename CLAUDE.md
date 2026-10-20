@@ -163,19 +163,28 @@ sibling app Iris (`../Iris`).
     threads" hard-capped at 60k, "Your open threads" at 40k, GitHub
     conversation entries get no verdict). Each finding and checklist item
     carries `relatedThreadIds` (validated against the prompt's ids).
-    `ai/dedupe.rs::classify` marks a repeat when the agent marked the thread
-    and the loose (words + identifiers) similarity is ≥ 0.2, or by the net
-    (prose words only: code, fences, identifiers and the commented line's
-    words left out; stem, then EN/NL stop words; ≥ 2 shared words): same
-    path/side within ±2 lines (or the line the thread's hunk maps to on the
-    other side) ≥ 0.5, MR-level or other side ≥ 0.7. Repeats are stored set
-    aside (migration 9: `findings.repeat_reason/_of_thread/_of_finding`,
-    `shown_anyway`, `posted_thread_id/_note_id`;
-    `ai_runs.skipped_checklist`), listed by `list_skipped_findings`, shown
-    by `show_finding_anyway` (local), never posted while set aside; the AI
-    panel folds them under "Skipped as already raised" (`SkippedFindings`).
-    Checklist repeats are dropped and counted. Posted findings match their
-    thread by platform ids, not text.
+    `ai/dedupe.rs::classify` scores prose words only (code, fences, inline
+    code, identifiers and the words of the thread's hunk end and the
+    finding's line left out; stem, then EN/NL stop words; ≥ 2 shared
+    words; a note's share in the finding only for notes of ≥ 5 words whose
+    words the title shares too). A repeat: the agent marked the thread and
+    the score is ≥ 0.3 (never for a high-severity finding: it stays, with
+    `relatedTo`), or by the net: same path/side within ±2 lines (or the
+    line the thread's hunk maps to on the other side) ≥ 0.5; MR-level, or
+    a side where the thread has no place at all, ≥ 0.7. Kept findings carry
+    the agent's marks as `relatedTo` (UI tag "related to bob's comment").
+    Repeats are stored set aside (migration 9:
+    `findings.repeat_reason/_of_thread/_of_finding`, `shown_anyway`,
+    `posted_thread_id/_note_id`, `ai_runs.skipped_checklist`; migration 10:
+    the same four columns on `checklist`, `findings.related_to` JSON),
+    listed by `list_skipped_findings` / `list_skipped_checklist`, shown by
+    `show_finding_anyway` / `show_checklist_item_anyway` (local; kept on a
+    rerun of the round for the same path/line/side/title or item text),
+    never posted while set aside; the AI panel lists both under "Skipped as
+    already raised (N, k high)" (`SkippedFindings`, open with a high one;
+    the header chip's tooltip counts the same list). The calibration table
+    is `dedupe::tests::calibration`. Posted findings match their thread by
+    platform ids, not text.
 - ✅ **Milestone 6 — Local clone.** Core `git/`: with a clone configured per
   repository (`Settings::clone_paths`), the history walk and `Core::file_at`
   read through plain `git` (`rev-list`, `diff-tree`, `cat-file --batch`)

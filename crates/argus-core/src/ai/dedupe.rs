@@ -2,50 +2,56 @@
 //! parsing, each finding and checklist item is compared with every point
 //! raised so far: each thread (any author, open, resolved or outdated; its
 //! human notes) and each finding the user posted whose thread was not
-//! fetched yet. A finding that repeats one is not shown as a finding: it is
-//! stored with the point it repeats and why ([`Repeat`]), listed apart
-//! ("Skipped as already raised"), and the user can still show it. A
-//! checklist item that repeats one is left out and counted.
+//! fetched yet. A finding or item that repeats one is not shown as such: it
+//! is stored with the point it repeats and why ([`Repeat`]), listed apart
+//! ("Skipped as already raised"), and the user can still show it.
 //!
-//! Two signals:
+//! Two signals, both on prose words only (see below):
 //!
 //! 1. The agent's own: every finding and item lists the ids of the
 //!    threads it overlaps (`relatedThreadIds`, only ids the prompt listed).
 //!    The prompt tells it to leave out a point that adds nothing and to
-//!    describe only the new part of one that does; so a marked point still
-//!    repeats its thread when the text says what the thread says
-//!    ([`RELATED_SIMILARITY`], on words and identifiers): a related point
-//!    the agent kept anyway is caught, a new part on the same code is kept.
+//!    describe only the new part of one that does; so a marked point
+//!    repeats its thread only when the text also says what the thread says
+//!    ([`RELATED_SIMILARITY`]): a related point the agent kept anyway is
+//!    caught, a new part on the same code is kept. A high-severity finding
+//!    is never set aside on the agent's mark alone (an over-eager or
+//!    steered mark must not bury it): it stays a finding and names what it
+//!    relates to. So does every other marked finding that is kept.
 //! 2. A net of Argus' own for a point the agent did not mark: the same
 //!    file and side, its line within [`LINE_SLACK`] of the thread's lines
 //!    (where it was left, where the platform shows it now, where the thread
 //!    history found it at head), and similar words ([`NEAR_SIMILARITY`]).
 //!    On the other side of the same file: at a line the thread's hunk maps
-//!    to, the same rule; elsewhere only a near copy ([`GLOBAL_SIMILARITY`]).
-//!    A thread on the merge request as a whole has no lines: the text alone
-//!    at [`GLOBAL_SIMILARITY`]. A similar text far away from a thread on the
+//!    to, the same rule; when the thread has no place on that side at all,
+//!    only a near copy ([`GLOBAL_SIMILARITY`]). A thread on the merge
+//!    request as a whole has no lines: the text alone at
+//!    [`GLOBAL_SIMILARITY`]. A similar text far away from a thread on the
 //!    same side is a new point (the same mistake in another place).
 //!
-//! The net compares prose words only: code says what the line is, not what
-//! is wrong with it. Left out are fenced blocks (code, suggestions), inline
-//! code spans, identifier-shaped words (`snake_case`, `camelCase`, with
-//! digits) and every word of the code the point is on (the thread's hunk
-//! end and the finding's own line). Words are lower-cased and stemmed
-//! (English and Dutch suffixes, repeatedly), and then English and Dutch
-//! stop words and stock review phrases are left out (by stem, so `fixed`
-//! goes with `fix`). At least [`MIN_SHARED_WORDS`] words must be shared.
+//! Only prose words count: code says what the line is, not what is wrong
+//! with it. Left out are fenced blocks (code, suggestions), inline code
+//! spans, identifier-shaped words (`snake_case`, `camelCase`, with digits)
+//! and every word of the code the point is on (the thread's hunk end and
+//! the finding's own line). Words are lower-cased and stemmed (English and
+//! Dutch suffixes, repeatedly), and then English and Dutch stop words and
+//! stock review phrases are left out (by stem, so `fixed` goes with
+//! `fix`). At least [`MIN_SHARED_WORDS`] words must be shared.
 //!
 //! Similarity is the best of the Jaccard index of the point against the
-//! whole thread, and the share of one set found in the other for the
-//! finding's title in a note and for a note in the finding, the latter two
-//! only for sets of at least [`MIN_TOKENS`] words. The overlap catches a
-//! short comment ("panics on an empty list") whose point a longer finding
-//! contains in full, which plain Jaccard dilutes.
+//! whole thread, the share of the finding's title found in a note (titles
+//! of at least [`MIN_TOKENS`] words), and the share of a note found in the
+//! finding. The last one catches a comment whose point a longer finding
+//! contains in full, which plain Jaccard dilutes; it counts only for a note
+//! of at least [`MIN_NOTE_WORDS`] words whose words the finding's title
+//! shares too: three words of a short note ("the cache never expires
+//! entries") are its subject, and a finding about something else on that
+//! subject mentions them in its body.
 
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use super::model::{Finding, FindingId, RepeatOf, RepeatReason};
+use super::model::{Finding, FindingId, RelatedRef, RepeatOf, RepeatReason, Severity};
 use super::output::{RawCheck, RawFinding, RunOutput};
 use super::prompt::ThreadSnapshot;
 use crate::ids::ThreadId;
@@ -61,12 +67,16 @@ pub(crate) const NEAR_SIMILARITY: f64 = 0.5;
 /// request as a whole, or one on the other side of its file (no line to
 /// narrow it down, so stricter).
 pub(crate) const GLOBAL_SIMILARITY: f64 = 0.7;
-/// From this similarity on (words and identifiers), a point the agent
-/// marked as related to a thread still says what the thread says.
-pub(crate) const RELATED_SIMILARITY: f64 = 0.2;
-/// The overlap coefficient only counts for word sets at least this big: two
-/// shared words of a two-word title prove nothing.
+/// From this word similarity on, a point the agent marked as related to a
+/// thread still says what the thread says (prose words only, as the net:
+/// shared code on the same line is what a new part has too).
+pub(crate) const RELATED_SIMILARITY: f64 = 0.3;
+/// The share of a title found in a note only counts for titles at least
+/// this big: two shared words of a two-word title prove nothing.
 pub(crate) const MIN_TOKENS: usize = 3;
+/// The share of a note found in a finding only counts for notes at least
+/// this big (see the module docs).
+pub(crate) const MIN_NOTE_WORDS: usize = 5;
 /// The net needs at least this many shared words: one shared word ("cache")
 /// is a subject, not a point.
 pub(crate) const MIN_SHARED_WORDS: usize = 2;
@@ -472,12 +482,11 @@ fn words_of(s: &str) -> impl Iterator<Item = &str> {
         .filter(|w| w.chars().count() >= 2 && !w.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// A text split for comparison: its prose words (as written) and the words
-/// of its inline code spans. Fenced blocks (code, suggestions) are left out.
+/// A text as compared: its prose words, as written. Fenced blocks (code,
+/// suggestions) and inline code spans are left out.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Text {
     prose: Vec<String>,
-    code: Vec<String>,
 }
 
 impl Text {
@@ -494,13 +503,8 @@ impl Text {
                 continue;
             }
             // Odd segments between backticks are inline code.
-            for (i, seg) in line.split('`').enumerate() {
-                let into = if i % 2 == 1 {
-                    &mut t.code
-                } else {
-                    &mut t.prose
-                };
-                into.extend(words_of(seg).map(str::to_string));
+            for seg in line.split('`').step_by(2) {
+                t.prose.extend(words_of(seg).map(str::to_string));
             }
         }
         t
@@ -508,32 +512,20 @@ impl Text {
 
     fn extend(&mut self, other: &Text) {
         self.prose.extend(other.prose.iter().cloned());
-        self.code.extend(other.code.iter().cloned());
     }
 
-    /// The comparable words of this text given `code` (lower-cased words of
-    /// the code the point is on).
-    fn bag(&self, code: &HashSet<String>) -> Bag {
-        let mut b = Bag::default();
-        for w in &self.prose {
-            let lower = w.to_lowercase();
-            let stemmed = stem(&lower);
-            if is_stop(&lower, &stemmed) {
-                continue;
-            }
-            if identifier(w) || code.contains(&lower) {
-                b.idents.insert(lower);
-            } else {
-                b.words.insert(stemmed);
-            }
-        }
-        for w in &self.code {
-            let lower = w.to_lowercase();
-            if !is_stop(&lower, &stem(&lower)) {
-                b.idents.insert(lower);
-            }
-        }
-        b
+    /// The comparable words of this text (stemmed) given `code` (lower-cased
+    /// words of the code the point is on, which do not count).
+    fn words(&self, code: &HashSet<String>) -> HashSet<String> {
+        self.prose
+            .iter()
+            .filter(|w| !identifier(w))
+            .filter_map(|w| {
+                let lower = w.to_lowercase();
+                let stemmed = stem(&lower);
+                (!is_stop(&lower, &stemmed) && !code.contains(&lower)).then_some(stemmed)
+            })
+            .collect()
     }
 }
 
@@ -554,19 +546,6 @@ fn diff_content(line: &str) -> &str {
     line.strip_prefix(['+', '-', ' ']).unwrap_or(line)
 }
 
-/// Comparable words: prose (stemmed) and identifiers or code (lower case).
-#[derive(Debug, Clone, Default)]
-struct Bag {
-    words: HashSet<String>,
-    idents: HashSet<String>,
-}
-
-impl Bag {
-    fn all(&self) -> HashSet<String> {
-        self.words.union(&self.idents).cloned().collect()
-    }
-}
-
 fn shared(a: &HashSet<String>, b: &HashSet<String>) -> usize {
     a.intersection(b).count()
 }
@@ -579,9 +558,9 @@ fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     shared(a, b) as f64 / union as f64
 }
 
-/// `|a ∩ b| / |a|`, for a set `a` of at least [`MIN_TOKENS`] words.
-fn contained(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
-    if a.len() < MIN_TOKENS {
+/// `|a ∩ b| / |a|`, for a set `a` of at least `min` words.
+fn contained(a: &HashSet<String>, b: &HashSet<String>, min: usize) -> f64 {
+    if a.len() < min {
         return 0.0;
     }
     shared(a, b) as f64 / a.len() as f64
@@ -589,38 +568,22 @@ fn contained(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
 
 /// How much a point (`title` and `whole`, title included) says what
 /// `notes` say (see the module docs), counting only overlaps of at least
-/// `min_shared` words.
-fn similarity(
-    title: &HashSet<String>,
-    whole: &HashSet<String>,
-    notes: &[HashSet<String>],
-    min_shared: usize,
-) -> f64 {
+/// [`MIN_SHARED_WORDS`] words.
+fn similarity(title: &HashSet<String>, whole: &HashSet<String>, notes: &[HashSet<String>]) -> f64 {
     let all: HashSet<String> = notes.iter().flatten().cloned().collect();
     let mut best = 0.0_f64;
-    if shared(whole, &all) >= min_shared {
+    if shared(whole, &all) >= MIN_SHARED_WORDS {
         best = jaccard(whole, &all);
     }
     for n in notes {
-        if shared(whole, n) < min_shared {
+        if shared(whole, n) < MIN_SHARED_WORDS || shared(title, n) < MIN_SHARED_WORDS {
             continue;
         }
-        best = best.max(contained(n, whole));
-        if shared(title, n) >= min_shared {
-            best = best.max(contained(title, n));
-        }
+        best = best
+            .max(contained(n, whole, MIN_NOTE_WORDS))
+            .max(contained(title, n, MIN_TOKENS));
     }
     best
-}
-
-/// The two scores of a point against a raised one, each counting only
-/// overlaps of at least [`MIN_SHARED_WORDS`]: `words` (prose only; the
-/// net's) and `loose` (identifiers and code count too; for a point the
-/// agent marked as related, whose language may not be the thread's).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Scores {
-    pub words: f64,
-    pub loose: f64,
 }
 
 /// Lines `start..=end` of `path` on `side`; `None` lines: the whole file
@@ -662,6 +625,20 @@ impl RaisedRef {
             RaisedRef::Posted(f) => f.to_string(),
         }
     }
+
+    /// As the wire names it.
+    pub fn related_ref(&self) -> RelatedRef {
+        match *self {
+            RaisedRef::Thread(t) => RelatedRef {
+                thread_id: Some(t),
+                finding_id: None,
+            },
+            RaisedRef::Posted(f) => RelatedRef {
+                thread_id: None,
+                finding_id: Some(f),
+            },
+        }
+    }
 }
 
 /// Why a finding repeats the review, and what it repeats.
@@ -673,10 +650,10 @@ pub(crate) struct Repeat {
 
 impl Repeat {
     pub fn repeat_of(&self) -> RepeatOf {
-        let (thread_id, finding_id) = match self.of {
-            RaisedRef::Thread(t) => (Some(t), None),
-            RaisedRef::Posted(f) => (None, Some(f)),
-        };
+        let RelatedRef {
+            thread_id,
+            finding_id,
+        } = self.of.related_ref();
         RepeatOf {
             reason: self.reason,
             thread_id,
@@ -701,6 +678,8 @@ pub(crate) struct Raised {
 /// line) or a checklist item (no place).
 pub(crate) struct Candidate<'a> {
     place: Option<(&'a str, Side, u32)>,
+    /// A high-severity finding: never set aside on the agent's mark alone.
+    high: bool,
     title: Text,
     whole: Text,
     code: HashSet<String>,
@@ -714,6 +693,7 @@ impl<'a> Candidate<'a> {
         whole.extend(&title);
         Candidate {
             place: Some((f.path.as_str(), f.side, f.line)),
+            high: f.severity == Severity::High,
             title,
             whole,
             code: code_words(line_text),
@@ -724,6 +704,7 @@ impl<'a> Candidate<'a> {
         let title = Text::new(&c.text);
         Candidate {
             place: None,
+            high: false,
             whole: title.clone(),
             title,
             code: HashSet::new(),
@@ -741,37 +722,35 @@ impl Raised {
         }
     }
 
-    /// How much `c` says what this point says.
-    pub fn scores(&self, c: &Candidate<'_>) -> Scores {
+    /// How much `c` says what this point says: prose words only, the
+    /// words of the code either is on left out.
+    pub fn score(&self, c: &Candidate<'_>) -> f64 {
         let code: HashSet<String> = self.code.union(&c.code).cloned().collect();
-        let title = c.title.bag(&code);
-        let whole = c.whole.bag(&code);
-        let notes: Vec<Bag> = self.notes.iter().map(|n| n.bag(&code)).collect();
-        let words: Vec<HashSet<String>> = notes.iter().map(|n| n.words.clone()).collect();
-        let loose: Vec<HashSet<String>> = notes.iter().map(Bag::all).collect();
-        Scores {
-            words: similarity(&title.words, &whole.words, &words, MIN_SHARED_WORDS),
-            loose: similarity(&title.all(), &whole.all(), &loose, MIN_SHARED_WORDS),
-        }
+        let notes: Vec<HashSet<String>> = self.notes.iter().map(|n| n.words(&code)).collect();
+        similarity(&c.title.words(&code), &c.whole.words(&code), &notes)
     }
 
     /// Whether `c` repeats this point, and why (`related`: the agent listed
     /// this point's id for it).
     pub fn judge(&self, c: &Candidate<'_>, related: bool) -> Option<(RepeatReason, f64)> {
-        let s = self.scores(c);
-        if related && s.loose >= RELATED_SIMILARITY {
-            return Some((RepeatReason::AgentMarked, s.loose));
+        let words = self.score(c);
+        if related && !c.high && words >= RELATED_SIMILARITY {
+            return Some((RepeatReason::AgentMarked, words));
         }
         let similar = match c.place {
-            _ if self.places.is_empty() => s.words >= GLOBAL_SIMILARITY,
-            None => s.words >= GLOBAL_SIMILARITY,
+            _ if self.places.is_empty() => words >= GLOBAL_SIMILARITY,
+            None => words >= GLOBAL_SIMILARITY,
             Some((path, side, line)) => {
                 let near = self.places.iter().any(|p| p.near(path, side, line));
-                let other_side = self.places.iter().any(|p| p.path == path && p.side != side);
-                (near && s.words >= NEAR_SIMILARITY) || (other_side && s.words >= GLOBAL_SIMILARITY)
+                // A thread with a place on the finding's side is "near" or
+                // nothing there: far down the same side is another place,
+                // even when the thread's hunk also maps it across.
+                let own_side = self.places.iter().any(|p| p.path == path && p.side == side);
+                let other_side = !own_side && self.places.iter().any(|p| p.path == path);
+                (near && words >= NEAR_SIMILARITY) || (other_side && words >= GLOBAL_SIMILARITY)
             }
         };
-        similar.then_some((RepeatReason::Similar, s.words))
+        similar.then_some((RepeatReason::Similar, words))
     }
 }
 
@@ -997,20 +976,26 @@ fn finding_line<'d>(diff: &'d FileDiff, f: &RawFinding) -> Option<&'d str> {
     line_at(file.patch.as_deref()?, f.side, f.line)
 }
 
-/// Mark the findings of `run` that repeat one of `raised` (counted in
-/// `dropped_duplicates`) and leave out the checklist items that do
-/// (counted in `skipped_checklist`). `diff` is the diff the agent read: the
-/// text of a finding's line is code, not a point.
+/// Mark the findings and checklist items of `run` that repeat one of
+/// `raised` (counted in `dropped_duplicates` and `skipped_checklist`), and
+/// name on each finding the points the agent said it relates to. `diff` is
+/// the diff the agent read: the text of a finding's line is code, not a
+/// point.
 pub(crate) fn classify(run: &mut RunOutput, raised: &[Raised], diff: &FileDiff) {
     for f in &mut run.findings {
         let c = Candidate::finding(f, finding_line(diff, f));
         f.repeat = best_repeat(&c, &f.related, raised);
+        f.related_to = raised
+            .iter()
+            .filter(|r| f.related.contains(&r.of.id()))
+            .map(|r| r.of)
+            .collect();
     }
     run.dropped_duplicates = run.findings.iter().filter(|f| f.repeat.is_some()).count() as u32;
-    let before = run.checklist.len();
-    run.checklist
-        .retain(|item| best_repeat(&Candidate::check(item), &item.related, raised).is_none());
-    run.skipped_checklist = (before - run.checklist.len()) as u32;
+    for item in &mut run.checklist {
+        item.repeat = best_repeat(&Candidate::check(item), &item.related, raised);
+    }
+    run.skipped_checklist = run.checklist.iter().filter(|c| c.repeat.is_some()).count() as u32;
 }
 
 #[cfg(test)]
@@ -1031,6 +1016,7 @@ mod tests {
             body: body.into(),
             related: Vec::new(),
             repeat: None,
+            related_to: Vec::new(),
         }
     }
 
@@ -1269,6 +1255,7 @@ mod tests {
             posted_at: Some(at(2, 2)),
             posted_url: Some("https://example.test/1".into()),
             repeat_of: None,
+            related_to: Vec::new(),
         };
         let raised = raised_points(&[], &[&posted]);
         let mut run = RunOutput {
@@ -1375,6 +1362,169 @@ mod tests {
         assert!(!repeats(&st, None, &f));
     }
 
+    // Review loop 2 round 2 probes: a new part on the same code (what the
+    // prompt asks for), the same mistake far down the same side, and short
+    // notes on another subject. The old rules set all of them aside.
+
+    /// A comment asking for a `HashMap` on a lookup line (its hunk ends on
+    /// it), and the text of that line.
+    const LOOKUP_NOTE: &str = "Use a `HashMap` instead of the `Vec` for `widgets` lookups by id.";
+    const LOOKUP_HUNK: &str = "@@ -8,3 +8,3 @@\n fn find(&self, id: u64) -> Option<&Widget> {\n-        self.widgets.get(id)\n+        self.widgets.iter().find(|w| w.id == id)";
+    const LOOKUP_LINE: &str = "        self.widgets.iter().find(|w| w.id == id)";
+
+    /// New parts on the lookup line: memory, a panic, a tenant bypass.
+    const NEW_PARTS: [(&str, &str); 3] = [
+        (
+            "`widgets` grows without bound",
+            "Besides the lookup cost already raised: every insert pushes onto the `Vec` of `widgets` and nothing evicts, so memory grows per request.",
+        ),
+        (
+            "`find` result is unwrapped by the caller",
+            "New beyond the lookup thread: the caller unwraps the `Option` from `find`, so an unknown widget id panics the request handler.",
+        ),
+        (
+            "Widget lookup skips the tenant check",
+            "Separate from the HashMap point: `find` returns any tenant's widget by id, so one tenant can read another's widgets.",
+        ),
+    ];
+
+    fn with_hunk(mut st: StoredThread, hunk: &str) -> StoredThread {
+        if let Some(a) = st.thread.anchor.as_mut() {
+            a.diff_hunk = Some(hunk.into());
+        }
+        st
+    }
+
+    fn of_severity(f: RawFinding, severity: Severity) -> RawFinding {
+        RawFinding { severity, ..f }
+    }
+
+    #[test]
+    fn probe_new_parts_on_the_same_code_are_kept_even_when_marked() {
+        let st = with_hunk(stored(AUTHOR, &[LOOKUP_NOTE], true), LOOKUP_HUNK);
+        let raised = raised_points(&[(&st, None)], &[]);
+        for (title, body) in NEW_PARTS {
+            for severity in [Severity::High, Severity::Medium, Severity::Low] {
+                let f = of_severity(finding("src/cache.rs", 10, title, body), severity);
+                let c = Candidate::finding(&f, Some(LOOKUP_LINE));
+                assert_eq!(raised[0].judge(&c, true), None, "{title} ({severity:?})");
+                assert_eq!(raised[0].judge(&c, false), None, "{title} ({severity:?})");
+            }
+        }
+    }
+
+    #[test]
+    fn probe_the_same_mistake_far_down_the_same_side_is_kept() {
+        let hunk = "@@ -8,3 +8,3 @@\n ctx\n ctx2\n+let first = items[0];";
+        let far = finding(
+            "src/cache.rs",
+            80,
+            "Indexing an empty items list panics",
+            "`items[0]` panics when `items` is empty. Guard with `is_empty()` or use `first()`.",
+        );
+        let st = with_hunk(stored(AUTHOR, &[EMPTY_LIST], true), hunk);
+        // The hunk maps the thread to the old side too; the finding is on
+        // the thread's own side, so only "near" counts there.
+        assert!(!repeats(&st, None, &far));
+        assert!(!repeats(&stored(AUTHOR, &[EMPTY_LIST], true), None, &far));
+        // On the old side, where the thread's hunk also places it: the same.
+        let old = RawFinding {
+            side: Side::Old,
+            ..far.clone()
+        };
+        assert!(!repeats(&st, None, &old));
+        // Near it, it still repeats.
+        assert!(repeats(&st, None, &RawFinding { line: 10, ..far }));
+    }
+
+    #[test]
+    fn probe_short_notes_on_another_subject_do_not_swallow_high_findings() {
+        let cases = [
+            (
+                "Please add a test for the token refresh path.",
+                "Token is logged in plain text",
+                "The token is logged by the debug call below; the refresh path leaks it.",
+            ),
+            (
+                "The cache never expires entries.",
+                "Cache entries race on concurrent writes",
+                "Two writers to the cache can interleave so entries are lost; the cache needs a lock.",
+            ),
+        ];
+        for (note, title, body) in cases {
+            let st = stored(AUTHOR, &[note], false);
+            let anchored = stored(AUTHOR, &[note], true);
+            let f = of_severity(finding("src/cache.rs", 10, title, body), Severity::High);
+            assert!(!repeats(&st, None, &f), "{title}");
+            assert!(!repeats(&anchored, None, &f), "{title}");
+            assert_eq!(judge(&anchored, None, &f, true), None, "{title}");
+        }
+        // A short note whose point the finding's title makes still repeats.
+        let st = stored(AUTHOR, &["Panics on an empty list."], true);
+        let f = finding(
+            "src/cache.rs",
+            10,
+            "Indexing an empty items list panics",
+            "`items[0]` panics when `items` is empty.",
+        );
+        assert!(repeats(&st, None, &f));
+    }
+
+    #[test]
+    fn a_high_finding_is_never_set_aside_on_the_agents_mark_alone() {
+        let st = stored(
+            AUTHOR,
+            &["Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan."],
+            true,
+        );
+        // Far from the thread: only the agent's mark could set it aside.
+        let far = finding(
+            "src/cache.rs",
+            40,
+            "Linear lookup by widget id",
+            "Each lookup scans the Vec; key a HashMap by the widget id.",
+        );
+        assert!(!repeats(&st, None, &far));
+        assert_eq!(
+            judge(&st, None, &far, true),
+            Some(RepeatReason::AgentMarked)
+        );
+        let high = of_severity(far, Severity::High);
+        assert_eq!(judge(&st, None, &high, true), None);
+        // Near the thread the net still sets it aside, whatever its severity.
+        let near = RawFinding { line: 10, ..high };
+        assert_eq!(judge(&st, None, &near, true), Some(RepeatReason::Similar));
+    }
+
+    #[test]
+    fn marked_findings_kept_name_what_they_relate_to() {
+        let st = stored(AUTHOR, &[LOOKUP_NOTE], true);
+        let raised = raised_points(&[(&st, None)], &[]);
+        let mut f = of_severity(
+            finding("src/cache.rs", 10, NEW_PARTS[2].0, NEW_PARTS[2].1),
+            Severity::High,
+        );
+        f.related = vec![st.thread_id.to_string()];
+        let unmarked = finding(
+            "src/cache.rs",
+            30,
+            "Unbounded cache growth",
+            "Nothing evicts.",
+        );
+        let mut run = RunOutput {
+            findings: vec![f, unmarked],
+            ..RunOutput::default()
+        };
+        classify(&mut run, &raised, &diff("src/none.rs", ""));
+        assert_eq!(run.findings[0].repeat, None);
+        assert_eq!(
+            run.findings[0].related_to,
+            vec![RaisedRef::Thread(st.thread_id)]
+        );
+        assert!(run.findings[1].related_to.is_empty());
+        assert_eq!(run.dropped_duplicates, 0);
+    }
+
     #[test]
     fn words_of_the_code_the_point_is_on_prove_nothing() {
         // The note and the finding share only words of the commented line.
@@ -1393,8 +1543,8 @@ mod tests {
             "A negative retry budget in the config makes the loop spin forever; reject it on load.",
         );
         let raised = raised_points(&[(&st, None)], &[]);
-        let s = raised[0].scores(&Candidate::finding(&f, None));
-        assert!(s.words < NEAR_SIMILARITY, "{s:?}");
+        let s = raised[0].score(&Candidate::finding(&f, None));
+        assert!(s < NEAR_SIMILARITY, "{s}");
         assert!(!repeats(&st, None, &f));
     }
 
@@ -1423,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn an_english_finding_on_a_dutch_comment_is_caught_when_the_agent_marks_it() {
+    fn an_english_finding_on_a_dutch_comment_shares_no_words_and_is_kept() {
         let st = stored(
             "bob-fixture",
             &["Dit crasht als `items` leeg is: `items[0]` heeft geen check. Gebruik eerst `is_empty()`."],
@@ -1435,14 +1585,15 @@ mod tests {
             "Indexing an empty items list panics",
             "`items[0]` panics when `items` is empty; guard with `is_empty()` first.",
         );
-        // Different languages share no words: the net cannot tell.
+        // Different languages share no prose words: the net cannot tell,
+        // and shared code is no proof (a new part has it too). Marked, it
+        // is kept and names the thread (`RawFinding::related_to`).
         assert!(!repeats(&st, None, &f));
-        // The agent listed the thread: the shared code confirms it.
-        assert_eq!(judge(&st, None, &f, true), Some(RepeatReason::AgentMarked));
+        assert_eq!(judge(&st, None, &f, true), None);
     }
 
     #[test]
-    fn a_paraphrase_is_caught_when_the_agent_marks_it_and_a_new_part_is_kept() {
+    fn a_marked_point_repeats_only_with_shared_prose_and_a_new_part_is_kept() {
         let st = stored(
             AUTHOR,
             &["Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan."],
@@ -1454,9 +1605,20 @@ mod tests {
             "Finding a widget walks the whole Vec",
             "Every call iterates all widgets to match the id; index them in a map instead.",
         );
+        // Two shared words of eight: too little even with the mark (kept,
+        // naming the thread).
         assert!(!repeats(&st, None, &paraphrase));
+        assert_eq!(judge(&st, None, &paraphrase, true), None);
+        // A closer wording far from the thread: the mark sets it aside.
+        let far = finding(
+            "src/cache.rs",
+            40,
+            "Lookups by widget id are linear",
+            "Every lookup scans the widgets; a HashMap keyed by id avoids the scan.",
+        );
+        assert!(!repeats(&st, None, &far));
         assert_eq!(
-            judge(&st, None, &paraphrase, true),
+            judge(&st, None, &far, true),
             Some(RepeatReason::AgentMarked)
         );
         // Marked related, but only the new part described: kept.
@@ -1519,7 +1681,7 @@ mod tests {
     }
 
     #[test]
-    fn checklist_items_that_repeat_a_thread_are_left_out() {
+    fn checklist_items_that_repeat_a_thread_are_set_aside() {
         let st = stored(
             "bob-fixture",
             &["No migration for old caches: existing entries keep the old format."],
@@ -1533,6 +1695,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            repeat: None,
         };
         let mut run = RunOutput {
             checklist: vec![
@@ -1547,12 +1710,19 @@ mod tests {
             ..RunOutput::default()
         };
         classify(&mut run, &raised, &diff("src/none.rs", ""));
-        let kept: Vec<_> = run.checklist.iter().map(|c| c.text.as_str()).collect();
+        // Kept, all of them; the repeats marked (listed apart, never lost).
+        let marks: Vec<_> = run
+            .checklist
+            .iter()
+            .map(|c| c.repeat.map(|r| r.reason))
+            .collect();
         assert_eq!(
-            kept,
+            marks,
             vec![
-                "Is turning the cache off intended?",
-                "Was the rollout of the cache planned?"
+                Some(RepeatReason::Similar),
+                None,
+                Some(RepeatReason::AgentMarked),
+                None
             ]
         );
         assert_eq!(run.skipped_checklist, 2);
@@ -1621,16 +1791,16 @@ mod tests {
         let t = Text::new(
             "Please consider caching the widgets; the cache is used twice. Fixed, issues resolved. `HashMap` user_id\n```\nlet hidden = 1;\n```",
         );
-        let b = t.bag(&HashSet::new());
-        assert!(b.words.contains("cach"));
-        assert!(b.words.contains(&stem("widget")));
+        let w = t.words(&HashSet::new());
+        assert!(w.contains("cach"));
+        assert!(w.contains(&stem("widget")));
+        // Stop words, inline code, identifiers and fences are no words.
         for gone in [
-            "please", "the", "used", "fix", "fixed", "issu", "resolv", "hidden",
+            "please", "the", "used", "fix", "fixed", "issu", "resolv", "hidden", "hashmap",
+            "user_id",
         ] {
-            assert!(!b.words.contains(gone), "{gone} in {:?}", b.words);
+            assert!(!w.contains(gone), "{gone} in {w:?}");
         }
-        assert!(b.idents.contains("hashmap") && b.idents.contains("user_id"));
-        assert!(!b.idents.contains("hidden"));
         // Inflections end alike, in English and Dutch.
         for (a, z) in [
             ("tokens", "token"),
@@ -1643,15 +1813,16 @@ mod tests {
         }
         // A short stop word only goes as written.
         assert!(Text::new("date ops")
-            .bag(&HashSet::new())
-            .words
+            .words(&HashSet::new())
             .contains(&stem("date")));
-        assert!(Text::new("a 42 x").bag(&HashSet::new()).words.is_empty());
+        assert!(Text::new("a 42 x").words(&HashSet::new()).is_empty());
     }
 
     /// The thresholds against the cases they were set on: each pair's word
-    /// and loose scores, and what the rules make of it unmarked and marked.
-    /// `cargo test -p argus-core calibration -- --nocapture` prints them.
+    /// score, and what the rules make of it unmarked (`net`), marked by the
+    /// agent (`marked`, medium severity) and marked as a high-severity
+    /// finding (`high`). `cargo test -p argus-core calibration --
+    /// --nocapture` prints them.
     #[test]
     fn calibration() {
         struct Case {
@@ -1659,104 +1830,178 @@ mod tests {
             note: &'static str,
             title: &'static str,
             body: &'static str,
-            net: bool,
-            marked: bool,
+            /// The thread's hunk and the finding's line text, when on code.
+            code: Option<(&'static str, &'static str)>,
+            /// The finding's line (the thread is on new 10).
+            line: u32,
+            /// A thread on the merge request as a whole.
+            general: bool,
+            expect: (bool, bool, bool),
         }
-        let cases = [
+        let case = |name, note, title, body, expect| Case {
+            name,
+            note,
+            title,
+            body,
+            code: None,
+            line: 10,
+            general: false,
+            expect,
+        };
+        let mut cases = vec![
+            case(
+                "near duplicate",
+                EMPTY_LIST,
+                "Indexing an empty items list panics",
+                "`items[0]` panics when `items` is empty. Guard with `is_empty()` or use `first()`.",
+                (true, true, true),
+            ),
+            case(
+                "paraphrase (EN)",
+                "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
+                "Finding a widget walks the whole Vec",
+                "Every call iterates all widgets to match the id; index them in a map instead.",
+                (false, false, false),
+            ),
+            case(
+                "close paraphrase (EN)",
+                "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
+                "Linear lookup by widget id",
+                "Each lookup scans the Vec; key a HashMap by the widget id.",
+                (true, true, true),
+            ),
             Case {
-                name: "near duplicate",
-                note: EMPTY_LIST,
-                title: "Indexing an empty items list panics",
-                body: "`items[0]` panics when `items` is empty. Guard with `is_empty()` or use `first()`.",
-                net: true,
-                marked: true,
+                line: 40,
+                ..case(
+                    "close paraphrase, far away",
+                    "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
+                    "Lookups by widget id are linear",
+                    "Every lookup scans the widgets; a HashMap keyed by id avoids the scan.",
+                    (false, true, false),
+                )
             },
-            Case {
-                name: "paraphrase (EN)",
-                note: "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
-                title: "Finding a widget walks the whole Vec",
-                body: "Every call iterates all widgets to match the id; index them in a map instead.",
-                net: false,
-                marked: true,
-            },
-            Case {
-                name: "close paraphrase (EN)",
-                note: "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
-                title: "Linear lookup by widget id",
-                body: "Each lookup scans the Vec; key a HashMap by the widget id.",
-                net: true,
-                marked: true,
-            },
-            Case {
-                name: "Dutch comment, Dutch finding",
-                note: "De cache wordt nooit geïnvalideerd na een schrijfactie, dus lezers zien verouderde widgets tot de TTL verloopt.",
-                title: "Cache wordt niet geïnvalideerd na schrijven",
-                body: "Na een schrijfactie blijven verouderde widgets in de cache staan tot de TTL verloopt.",
-                net: true,
-                marked: true,
-            },
-            Case {
-                name: "Dutch comment, English finding",
-                note: "Dit crasht als `items` leeg is: `items[0]` heeft geen check. Gebruik eerst `is_empty()`.",
-                title: "Indexing an empty items list panics",
-                body: "`items[0]` panics when `items` is empty; guard with `is_empty()` first.",
-                net: false,
-                marked: true,
-            },
-            Case {
-                name: "probe: naming nit vs auth",
-                note: "Rename `user_id` to `owner_id` in `load_widget`.",
-                title: "Missing authorization check in load_widget",
-                body: "`load_widget` returns any widget by `user_id` without checking the caller owns it; compare `owner_id` with the session user.",
-                net: false,
-                marked: true,
-            },
-            Case {
-                name: "probe: suggestion vs TTL",
-                note: "```suggestion\nlet ttl = Duration::from_secs(300);\n```",
-                title: "TTL of 0 disables the cache",
-                body: "With `ttl = 0` every lookup misses; default to `Duration::from_secs(300)`.",
-                net: false,
-                marked: false,
-            },
-            Case {
-                name: "probe: filler words",
-                note: "Thanks, fixed. Issues resolved.",
-                title: "Retry loop keeps firing after the first request resolved",
-                body: "The fixed-interval retry issues a new request even after the first one resolved; stop the loop on success.",
-                net: false,
-                marked: false,
-            },
-            Case {
-                name: "different issue, same line",
-                note: EMPTY_LIST,
-                title: "TTL of 0 disables the cache",
-                body: "With `ttl = 0` every lookup misses, so the cache never serves a hit. Default to 300.",
-                net: false,
-                marked: false,
-            },
-            Case {
-                name: "new part of a marked thread",
-                note: "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
-                title: "The widget map is never cleared on logout",
-                body: "Entries of a logged-out user stay in memory for good; clear them in `logout`.",
-                net: false,
-                marked: false,
-            },
+            case(
+                "Dutch comment, Dutch finding",
+                "De cache wordt nooit geïnvalideerd na een schrijfactie, dus lezers zien verouderde widgets tot de TTL verloopt.",
+                "Cache wordt niet geïnvalideerd na schrijven",
+                "Na een schrijfactie blijven verouderde widgets in de cache staan tot de TTL verloopt.",
+                (true, true, true),
+            ),
+            case(
+                "Dutch comment, English finding",
+                "Dit crasht als `items` leeg is: `items[0]` heeft geen check. Gebruik eerst `is_empty()`.",
+                "Indexing an empty items list panics",
+                "`items[0]` panics when `items` is empty; guard with `is_empty()` first.",
+                (false, false, false),
+            ),
+            case(
+                "probe: naming nit vs auth",
+                "Rename `user_id` to `owner_id` in `load_widget`.",
+                "Missing authorization check in load_widget",
+                "`load_widget` returns any widget by `user_id` without checking the caller owns it; compare `owner_id` with the session user.",
+                (false, false, false),
+            ),
+            case(
+                "probe: suggestion vs TTL",
+                "```suggestion\nlet ttl = Duration::from_secs(300);\n```",
+                "TTL of 0 disables the cache",
+                "With `ttl = 0` every lookup misses; default to `Duration::from_secs(300)`.",
+                (false, false, false),
+            ),
+            case(
+                "probe: filler words",
+                "Thanks, fixed. Issues resolved.",
+                "Retry loop keeps firing after the first request resolved",
+                "The fixed-interval retry issues a new request even after the first one resolved; stop the loop on success.",
+                (false, false, false),
+            ),
+            case(
+                "different issue, same line",
+                EMPTY_LIST,
+                "TTL of 0 disables the cache",
+                "With `ttl = 0` every lookup misses, so the cache never serves a hit. Default to 300.",
+                (false, false, false),
+            ),
+            case(
+                "new part of a marked thread",
+                "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
+                "The widget map is never cleared on logout",
+                "Entries of a logged-out user stay in memory for good; clear them in `logout`.",
+                (false, false, false),
+            ),
         ];
-        eprintln!("{:<32} {:>6} {:>6}  net  marked", "case", "words", "loose");
+        for (i, (title, body)) in NEW_PARTS.into_iter().enumerate() {
+            cases.push(Case {
+                code: Some((LOOKUP_HUNK, LOOKUP_LINE)),
+                ..case(
+                    ["probe r2: memory", "probe r2: unwrap", "probe r2: tenant"][i],
+                    LOOKUP_NOTE,
+                    title,
+                    body,
+                    (false, false, false),
+                )
+            });
+        }
+        cases.push(Case {
+            general: true,
+            ..case(
+                "probe r2: tests vs token leak",
+                "Please add a test for the token refresh path.",
+                "Token is logged in plain text",
+                "The token is logged by the debug call below; the refresh path leaks it.",
+                (false, false, false),
+            )
+        });
+        cases.push(Case {
+            general: true,
+            ..case(
+                "probe r2: expiry vs race",
+                "The cache never expires entries.",
+                "Cache entries race on concurrent writes",
+                "Two writers to the cache can interleave so entries are lost; the cache needs a lock.",
+                // Marked by the agent, two of the title's five words are
+                // the note's: set aside when medium, kept when high.
+                (false, true, false),
+            )
+        });
+        cases.push(Case {
+            code: Some(("@@ -8,3 +8,3 @@\n ctx\n ctx2\n+let first = items[0];", "")),
+            line: 80,
+            ..case(
+                "probe r2: same mistake at new 80",
+                EMPTY_LIST,
+                "Indexing an empty items list panics",
+                "`items[0]` panics when `items` is empty. Guard with `is_empty()` or use `first()`.",
+                (false, true, false),
+            )
+        });
+        eprintln!("{:<34} {:>6}  net    marked high", "case", "words");
         for c in &cases {
-            let st = stored(AUTHOR, &[c.note], true);
-            let f = finding("src/cache.rs", 10, c.title, c.body);
+            let mut st = stored(AUTHOR, &[c.note], !c.general);
+            if let Some((hunk, _)) = c.code {
+                st = with_hunk(st, hunk);
+            }
             let raised = raised_points(&[(&st, None)], &[]);
-            let s = raised[0].scores(&Candidate::finding(&f, None));
-            let net = judge(&st, None, &f, false).is_some();
-            let marked = judge(&st, None, &f, true).is_some();
-            eprintln!(
-                "{:<32} {:>6.2} {:>6.2}  {:<4} {}",
-                c.name, s.words, s.loose, net, marked
+            let line_text = c.code.map(|(_, l)| l).filter(|l| !l.is_empty());
+            let f = finding("src/cache.rs", c.line, c.title, c.body);
+            let high = of_severity(f.clone(), Severity::High);
+            let words = raised[0].score(&Candidate::finding(&f, line_text));
+            let got = (
+                raised[0]
+                    .judge(&Candidate::finding(&f, line_text), false)
+                    .is_some(),
+                raised[0]
+                    .judge(&Candidate::finding(&f, line_text), true)
+                    .is_some(),
+                raised[0]
+                    .judge(&Candidate::finding(&high, line_text), true)
+                    .is_some(),
             );
-            assert_eq!((net, marked), (c.net, c.marked), "{}: {s:?}", c.name);
+            eprintln!(
+                "{:<34} {:>6.2}  {:<6} {:<6} {}",
+                c.name, words, got.0, got.1, got.2
+            );
+            assert_eq!(got, c.expect, "{}: {words}", c.name);
         }
     }
 }

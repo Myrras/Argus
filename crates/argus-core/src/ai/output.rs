@@ -21,7 +21,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
-use super::dedupe::Repeat;
+use super::dedupe::{RaisedRef, Repeat};
 use super::model::{Severity, VerdictLabel};
 use crate::ids::ThreadId;
 use crate::provider::Side;
@@ -41,6 +41,9 @@ pub(crate) struct RawFinding {
     /// Set by `super::dedupe::classify` when the review already makes
     /// this point.
     pub repeat: Option<Repeat>,
+    /// Set by `super::dedupe::classify`: the points of [`Self::related`]
+    /// as raised points (shown as "related to …" when not a repeat).
+    pub related_to: Vec<RaisedRef>,
 }
 
 /// One "look here yourself" item as the agent wrote it.
@@ -49,6 +52,8 @@ pub(crate) struct RawCheck {
     pub text: String,
     /// As [`RawFinding::related`].
     pub related: Vec<String>,
+    /// As [`RawFinding::repeat`].
+    pub repeat: Option<Repeat>,
 }
 
 /// Tests write items as plain text (nothing related) and compare by text.
@@ -58,6 +63,7 @@ impl From<&str> for RawCheck {
         RawCheck {
             text: text.into(),
             related: Vec::new(),
+            repeat: None,
         }
     }
 }
@@ -91,7 +97,7 @@ pub(crate) struct AgentOutput {
 pub(crate) struct RunOutput {
     /// Repeats of the review included, marked ([`RawFinding::repeat`]).
     pub findings: Vec<RawFinding>,
-    /// Repeats of the review left out (counted in `skipped_checklist`).
+    /// Repeats of the review included, marked ([`RawCheck::repeat`]).
     pub checklist: Vec<RawCheck>,
     pub verdicts: Vec<(ThreadId, VerdictLabel, String)>,
     pub dropped_findings: u32,
@@ -99,7 +105,8 @@ pub(crate) struct RunOutput {
     /// Findings marked as repeats of the review (an existing thread or a
     /// posted finding; see `super::dedupe`): stored, listed apart.
     pub dropped_duplicates: u32,
-    /// Checklist items left out as repeats of the review.
+    /// Checklist items marked as repeats of the review: stored, listed
+    /// apart.
     pub skipped_checklist: u32,
     /// The diff the agent was given: its right side (where new-side lines
     /// are numbered) and left side (old-side lines; the watermark for a
@@ -192,6 +199,7 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
             body: string(o, "body", &at)?.trim().to_string(),
             related: related(o, &at)?,
             repeat: None,
+            related_to: Vec::new(),
         });
     }
     for (i, item) in array(top, "checklist")?.iter().enumerate() {
@@ -201,6 +209,7 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
         out.checklist.push(RawCheck {
             text: non_empty(o, "text", &at)?.to_string(),
             related: related(o, &at)?,
+            repeat: None,
         });
     }
     for (i, item) in array(top, "verdicts")?.iter().enumerate() {
@@ -222,19 +231,22 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
 /// The key of the related-thread list on findings and checklist items.
 const RELATED: &str = "relatedThreadIds";
 
-/// `relatedThreadIds` of `o`: an array of strings (trimmed, empty ones
-/// left out); absent is empty.
+/// `relatedThreadIds` of `o`: an array whose strings are kept (trimmed,
+/// empty ones left out); absent is empty. Entries that are not strings are
+/// dropped: the list is only a hint, so a stray number must not fail the
+/// whole answer (unknown ids are dropped the same way by [`filter`]).
 fn related(o: &Map<String, Value>, at: &str) -> Result<Vec<String>, String> {
     let Some(v) = o.get(RELATED) else {
         return Ok(Vec::new());
     };
-    let bad = || format!("{at}.{RELATED} must be an array of thread id strings");
-    v.as_array()
-        .ok_or_else(bad)?
+    Ok(v.as_array()
+        .ok_or_else(|| format!("{at}.{RELATED} must be an array of thread id strings"))?
         .iter()
-        .map(|id| id.as_str().map(|s| s.trim().to_string()).ok_or_else(bad))
-        .filter(|id| !matches!(id, Ok(s) if s.is_empty()))
-        .collect()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn only_keys(o: &Map<String, Value>, allowed: &[&str], at: &str) -> Result<(), String> {
@@ -743,6 +755,7 @@ mod tests {
                 body: format!("The token {tok} is printed."),
                 related: Vec::new(),
                 repeat: None,
+                related_to: Vec::new(),
             }],
             checklist: vec![format!("Rotate {tok}").as_str().into()],
             verdicts: vec![(
@@ -873,10 +886,6 @@ mod tests {
                 "findings[0].relatedThreadIds must be an array",
             ),
             (
-                r#"{"findings":[],"checklist":[{"text":"t","relatedThreadIds":[1]}],"verdicts":[]}"#,
-                "checklist[0].relatedThreadIds must be an array",
-            ),
-            (
                 r#"{"findings":[],"checklist":[{"text":"t","related":[]}],"verdicts":[]}"#,
                 "\"related\" that is not in the contract (allowed: text, relatedThreadIds)",
             ),
@@ -884,6 +893,13 @@ mod tests {
             let err = parse(input).unwrap_err();
             assert!(err.contains(expect), "{input}: got {err:?}");
         }
+        // A non-string entry is dropped, not the whole answer: the list is
+        // a hint, and one bad entry must not cost the run its findings.
+        let mixed = format!(
+            r#"{{"findings":[],"checklist":[{{"text":"t","relatedThreadIds":[1,null,{{"id":"x"}},"{known}"]}}],"verdicts":[]}}"#
+        );
+        let parsed = parse(&mixed).unwrap();
+        assert_eq!(parsed.checklist[0].related, vec![known.to_string()]);
     }
 
     #[test]
@@ -908,6 +924,7 @@ mod tests {
             body: String::new(),
             related: Vec::new(),
             repeat: None,
+            related_to: Vec::new(),
         };
         let v = |id: String| RawVerdict {
             thread_id: id,

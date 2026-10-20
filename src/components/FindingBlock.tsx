@@ -15,13 +15,14 @@
 
 import { useEffect } from "react";
 
-import type { FindingId, ReviewId } from "../ipc/types";
+import type { FindingId, ReviewId, StoredThread } from "../ipc/types";
 import {
   SEVERITY_LABEL,
   SEVERITY_TONE,
   findingLocation,
   fromEarlierRound,
   postable,
+  relatedLabel,
 } from "../lib/findings";
 import {
   openPosted,
@@ -31,11 +32,14 @@ import {
   useFindingUi,
 } from "../state/aiStore";
 import { FOCUS } from "../lib/focusRequests";
+import { useThreadStore } from "../state/threadStore";
 import { Badge } from "./Badge";
 import { CommentComposer } from "./CommentComposer";
 import { ExternalLinkIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import styles from "./FindingBlock.module.css";
+
+const NO_THREADS: StoredThread[] = [];
 
 export function FindingBlock({
   reviewId,
@@ -62,6 +66,9 @@ export function FindingBlock({
   const closeEditor = useAiStore((s) => s.closeEditor);
   const resetEdit = useAiStore((s) => s.resetEdit);
   const posting = useAiStore((s) => !!s.posting[reviewId]);
+  const threads = useThreadStore(
+    (s) => s.byReview[reviewId]?.threads ?? NO_THREADS,
+  );
 
   const editing = ui.editor !== null;
   // A new height after React commits it (CodeMirror re-measures).
@@ -73,6 +80,7 @@ export function FindingBlock({
   if (!f) return null;
   const canPost = postable(f);
   const earlier = fromEarlierRound(f, round);
+  const related = relatedLabel(f, threads);
 
   return (
     <article
@@ -113,6 +121,7 @@ export function FindingBlock({
           <span className={`${styles.where} mono`}>{findingLocation(f)}</span>
         )}
         {earlier && <Badge>from round {f.round}</Badge>}
+        {related && <Badge>{related}</Badge>}
         {ui.edit !== null && !f.postedAt && <Badge tone="accent">Edited</Badge>}
         {f.dismissed && <Badge>Dismissed</Badge>}
         <span className={styles.spacer} />

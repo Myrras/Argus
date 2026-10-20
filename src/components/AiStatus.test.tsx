@@ -9,7 +9,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { AiRunState } from "../ipc/types";
+import type { AiRunState, Finding } from "../ipc/types";
 import { useAiStore } from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { aiRun, finding } from "../test/aiFixtures";
@@ -21,8 +21,10 @@ const initial = useAiStore.getState();
 const r = review();
 
 let run: AiRunState;
+let skipped: Finding[];
 
 beforeEach(() => {
+  skipped = [];
   mockInvoke.mockReset();
   useAiStore.setState({ ...initial, runs: {}, byReview: {}, ui: {} }, true);
   useLayoutStore.setState({ aiPanelOpen: true });
@@ -33,6 +35,8 @@ beforeEach(() => {
       case "run_ai":
       case "cancel_ai":
         return Promise.resolve(run);
+      case "list_skipped_findings":
+        return Promise.resolve(skipped);
       case "list_findings":
         return Promise.resolve([
           finding({ reviewId: r.id }),
@@ -59,8 +63,10 @@ describe("AiStatus", () => {
     );
   });
 
-  it("names the skipped repeats in the chip's tooltip", async () => {
-    run = aiRun({ reviewId: r.id, droppedDuplicates: 2 });
+  it("names the skipped repeats in the chip's tooltip, counted from the list", async () => {
+    // The run's own count is stale (a rerun, a Show anyway): the list wins.
+    run = aiRun({ reviewId: r.id, droppedDuplicates: 5 });
+    skipped = [finding({ reviewId: r.id }), finding({ reviewId: r.id })];
     render(<AiStatus review={r} />);
     await waitFor(() =>
       expect(chip()).toHaveAttribute(

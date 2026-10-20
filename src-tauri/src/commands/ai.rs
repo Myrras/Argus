@@ -70,6 +70,17 @@ pub async fn list_skipped_findings(
     blocking(state, move |core| core.skipped_findings(id)).await
 }
 
+/// The review's checklist items set aside as already raised in the review,
+/// with what each repeats.
+#[tauri::command]
+pub async fn list_skipped_checklist(
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<Vec<ChecklistItem>, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    blocking(state, move |core| core.skipped_checklist(id)).await
+}
+
 /// Queue a run of the review now; `invalidInput` when the AI pass is off.
 #[tauri::command]
 pub async fn run_ai(state: State<'_, AppState>, review_id: String) -> Result<AiRunState, IpcError> {
@@ -107,6 +118,17 @@ pub async fn show_finding_anyway(
 ) -> Result<Finding, IpcError> {
     let id: FindingId = parse_id(&finding_id, "findingId")?;
     blocking(state, move |core| core.show_finding_anyway(id)).await
+}
+
+/// Show a checklist item set aside as already raised anyway: it becomes a
+/// normal item. Local only.
+#[tauri::command]
+pub async fn show_checklist_item_anyway(
+    state: State<'_, AppState>,
+    checklist_id: String,
+) -> Result<ChecklistItem, IpcError> {
+    let id: ChecklistId = parse_id(&checklist_id, "checklistId")?;
+    blocking(state, move |core| core.show_checklist_item_anyway(id)).await
 }
 
 #[tauri::command]

@@ -558,8 +558,9 @@ fn a_finding_set_aside_as_a_repeat_writes_nothing_until_shown_and_posted() {
     let theirs = ThreadId::from_key(id, MY_THREAD);
     agent.answer(serde_json::json!({
         "findings": [
-            // On a line of the diff (postable), marked as the thread's.
-            {"path": PATH, "line": 5, "side": "new", "severity": "high",
+            // On a line of the diff (postable), marked as the thread's
+            // (medium: a high one is never set aside on the mark alone).
+            {"path": PATH, "line": 5, "side": "new", "severity": "medium",
              "title": "Stale widget cache entries survive a reload",
              "body": "After a reload the cache keeps stale widget entries.",
              "relatedThreadIds": [theirs.to_string()]},
@@ -598,6 +599,22 @@ fn a_finding_set_aside_as_a_repeat_writes_nothing_until_shown_and_posted() {
         .map(|c| c.text)
         .collect();
     assert_eq!(items, ["Is the rename intended?"]);
+    // The repeated checklist item: listed apart, shown anyway locally.
+    let skipped_items = core.skipped_checklist(id).unwrap();
+    assert_eq!(skipped_items.len(), 1);
+    assert_eq!(
+        skipped_items[0]
+            .repeat_of
+            .as_ref()
+            .and_then(|r| r.thread_id),
+        Some(theirs)
+    );
+    let item = core
+        .show_checklist_item_anyway(skipped_items[0].id)
+        .unwrap();
+    assert!(item.repeat_of.is_some());
+    assert_eq!(core.checklist(id).unwrap().len(), 2);
+    assert!(core.skipped_checklist(id).unwrap().is_empty());
 
     // Set aside: not postable.
     let post = |core: &Core| {
@@ -625,6 +642,7 @@ fn a_finding_set_aside_as_a_repeat_writes_nothing_until_shown_and_posted() {
     core.run_ai(id).unwrap();
     assert!(core.ai.wait_idle(Duration::from_secs(20)));
     assert_eq!(core.findings(id).unwrap().len(), 2);
+    assert_eq!(core.checklist(id).unwrap().len(), 2);
     assert_eq!(recorder.writes(), Vec::<&str>::new());
 
     // Posting it is the one write.

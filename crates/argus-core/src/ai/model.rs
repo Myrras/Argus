@@ -15,11 +15,15 @@
 //!   id: string; reviewId: string; round: number; path: string; line: number;
 //!   side: "old" | "new"; severity: Severity; title: string; body: string;
 //!   dismissed: boolean; postedAt: string | null; postedUrl: string | null;
-//!   repeatOf: RepeatOf | null;
+//!   repeatOf: RepeatOf | null; relatedTo: RelatedRef[];
 //! }
 //! type RepeatReason = "agentMarked" | "similar";
 //! interface RepeatOf { reason: RepeatReason; threadId: string | null; findingId: string | null }
-//! interface ChecklistItem { id: string; reviewId: string; round: number; text: string; checked: boolean }
+//! interface RelatedRef { threadId: string | null; findingId: string | null }
+//! interface ChecklistItem {
+//!   id: string; reviewId: string; round: number; text: string; checked: boolean;
+//!   repeatOf: RepeatOf | null;
+//! }
 //! interface FindingPost { findingId: string; body?: string }  // body: the user's edit
 //! type FindingPostResult = { findingId: string } & (
 //!   | { status: "posted"; postedUrl: string; postedAt: string }
@@ -155,7 +159,7 @@ pub struct AiRunState {
     /// (`Core::skipped_findings`), never shown as findings.
     pub dropped_duplicates: u32,
     /// Checklist items the latest successful run left out for the same
-    /// reason (counted only).
+    /// reason (stored, listed apart like the findings).
     pub skipped_checklist: u32,
     /// Whether Argus can guarantee the configured agent only reads. False
     /// for `auggie`: its user-configured MCP tools cannot be turned off, so
@@ -234,6 +238,12 @@ pub struct Finding {
     /// finding with it is listed under "Skipped as already raised" until
     /// the user shows it anyway (it keeps the mark then).
     pub repeat_of: Option<RepeatOf>,
+    /// The points of the review the agent said this finding overlaps
+    /// (`relatedThreadIds`) when it does not repeat them: shown as a tag
+    /// ("related to bob's comment"), so a new point on a discussed line is
+    /// seen as such. A high-severity finding the agent marked is never set
+    /// aside on that mark alone; it lists here instead.
+    pub related_to: Vec<RelatedRef>,
 }
 
 /// Why a finding counts as a repeat of the review (`super::dedupe`).
@@ -270,6 +280,15 @@ impl RepeatReason {
 #[serde(rename_all = "camelCase")]
 pub struct RepeatOf {
     pub reason: RepeatReason,
+    pub thread_id: Option<ThreadId>,
+    pub finding_id: Option<FindingId>,
+}
+
+/// A point of the review a finding relates to: a thread, or a finding the
+/// user posted whose thread was not fetched yet (exactly one is set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelatedRef {
     pub thread_id: Option<ThreadId>,
     pub finding_id: Option<FindingId>,
 }
@@ -316,6 +335,10 @@ pub struct ChecklistItem {
     pub round: u32,
     pub text: String,
     pub checked: bool,
+    /// Set when the run found that the review already makes this point: the
+    /// item is listed under "Skipped as already raised" until the user
+    /// shows it anyway (it keeps the mark then).
+    pub repeat_of: Option<RepeatOf>,
 }
 
 /// How far a later round addressed one of the user's threads.

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use argus_core::ai::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPostOutcome,
-    FindingPostResult, RepeatOf, RepeatReason, Severity, Verdict, VerdictLabel,
+    FindingPostResult, RelatedRef, RepeatOf, RepeatReason, Severity, Verdict, VerdictLabel,
 };
 use argus_core::files::{FileEntry, ReviewFiles};
 use argus_core::history::{
@@ -457,6 +457,10 @@ fn current() -> Value {
             thread_id: Some(thread_id),
             finding_id: Some(finding_id),
         }),
+        related_to: vec![RelatedRef {
+            thread_id: Some(thread_id),
+            finding_id: Some(finding_id),
+        }],
     };
     let checklist = ChecklistItem {
         id: ChecklistId::new(),
@@ -464,6 +468,11 @@ fn current() -> Value {
         round: 2,
         text: "Is this intended?".into(),
         checked: false,
+        repeat_of: Some(RepeatOf {
+            reason: RepeatReason::Similar,
+            thread_id: Some(thread_id),
+            finding_id: Some(finding_id),
+        }),
     };
     let verdict = Verdict {
         thread_id,

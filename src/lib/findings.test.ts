@@ -10,9 +10,11 @@ import {
   findingPlacement,
   fromEarlierRound,
   groupBySeverity,
+  relatedLabel,
   repeatTarget,
-  skippedChecklistText,
-  skippedDuplicatesText,
+  skippedHeader,
+  skippedSummary,
+  skippedText,
   sortFindings,
   splitChecklist,
 } from "./findings";
@@ -107,10 +109,17 @@ describe("findings", () => {
     );
   });
 
-  it("count the findings left out as already raised", () => {
-    expect(skippedDuplicatesText(aiRun())).toBeNull();
-    expect(skippedDuplicatesText(aiRun({ droppedDuplicates: 2 }))).toBe(
-      "2 skipped: already raised in the review",
+  it("count what is set aside as already raised, from the listed points", () => {
+    const none = skippedSummary([], []);
+    expect(skippedText(none)).toBeNull();
+    const s = skippedSummary(
+      [finding({ severity: "high" }), finding({ severity: "low" })],
+      [checklistItem()],
+    );
+    expect(s).toEqual({ total: 3, high: 1 });
+    expect(skippedText(s)).toBe("3 skipped: already raised in the review");
+    expect(skippedText(skippedSummary([finding()], []))).toBe(
+      "1 skipped: already raised in the review",
     );
   });
 });
@@ -147,10 +156,50 @@ describe("set-aside findings", () => {
     expect(repeatTarget(f(null), [])).toBe("an existing comment");
   });
 
-  it("counts the checklist items left out", () => {
-    expect(skippedChecklistText(aiRun())).toBeNull();
-    expect(skippedChecklistText(aiRun({ skippedChecklist: 1 }))).toBe(
-      "1 checklist item left out: already raised in the review",
+  it("heads the skipped list with its count and how many are high", () => {
+    expect(skippedHeader({ total: 3, high: 0 })).toBe(
+      "Skipped as already raised (3)",
     );
+    expect(skippedHeader({ total: 3, high: 1 })).toBe(
+      "Skipped as already raised (3, 1 high)",
+    );
+  });
+
+  it("names what a kept finding relates to", () => {
+    const bobs = thread({ author: "bob-fixture" });
+    const carols = thread({ author: "carol-fixture" });
+    const mine = thread({ mine: true, author: "me-fixture" });
+    const threads = [bobs, carols, mine];
+    const ref = (threadId: string | null, findingId: string | null = null) => ({
+      threadId,
+      findingId,
+    });
+    expect(relatedLabel(finding(), threads)).toBeNull();
+    expect(
+      relatedLabel(finding({ relatedTo: [ref(bobs.threadId)] }), threads),
+    ).toBe("related to bob-fixture's comment");
+    expect(
+      relatedLabel(
+        finding({ relatedTo: [ref(mine.threadId), ref(null, "x")] }),
+        threads,
+      ),
+    ).toBe("related to your comment and 1 more");
+    expect(relatedLabel(finding({ relatedTo: [ref("gone")] }), threads)).toBe(
+      "related to an existing comment",
+    );
+    // A finding still set aside says what it repeats instead.
+    expect(
+      relatedLabel(
+        finding({
+          relatedTo: [ref(carols.threadId)],
+          repeatOf: {
+            reason: "agentMarked",
+            threadId: carols.threadId,
+            findingId: null,
+          },
+        }),
+        threads,
+      ),
+    ).toBeNull();
   });
 });

@@ -12,7 +12,8 @@
 //! - [`job`]: one run end to end (diff, workspace, prompt, retry).
 //! - [`runtime`]: queueing (per review serial, two at once), `ai:state`,
 //!   and the shutdown that kills running agents on quit.
-//! - `store`: SQLite (the v1 tables plus `ai_runs`, migration 5).
+//! - `store`: SQLite (the v1 tables plus `ai_runs`, migration 5, and the
+//!   repeat marks of migrations 9 and 10).
 //! - `api`: the [`Core`](crate::Core) methods.
 //!
 //! A run only reads from the platforms (`fetch_files`) and posts nothing.
@@ -33,7 +34,8 @@ pub mod model;
 pub use job::sweep_stale_temp_dirs;
 pub use model::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost,
-    FindingPostOutcome, FindingPostResult, RepeatOf, RepeatReason, Severity, Verdict, VerdictLabel,
+    FindingPostOutcome, FindingPostResult, RelatedRef, RepeatOf, RepeatReason, Severity, Verdict,
+    VerdictLabel,
 };
 pub use prompt::ThreadSnapshot;
 pub use runtime::AiStateCallback;

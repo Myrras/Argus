@@ -8,6 +8,7 @@ import type {
   AiRunState,
   ChecklistItem,
   Finding,
+  RelatedRef,
   RepeatReason,
   Severity,
   StoredThread,
@@ -145,24 +146,38 @@ export function findingCount(n: number): string {
   return `${n} ${n === 1 ? "finding" : "findings"}`;
 }
 
-/**
- * "2 skipped: already raised in the review" for the findings the latest
- * run left out as repeats of an existing thread or a posted finding; `null`
- * when it left out none.
- */
-export function skippedDuplicatesText(run: AiRunState): string | null {
-  const n = run.droppedDuplicates;
-  return n > 0 ? `${n} skipped: already raised in the review` : null;
+/** What is set aside as already raised: how many, and how many are high. */
+export interface SkippedSummary {
+  total: number;
+  high: number;
 }
 
 /**
- * "1 checklist item left out: already raised in the review"; `null` when
- * the latest run left out none.
+ * The set-aside findings and checklist items counted, from the lists the
+ * panel shows (never the run's own counts, which a rerun or "Show anyway"
+ * leaves behind).
  */
-export function skippedChecklistText(run: AiRunState): string | null {
-  const n = run.skippedChecklist;
-  if (n <= 0) return null;
-  return `${n} checklist ${n === 1 ? "item" : "items"} left out: already raised in the review`;
+export function skippedSummary(
+  findings: readonly Finding[],
+  items: readonly ChecklistItem[],
+): SkippedSummary {
+  return {
+    total: findings.length + items.length,
+    high: findings.filter((f) => f.severity === "high").length,
+  };
+}
+
+/** "Skipped as already raised (3)", or "(3, 1 high)" with high ones. */
+export function skippedHeader(s: SkippedSummary): string {
+  const high = s.high > 0 ? `, ${s.high} high` : "";
+  return `Skipped as already raised (${s.total}${high})`;
+}
+
+/** "2 skipped: already raised in the review"; `null` for none. */
+export function skippedText(s: SkippedSummary): string | null {
+  return s.total > 0
+    ? `${s.total} skipped: already raised in the review`
+    : null;
 }
 
 /** Why a finding was set aside, for its tooltip. */
@@ -173,15 +188,14 @@ export const REPEAT_REASON_HINT: Record<RepeatReason, string> = {
 };
 
 /**
- * What a set-aside finding repeats, for "repeats …": "bob's comment",
- * "your comment" (a thread the user started), "your posted finding", or
- * "an existing comment" when the thread is not loaded.
+ * A point of the review by who made it: "bob's comment", "your comment" (a
+ * thread the user started), "your posted finding", or "an existing comment"
+ * when the thread is not loaded.
  */
-export function repeatTarget(
-  f: Finding,
+export function pointLabel(
+  of: RelatedRef | null,
   threads: readonly StoredThread[],
 ): string {
-  const of = f.repeatOf;
   if (!of) return "an existing comment";
   if (of.threadId) {
     const t = threads.find((x) => x.threadId === of.threadId);
@@ -189,6 +203,29 @@ export function repeatTarget(
     return t.startedByMe ? "your comment" : `${t.author}'s comment`;
   }
   return of.findingId ? "your posted finding" : "an existing comment";
+}
+
+/** What a set-aside finding or checklist item repeats, for "repeats …". */
+export function repeatTarget(
+  f: Pick<Finding, "repeatOf">,
+  threads: readonly StoredThread[],
+): string {
+  return pointLabel(f.repeatOf, threads);
+}
+
+/**
+ * "related to bob's comment" ("… and 1 more") for a finding the agent tied
+ * to points of the review it does not repeat; `null` for none, or for one
+ * marked as a repeat (it says "repeats …" instead).
+ */
+export function relatedLabel(
+  f: Finding,
+  threads: readonly StoredThread[],
+): string | null {
+  const [first, ...rest] = f.relatedTo;
+  if (!first || f.repeatOf) return null;
+  const more = rest.length > 0 ? ` and ${rest.length} more` : "";
+  return `related to ${pointLabel(first, threads)}${more}`;
 }
 
 /** The review header chip's text for a run with `findings` findings shown. */

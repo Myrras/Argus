@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { Finding, FindingPostResult } from "../ipc/types";
+import type { ChecklistItem, Finding, FindingPostResult } from "../ipc/types";
 import { subscribeAiEvents, useAiStore } from "./aiStore";
 import { useBackendSettingsStore } from "./backendSettingsStore";
 import { useReviewStore } from "./reviewStore";
@@ -41,6 +41,7 @@ const WRITES = [
   "set_checklist_checked",
   "set_verdict_override",
   "show_finding_anyway",
+  "show_checklist_item_anyway",
 ];
 
 const writes = () =>
@@ -52,6 +53,7 @@ let findings = [
 ];
 let postResults: FindingPostResult[] = [];
 let skipped: Finding[] = [];
+let skippedItems: ChecklistItem[] = [];
 
 function backend(cmd: string, args?: unknown) {
   const a = (args ?? {}) as Record<string, unknown>;
@@ -64,6 +66,10 @@ function backend(cmd: string, args?: unknown) {
       return Promise.resolve(skipped);
     case "show_finding_anyway":
       return Promise.resolve(skipped[0]);
+    case "list_skipped_checklist":
+      return Promise.resolve(skippedItems);
+    case "show_checklist_item_anyway":
+      return Promise.resolve(skippedItems[0]);
     case "list_checklist":
       return Promise.resolve([checklistItem({ reviewId: ID })]);
     case "list_verdicts":
@@ -92,6 +98,13 @@ beforeEach(() => {
     finding({
       reviewId: ID,
       title: "Already said",
+      repeatOf: { reason: "similar", threadId: uuidThread, findingId: null },
+    }),
+  ];
+  skippedItems = [
+    checklistItem({
+      reviewId: ID,
+      text: "Said already?",
       repeatOf: { reason: "similar", threadId: uuidThread, findingId: null },
     }),
   ];
@@ -285,6 +298,23 @@ describe("aiStore", () => {
     const out = useAiStore.getState().byReview[ID];
     expect(out.findings.map((f) => f.title)).toEqual(["Low one", "High one"]);
     expect(out.skipped?.map((f) => f.title)).toEqual(["Already said"]);
+    expect(mockInvoke).toHaveBeenCalledWith("list_skipped_checklist", {
+      reviewId: ID,
+    });
+    expect(out.skippedChecklist?.map((i) => i.text)).toEqual(["Said already?"]);
+  });
+
+  it("shows a set-aside checklist item anyway (local) and re-reads", async () => {
+    await useAiStore.getState().load(ID);
+    mockInvoke.mockClear();
+    await useAiStore.getState().showItemAnyway(skippedItems[0]);
+    expect(writes()).toEqual([
+      ["show_checklist_item_anyway", { checklistId: skippedItems[0].id }],
+    ]);
+    expect(mockInvoke).toHaveBeenCalledWith("list_checklist", { reviewId: ID });
+    expect(mockInvoke).toHaveBeenCalledWith("list_skipped_checklist", {
+      reviewId: ID,
+    });
   });
 
   it("shows a set-aside finding anyway (local) and re-reads; never posts it", async () => {
