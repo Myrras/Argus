@@ -222,6 +222,12 @@ when it merges.
   and not a later comment after the author answered someone else, also by
   quote and with a mention ("> their line" then "@carol fixed").
 
+### Changed
+
+- A clearer review header: the title with its actions top right, the round
+  next to the status, and icon buttons with tooltips for the AI pass, the
+  diff layout, the file list and the shortcut help.
+
 ## [0.1.0] - 2026-10-16
 
 ### Added

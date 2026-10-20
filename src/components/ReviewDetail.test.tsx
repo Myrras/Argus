@@ -204,7 +204,9 @@ describe("ReviewDetail", () => {
     expect(
       screen.getByRole("heading", { name: "Add widget caching" }),
     ).toBeInTheDocument();
+    // The round sits on the status badge: "R3" for the eye, named in full.
     expect(screen.getByText("Round 3")).toBeInTheDocument();
+    expect(screen.getByTitle("Round 3")).toHaveTextContent("R3");
     expect(screen.getByText("Needs re-review")).toBeInTheDocument();
     expect(screen.getByText("New commits")).toBeInTheDocument();
     expect(screen.getByText("1 of your threads untouched")).toBeInTheDocument();

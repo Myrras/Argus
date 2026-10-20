@@ -5,8 +5,9 @@
  * - Navigation (`data-slot="file-tree"`, collapsible, `layoutStore`): a
  *   filter box, the Conversation entry, then the files as folders or a flat
  *   list, per file its status, +/−, threads and a Viewed checkbox.
- * - The page (`data-slot="diff"`): a toolbar ("N of M files viewed",
- *   "Since my last review" in later rounds, unified / side by side) over the
+ * - The page (`data-slot="diff"`): a toolbar ("N of M files viewed" with a
+ *   progress line along its edge, "Since my last review" in later rounds,
+ *   unified / side by side as icons, the shortcut help) over the
  *   Conversation section (`ConversationCard`: the threads without a code
  *   reference) and every shown file's `FileDiffCard` (its diff with its
  *   threads), in the tree's order. j/k (or the rebound keys) walk the
@@ -23,19 +24,34 @@ import {
   threadsOnFile,
 } from "../lib/diffThreads";
 import { filterFiles, orderFiles } from "../lib/fileTree";
-import { formatBinding } from "../lib/keymap";
+import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { usePageFocus } from "../lib/usePageFocus";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useHistoryStore } from "../state/historyStore";
-import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
+import {
+  useLayoutStore,
+  type DiffLayout,
+  type FileListMode,
+} from "../state/layoutStore";
+import { useOverlayStore } from "../state/overlayStore";
 import { useThreadStore } from "../state/threadStore";
 import { ConversationCard } from "./ConversationCard";
 import { FileDiffCard } from "./FileDiffCard";
 import { FileTree } from "./FileTree";
-import { FileTreeIcon, PanelCloseIcon, PanelOpenIcon } from "./icons";
+import {
+  DiffSplitIcon,
+  DiffUnifiedIcon,
+  FileTreeIcon,
+  FlatListIcon,
+  FolderListIcon,
+  KeyboardIcon,
+  PanelCloseIcon,
+  PanelOpenIcon,
+  SinceIcon,
+} from "./icons";
 import styles from "./ReviewView.module.css";
 
 const EMPTY_THREADS: StoredThread[] = [];
@@ -66,6 +82,7 @@ export function ReviewView({
     (s) => `${r.host}/${r.repo}` in (s.settings?.clonePaths ?? {}),
   );
   const keymap = useKeymap();
+  const showOverlay = useOverlayStore((s) => s.show);
 
   const [query, setQuery] = useState("");
   // Keyboard moves (n/p, j/k, the palette) put the DOM focus on the item.
@@ -171,23 +188,12 @@ export function ReviewView({
               <span className={styles.treeTitle}>
                 Files {files && <span className={styles.count}>{total}</span>}
               </span>
-              <button
-                type="button"
-                className={`ghost ${styles.modeToggle}`}
-                onClick={() =>
-                  setListMode(listMode === "tree" ? "flat" : "tree")
-                }
-                title={
-                  listMode === "tree" ? "Show a flat list" : "Show folders"
-                }
-              >
-                {listMode === "tree" ? "Flat" : "Tree"}
-              </button>
+              <ListModeToggle mode={listMode} onChange={setListMode} />
             </>
           )}
           <button
             type="button"
-            className={`ghost ${styles.treeToggle}`}
+            className="iconButton"
             aria-expanded={open}
             aria-label={
               open ? "Collapse the file tree" : "Expand the file tree"
@@ -242,7 +248,11 @@ export function ReviewView({
         aria-label={`Changes in ${reviewRef(r)}`}
       >
         <div className={styles.toolbar}>
-          <span className={styles.progress} aria-live="polite">
+          <span
+            className={styles.progress}
+            aria-live="polite"
+            title={files ? `${viewed} of ${total} files viewed` : undefined}
+          >
             {files ? `${viewed} of ${total} files viewed` : ""}
           </span>
           {canSince && (
@@ -250,6 +260,7 @@ export function ReviewView({
               type="button"
               className={styles.since}
               aria-pressed={since}
+              aria-label="Since my last review"
               onClick={() => void load(r.id, !since)}
               title={
                 since
@@ -257,17 +268,29 @@ export function ReviewView({
                   : "Only what changed since you last marked a round reviewed"
               }
             >
-              Since my last review
+              <SinceIcon />
+              <span className={styles.sinceLabel}>Since my last review</span>
             </button>
           )}
           <LayoutToggle layout={layout} onChange={setLayout} />
-          <span className={styles.keys}>
-            {formatBinding(keymap.nextFile[0] ?? "")}/
-            {formatBinding(keymap.prevFile[0] ?? "")} next/prev ·{" "}
-            {formatBinding(keymap.toggleViewed[0] ?? "")} viewed
-            {keymap.showShortcuts[0] &&
-              ` · ${formatBinding(keymap.showShortcuts[0])} all keys`}
-          </span>
+          <button
+            type="button"
+            className="iconButton"
+            aria-label="Keyboard shortcuts"
+            title={withHint("Keyboard shortcuts", keymap, "showShortcuts")}
+            onClick={() => showOverlay("help")}
+          >
+            <KeyboardIcon />
+          </button>
+          {/* How much is viewed, along the toolbar's bottom edge. */}
+          {files && total > 0 && (
+            <span
+              className={styles.meter}
+              data-done={viewed === total ? "true" : "false"}
+              style={{ transform: `scaleX(${viewed / total})` }}
+              aria-hidden
+            />
+          )}
         </div>
         {entry?.error && (
           <div className={styles.error} role="alert">
@@ -340,17 +363,62 @@ function LayoutToggle({
     <div className={styles.segmented} role="group" aria-label="Diff layout">
       {(
         [
-          ["unified", "Unified"],
-          ["split", "Side by side"],
+          [
+            "unified",
+            "Unified",
+            "One column, old and new lines interleaved",
+            DiffUnifiedIcon,
+          ],
+          [
+            "split",
+            "Side by side",
+            "Old and new in two columns",
+            DiffSplitIcon,
+          ],
         ] as const
-      ).map(([id, label]) => (
+      ).map(([id, label, hint, Icon]) => (
         <button
           key={id}
           type="button"
+          className="iconButton"
           aria-pressed={layout === id}
+          aria-label={label}
+          title={`${label}: ${hint}`}
           onClick={() => onChange(id)}
         >
-          {label}
+          <Icon />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** The file list as folders or as one flat list of paths. */
+function ListModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: FileListMode;
+  onChange: (mode: FileListMode) => void;
+}) {
+  return (
+    <div className={styles.segmented} role="group" aria-label="File list">
+      {(
+        [
+          ["tree", "Show folders", FolderListIcon],
+          ["flat", "Show a flat list", FlatListIcon],
+        ] as const
+      ).map(([id, label, Icon]) => (
+        <button
+          key={id}
+          type="button"
+          className="iconButton"
+          aria-pressed={mode === id}
+          aria-label={label}
+          title={label}
+          onClick={() => onChange(id)}
+        >
+          <Icon />
         </button>
       ))}
     </div>

@@ -18,6 +18,8 @@ import {
   ChevronRight,
   CircleAlert,
   CircleCheck,
+  CircleStop,
+  Columns2,
   Copy,
   ExternalLink,
   FileSymlink,
@@ -26,7 +28,11 @@ import {
   GitCommitHorizontal,
   Image,
   GitPullRequest,
+  History,
   Info,
+  Keyboard,
+  List,
+  ListTree,
   ListX,
   MessageSquare,
   Minus,
@@ -34,10 +40,12 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Play,
   Plug,
   Plus,
   RotateCcw,
   RotateCw,
+  Rows2,
   Settings,
   Sparkles,
   Square,
@@ -87,6 +95,22 @@ export const AiPanelCloseIcon = icon(PanelRightClose);
 export const AiPanelOpenIcon = icon(PanelRightOpen);
 /** The AI pass: its status, findings and checklist. */
 export const AiIcon = icon(Sparkles);
+/** Start, rerun and stop the AI pass (the header's icon buttons). */
+export const RunIcon = icon(Play);
+export const RerunIcon = icon(RotateCw);
+export const StopIcon = icon(CircleStop);
+
+// The code view's toolbar. The diff layouts follow GitLab's inline /
+// parallel glyphs: one column of stacked rows, or two columns.
+export const DiffUnifiedIcon = icon(Rows2);
+export const DiffSplitIcon = icon(Columns2);
+/** The file list as a flat list of paths, or as folders. */
+export const FlatListIcon = icon(List);
+export const FolderListIcon = icon(ListTree);
+/** "Since my last review": only what changed after the watermark. */
+export const SinceIcon = icon(History);
+/** Opens the shortcut help. */
+export const KeyboardIcon = icon(Keyboard, { size: 15 });
 
 // The caret rotates 90° on expand (CSS).
 export const CaretIcon = icon(ChevronRight);

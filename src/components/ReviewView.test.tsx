@@ -68,6 +68,7 @@ import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useHistoryStore } from "../state/historyStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useNowStore } from "../state/nowStore";
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { clearCommentableCache, useCommentStore } from "../state/commentStore";
 import { useThreadStore } from "../state/threadStore";
@@ -426,6 +427,28 @@ describe("ReviewView", () => {
     expect(
       JSON.parse(localStorage.getItem("argus.layout") ?? "{}").diffLayout,
     ).toBe("split");
+  });
+
+  it("switches the file list between folders and a flat list by icon", async () => {
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByText("0 of 4 files viewed");
+    const folders = screen.getByRole("button", { name: "Show folders" });
+    const flat = screen.getByRole("button", { name: "Show a flat list" });
+    expect(folders).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(flat);
+    expect(useLayoutStore.getState().fileListMode).toBe("flat");
+    expect(flat).toHaveAttribute("aria-pressed", "true");
+    expect(folders).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("opens the shortcut help from the toolbar's keyboard button", async () => {
+    useOverlayStore.setState({ open: null });
+    render(<ReviewView review={r} now={NOW} />);
+    await screen.findByText("0 of 4 files viewed");
+    const keys = screen.getByRole("button", { name: "Keyboard shortcuts" });
+    expect(keys).toHaveAttribute("title", "Keyboard shortcuts (?)");
+    fireEvent.click(keys);
+    expect(useOverlayStore.getState().open).toBe("help");
   });
 
   it("shows outdated threads at the top of their file, with the hunk and an in-place history", async () => {
