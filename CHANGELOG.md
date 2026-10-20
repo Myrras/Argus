@@ -253,6 +253,10 @@ when it merges.
   quote and with a mention ("> their line" then "@carol fixed").
 - Reply on a thread scrolls to the reply field and focuses it, also when the
   field is already open.
+- Refresh a single merge request or pull request without refreshing them
+  all: the refresh button in its header, Refresh in its right-click menu,
+  "Refresh this review" in the command palette, or ⌥R (Alt+R). Its row
+  shows it refreshing; a rate limit says until when.
 
 ### Changed
 
