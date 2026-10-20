@@ -1,12 +1,15 @@
 /**
  * The keyboard review flow's actions (M6), dispatched by `useAppShortcuts`
- * and the command palette: move the page focus (`n`/`p`), and act on the
- * focused item — open or fold a thread (`t`; Enter on the card), reply to it (`r`), edit or
+ * and the command palette: move the page focus (`n`/`p`; ↑/↓ through the
+ * open threads), and act on the focused item — open or fold a thread (`t`;
+ * Enter on the card), reply to it (`r`), resolve or reopen it (`s`), edit or
  * dismiss a finding (`e`/`d`), comment on its line (`c`) — plus opening the
  * palette and the shortcut help.
  *
  * Nothing here posts: a reply or a comment only opens a composer (posted
  * from its own button or ⌘↩), editing and dismissing a finding are local.
+ * The one write is `s`: resolving is the thread's own explicit action,
+ * reversible, so it asks nothing first.
  */
 
 import type { CommentTarget } from "../state/commentStore";
@@ -18,7 +21,8 @@ import { useFocusStore } from "../state/focusStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
-import { toastInfo } from "../state/toastStore";
+import { useThreadStore } from "../state/threadStore";
+import { toastInfo, useToastStore } from "../state/toastStore";
 import { clampRange, commentableSet } from "./commentRanges";
 import { ownsEnter, type ActionId } from "./keymap";
 
@@ -112,6 +116,50 @@ function focusedThread(reviewId: ReviewId) {
   return at === reviewId && item?.kind === "thread" ? item : null;
 }
 
+/** The focused thread as stored, when it is one of `reviewId`'s. */
+export function focusedStoredThread(reviewId: ReviewId) {
+  const item = focusedThread(reviewId);
+  if (!item) return null;
+  return (
+    useThreadStore
+      .getState()
+      .byReview[reviewId]?.threads.find((t) => t.threadId === item.threadId) ??
+    null
+  );
+}
+
+/**
+ * Whether ↑/↓ belong to the review page (the open-thread jumps) rather
+ * than the review list's cursor or the code's line picking: not from the
+ * sidebar, not from a diff's code area (it picks lines with them,
+ * `DiffEditor`); from anywhere in the review, yes; from nowhere in
+ * particular (the page body), unless ↑/↓ in the list came last. The
+ * palette (no target) acts on the page.
+ */
+export function onReviewPage(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) {
+    return target === null || useFocusStore.getState().zone !== "list";
+  }
+  if (target.closest('[aria-label="Sidebar"]')) return false;
+  if (target.classList.contains("cm-content")) return false;
+  if (
+    target.closest('[aria-label="Review detail"], [aria-label="AI review"]')
+  ) {
+    return true;
+  }
+  return useFocusStore.getState().zone !== "list";
+}
+
+const NO_MORE = "No more open threads";
+
+/** Said once at an end, not once per repeat of a held key. */
+function sayNoMore() {
+  const shown = useToastStore
+    .getState()
+    .toasts.some((t) => t.message === NO_MORE && !t.leaving);
+  if (!shown) toastInfo(NO_MORE);
+}
+
 /**
  * Run one of the flow's review-page actions; null when `action` is not
  * one of them, false when there is nothing to act on (the key is then left
@@ -128,6 +176,23 @@ export function runFlowAction(
     case "nextItem":
     case "prevItem":
       return focus.move(reviewId, action === "nextItem" ? 1 : -1);
+    case "nextOpenThread":
+    case "prevOpenThread": {
+      if (!onReviewPage(target)) return false;
+      const moved = focus.moveOpen(
+        reviewId,
+        action === "nextOpenThread" ? 1 : -1,
+      );
+      // At an end the key stops there (no wrap, and not on to the list).
+      if (!moved) sayNoMore();
+      return true;
+    }
+    case "resolveThread": {
+      const t = focusedStoredThread(reviewId);
+      if (!t?.resolvable) return false;
+      void useThreadStore.getState().setResolved(t, !t.resolved);
+      return true;
+    }
     case "toggleThread": {
       // A focused button or link handles its own Enter and Space (bound
       // here by a user); other keys (`t`) still act on the focused thread.

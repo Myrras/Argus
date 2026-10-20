@@ -269,8 +269,12 @@ fn old_database(path: &Path, version: usize) -> (ReviewRecord, ThreadId) {
         "h1",
         vec![note("n1", ME, at(10, 1)), note("n2", AUTHOR, at(10, 2))],
     );
-    store.upsert_threads(r.id, &[t], ME).unwrap();
     let t1 = ThreadId::from_key(r.id, "t1");
+    if version >= 12 {
+        store.upsert_threads(r.id, &[t], ME).unwrap();
+    } else {
+        upsert_threads_before_v12(&store, r.id, &[t], ME);
+    }
     if version >= 2 {
         store
             .set_viewed(r.id, "src/cache.rs", "blob1", at(10, 3))
@@ -298,6 +302,42 @@ fn old_database(path: &Path, version: usize) -> (ReviewRecord, ThreadId) {
     (r, t1)
 }
 
+/// `Store::upsert_threads` as a database before migration 12 takes it: the
+/// columns without `resolvable`.
+fn upsert_threads_before_v12(store: &Store, review: ReviewId, threads: &[Thread], me: &str) {
+    let conn = store.conn();
+    for t in threads {
+        let id = ThreadId::from_key(review, &t.id).to_string();
+        conn.execute(
+            "INSERT INTO threads (id, review_id, provider_thread_id, author, created_at,
+                resolved, outdated, anchor_json, mine)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(id) DO UPDATE SET resolved = excluded.resolved,
+                outdated = excluded.outdated, mine = excluded.mine",
+            params![
+                id,
+                review.to_string(),
+                t.id,
+                t.author,
+                t.created_at,
+                t.resolved,
+                t.outdated,
+                t.anchor.as_ref().map(|a| serde_json::to_string(a).unwrap()),
+                t.is_mine(me),
+            ],
+        )
+        .unwrap();
+        for n in &t.notes {
+            conn.execute(
+                "INSERT OR IGNORE INTO notes (id, thread_id, author, body, created_at, system)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![n.id, id, n.author, n.body, n.created_at, n.system],
+            )
+            .unwrap();
+        }
+    }
+}
+
 #[test]
 fn upgrades_every_older_database_to_the_latest_keeping_its_data() {
     use crate::ai::store as ai_store;
@@ -322,6 +362,8 @@ fn upgrades_every_older_database_to_the_latest_keeping_its_data() {
         assert_eq!(threads[0].thread_id, t1);
         assert_eq!(threads[0].thread.notes.len(), 2);
         assert!(threads[0].mine);
+        // A line thread is resolvable on both platforms (migration 12).
+        assert!(threads[0].thread.resolvable, "v{version}");
         if version >= 2 {
             assert_eq!(
                 store.viewed(r.id).unwrap(),
@@ -496,9 +538,7 @@ fn upgrading_to_v8_makes_threads_the_user_replied_in_theirs() {
             "h1",
             vec![note("n1", ME, at(10, 1)), note("n2", AUTHOR, at(10, 2))],
         );
-        store
-            .upsert_threads(r.id, &[mine, replied, resolved], ME)
-            .unwrap();
+        upsert_threads_before_v12(&store, r.id, &[mine, replied, resolved], ME);
         // As v7 stored them: only a thread the user started was theirs.
         store
             .conn()
@@ -519,4 +559,35 @@ fn upgrading_to_v8_makes_threads_the_user_replied_in_theirs() {
     assert_eq!(mine["t1"], (true, true));
     assert_eq!(mine["t2"], (true, false));
     assert_eq!(mine["t3"], (false, false));
+}
+
+#[test]
+fn upgrading_to_v12_marks_line_threads_resolvable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("argus.db");
+    let (r, t1) = old_database(&path, 11);
+    {
+        let store = Store::over(Connection::open(&path).unwrap());
+        let mut general = thread("t2", AUTHOR, "h1", vec![note("n3", AUTHOR, at(10, 3))]);
+        general.anchor = None;
+        upsert_threads_before_v12(&store, r.id, &[general], ME);
+    }
+    let store = Store::open(&path).unwrap();
+    let threads = store.threads(r.id).unwrap();
+    let resolvable: Vec<(ThreadId, bool)> = threads
+        .iter()
+        .map(|t| (t.thread_id, t.thread.resolvable))
+        .collect();
+    // The line thread is; one without an anchor waits for its next fetch.
+    assert_eq!(
+        resolvable,
+        [(t1, true), (ThreadId::from_key(r.id, "t2"), false)]
+    );
+    // A fetch writes the platform's answer.
+    let mut general = threads[1].thread.clone();
+    general.resolvable = true;
+    store
+        .upsert_threads(r.id, &[threads[0].thread.clone(), general], ME)
+        .unwrap();
+    assert!(store.threads(r.id).unwrap()[1].thread.resolvable);
 }

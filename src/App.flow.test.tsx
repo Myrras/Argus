@@ -132,6 +132,7 @@ const WRITES = [
   "reply_to_thread",
   "approve_review",
   "post_findings",
+  "resolve_thread",
 ];
 
 /** A backend with two reviews; `A` has a conversation and one file. */
@@ -166,6 +167,7 @@ function makeBackend(opts: { ai: boolean }) {
     mine: true,
     author: "rev-fixture",
     outdated: true,
+    resolvable: true,
     createdAt: "2026-10-15T08:00:00Z",
     anchor: { ...thread().anchor!, pathNew: "src/cache.rs", lineNew: 42 },
     notes: [
@@ -310,6 +312,15 @@ function makeBackend(opts: { ai: boolean }) {
       setTimeout(() => events.emit("review:changed", { reviewId: A.id }));
       return reviews[i];
     },
+    resolve_thread: (a) => {
+      threads[A.id] = threads[A.id].map((t) =>
+        t.threadId === a.threadId
+          ? { ...t, resolved: a.resolved as boolean }
+          : t,
+      );
+      setTimeout(() => events.emit("review:changed", { reviewId: A.id }));
+      return threads[A.id].find((t) => t.threadId === a.threadId);
+    },
     post_findings: (a) =>
       (a.posts as { findingId: string }[]).map((p) => ({
         findingId: p.findingId,
@@ -375,6 +386,54 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("resolves and reopens an outdated thread from its button", async () => {
+    makeBackend({ ai: false });
+    render(<App />);
+    await openReview("Fixture A");
+    const diff = await screen.findByRole("region", {
+      name: "Diff of src/cache.rs",
+    });
+    expect(await within(diff).findByText("Outdated")).toBeInTheDocument();
+    // Only the thread its platform can resolve offers it.
+    expect(
+      within(diff).queryByRole("button", {
+        name: "Resolve bob-fixture's thread",
+      }),
+    ).toBeNull();
+    expect(writes()).toEqual([]);
+    fireEvent.click(
+      within(diff).getByRole("button", {
+        name: "Resolve rev-fixture's thread",
+      }),
+    );
+    expect(
+      await within(diff).findByRole("button", {
+        name: "Unresolve rev-fixture's thread",
+      }),
+    ).toBeEnabled();
+    expect(within(diff).getByText("Resolved")).toBeInTheDocument();
+    fireEvent.click(
+      within(diff).getByRole("button", {
+        name: "Unresolve rev-fixture's thread",
+      }),
+    );
+    expect(
+      await within(diff).findByRole("button", {
+        name: "Resolve rev-fixture's thread",
+      }),
+    ).toBeEnabled();
+    expect(within(diff).queryByText("Resolved")).toBeNull();
+    expect(
+      writes().map(([cmd, args]) => [
+        cmd,
+        (args as { resolved?: boolean } | undefined)?.resolved,
+      ]),
+    ).toEqual([
+      ["resolve_thread", true],
+      ["resolve_thread", false],
+    ]);
   });
 
   it("walks from the list to posted comments and an approval", async () => {

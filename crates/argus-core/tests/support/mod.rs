@@ -180,6 +180,7 @@ impl Platform {
             author: ME.into(),
             created_at: at(10, 11),
             resolved: false,
+            resolvable: true,
             outdated: false,
             anchor: Some(Anchor {
                 path_old: Some(PATH.into()),
@@ -201,6 +202,7 @@ impl Platform {
             author: AUTHOR.into(),
             created_at: at(10, 12),
             resolved: false,
+            resolvable: false,
             outdated: false,
             anchor: None,
             notes: vec![note(
@@ -360,6 +362,7 @@ impl ReviewProvider for Platform {
             author: ME.into(),
             created_at: Utc::now(),
             resolved: false,
+            resolvable: true,
             outdated: false,
             anchor: Some(Anchor {
                 path_old: Some(c.old_path.clone()),
@@ -413,6 +416,42 @@ impl ReviewProvider for Platform {
             return Err(PostError::new(PostErrorKind::HeadMoved, "head moved"));
         }
         w.detail.approved_by_me = true;
+        Ok(())
+    }
+
+    /// Resolves or reopens a thread, recorded as GitLab reports it (a
+    /// resolution by the user, now) so the history shows the event.
+    fn set_thread_resolved(
+        &self,
+        _: &ReviewRef,
+        thread: &str,
+        resolved: bool,
+    ) -> Result<(), PostError> {
+        self.log("set_thread_resolved", true);
+        let mut w = self.world.lock().unwrap();
+        let t = w
+            .threads
+            .iter_mut()
+            .find(|t| t.id == thread)
+            .ok_or_else(|| PostError::new(PostErrorKind::NotFound, "no such thread"))?;
+        if !t.resolvable {
+            return Err(PostError::new(
+                PostErrorKind::PostRejected,
+                "GitHub: this thread cannot be resolved",
+            ));
+        }
+        t.resolved = resolved;
+        tick();
+        let event = ThreadResolution {
+            thread_id: thread.into(),
+            resolved,
+            by: ME.into(),
+            at: Utc::now(),
+        };
+        if let Some(list) = w.resolutions.as_mut() {
+            list.retain(|r| r.thread_id != thread);
+            list.push(event);
+        }
         Ok(())
     }
 }

@@ -50,13 +50,20 @@ const onB = thread({
 });
 const findA = finding({ reviewId: r.id, path: "src/a.rs", line: 5 });
 
-/** The four writes; none may run from these keys. */
+/** The writes; none may run from these keys (but `s`, its own write). */
 const WRITES = [
   "post_comments",
   "reply_to_thread",
   "approve_review",
   "post_findings",
+  "resolve_thread",
 ];
+
+/** The write commands invoked so far, with their arguments. */
+const writes = () =>
+  vi
+    .mocked(invoke)
+    .mock.calls.filter(([cmd]) => WRITES.includes(cmd as string));
 
 function press(
   init: KeyboardEventInit & { key: string },
@@ -109,6 +116,16 @@ function seed(threads: StoredThread[] = [talk, onA, onB]) {
     focused: null,
   });
   useFocusStore.setState({ reviewId: r.id, item: null, zone: "page" });
+}
+
+/** A review list row inside the sidebar, as the app renders it. */
+function sidebar() {
+  const aside = document.createElement("aside");
+  aside.setAttribute("aria-label", "Sidebar");
+  const inList = document.createElement("button");
+  aside.appendChild(inList);
+  document.body.appendChild(aside);
+  return { inList, remove: () => aside.remove() };
 }
 
 const focusedName = () => {
@@ -508,8 +525,11 @@ describe("Enter and the zone", () => {
     renderHook(() => useAppShortcuts());
     press({ key: "n", code: "KeyN" });
     expect(useFocusStore.getState().zone).toBe("page");
-    press({ key: "ArrowDown" });
+    // From the sidebar: the list's ↓, not the page's.
+    const { inList, remove } = sidebar();
+    press({ key: "ArrowDown" }, inList);
     expect(useFocusStore.getState().zone).toBe("list");
+    remove();
     press({ key: "n", code: "KeyN" });
     expect(useFocusStore.getState().zone).toBe("page");
   });
@@ -527,5 +547,179 @@ describe("Enter and the zone", () => {
     expect(runFlowAction("toggleThread", r.id, button, "t")).toBe(true);
     expect(runFlowAction("toggleThread", r.id, window, " ")).toBe(true);
     button.remove();
+  });
+});
+
+describe("↑/↓: the open threads", () => {
+  const resolved = { ...onA, resolved: true };
+  const later = thread({
+    reviewId: r.id,
+    resolvable: true,
+    anchor: anchor("src/b.rs", 20),
+  });
+
+  it("step through the unresolved threads in page order, no wrap", () => {
+    seed([talk, resolved, onB, later]);
+    renderHook(() => useAppShortcuts());
+    const seen: (string | null)[] = [];
+    for (let i = 0; i < 3; i++) {
+      expect(press({ key: "ArrowDown" }).defaultPrevented).toBe(true);
+      seen.push(focusedName());
+    }
+    // The resolved thread and the finding are skipped; mine and others' count.
+    expect(seen).toEqual([
+      `thread ${talk.threadId}`,
+      `thread ${onB.threadId}`,
+      `thread ${later.threadId}`,
+    ]);
+    // Opened, its card selected.
+    expect(useHistoryStore.getState().open[later.threadId]).toBe(true);
+    expect(useCodeViewStore.getState().byReview[r.id].selected).toBe(
+      "src/b.rs",
+    );
+    // The end: it stays, says so once, and the list cursor does not move.
+    useReviewStore.setState({ reviews: [r, review()], cursorId: r.id });
+    expect(press({ key: "ArrowDown" }).defaultPrevented).toBe(true);
+    press({ key: "ArrowDown", repeat: true });
+    expect(focusedName()).toBe(`thread ${later.threadId}`);
+    expect(useReviewStore.getState().cursorId).toBe(r.id);
+    expect(
+      useToastStore
+        .getState()
+        .toasts.filter((t) => t.message === "No more open threads"),
+    ).toHaveLength(1);
+    press({ key: "ArrowUp" });
+    expect(focusedName()).toBe(`thread ${onB.threadId}`);
+    press({ key: "ArrowUp" });
+    expect(focusedName()).toBe(`thread ${talk.threadId}`);
+    expect(writes()).toEqual([]);
+  });
+
+  it("count an outdated thread that is still open", () => {
+    const old = { ...onA, outdated: true };
+    seed([old, { ...onB, resolved: true }]);
+    renderHook(() => useAppShortcuts());
+    press({ key: "ArrowDown" });
+    expect(focusedName()).toBe(`thread ${old.threadId}`);
+    press({ key: "ArrowDown" });
+    expect(focusedName()).toBe(`thread ${old.threadId}`);
+  });
+
+  it("leave the review list's cursor and the code's line picking alone", () => {
+    const other = review();
+    useReviewStore.setState({ reviews: [r, other], cursorId: r.id });
+    renderHook(() => useAppShortcuts());
+    // From the sidebar: the list cursor moves, the page focus does not.
+    const { inList, remove } = sidebar();
+    press({ key: "ArrowDown" }, inList);
+    expect(useReviewStore.getState().cursorId).toBe(other.id);
+    expect(focusedName()).toBeNull();
+    remove();
+    // From a diff's code area: its own line picking (not the page's, not the list's).
+    const detail = document.createElement("section");
+    detail.setAttribute("aria-label", "Review detail");
+    const code = document.createElement("div");
+    code.className = "cm-content";
+    detail.appendChild(code);
+    document.body.appendChild(detail);
+    press({ key: "ArrowUp" }, code);
+    expect(focusedName()).toBeNull();
+    // Anywhere else in the review: the open threads, even after the list.
+    const header = document.createElement("button");
+    detail.appendChild(header);
+    expect(press({ key: "ArrowDown" }, header).defaultPrevented).toBe(true);
+    expect(focusedName()).toBe(`thread ${talk.threadId}`);
+    detail.remove();
+  });
+
+  it("never fire while typing or inside a modal", () => {
+    renderHook(() => useAppShortcuts());
+    const input = document.createElement("input");
+    document.body.appendChild(input);
+    press({ key: "ArrowDown" }, input);
+    expect(focusedName()).toBeNull();
+    input.remove();
+    const modal = document.createElement("div");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    document.body.appendChild(modal);
+    press({ key: "ArrowDown" });
+    expect(focusedName()).toBeNull();
+    modal.remove();
+  });
+});
+
+describe("s: resolve the focused thread", () => {
+  const open = thread({
+    reviewId: r.id,
+    resolvable: true,
+    anchor: anchor("src/a.rs", 3),
+  });
+  const next = thread({
+    reviewId: r.id,
+    resolvable: true,
+    anchor: anchor("src/b.rs", 9),
+  });
+
+  /** A backend that resolves: `list_threads` reports what it was told. */
+  function resolvingBackend(threads: StoredThread[]) {
+    let current = threads;
+    vi.mocked(invoke).mockImplementation(
+      (cmd: string, raw?: unknown): Promise<unknown> => {
+        const args = raw as Record<string, unknown> | undefined;
+        if (cmd === "resolve_thread") {
+          current = current.map((t) =>
+            t.threadId === args?.threadId
+              ? { ...t, resolved: args?.resolved as boolean }
+              : t,
+          );
+          return Promise.resolve(
+            current.find((t) => t.threadId === args?.threadId),
+          );
+        }
+        if (cmd === "list_threads") return Promise.resolve(current);
+        return Promise.resolve([]);
+      },
+    );
+  }
+
+  it("resolves it once, and ↓ then goes to the next open one", async () => {
+    seed([talk, open, next]);
+    resolvingBackend([talk, open, next]);
+    renderHook(() => useAppShortcuts());
+    press({ key: "ArrowDown" });
+    press({ key: "ArrowDown" });
+    expect(focusedName()).toBe(`thread ${open.threadId}`);
+    expect(press({ key: "s", code: "KeyS" }).defaultPrevented).toBe(true);
+    // Held, it does not flap.
+    press({ key: "s", code: "KeyS", repeat: true });
+    await waitFor(() =>
+      expect(
+        useThreadStore
+          .getState()
+          .byReview[r.id].threads.find((t) => t.threadId === open.threadId)
+          ?.resolved,
+      ).toBe(true),
+    );
+    expect(writes()).toEqual([
+      [
+        "resolve_thread",
+        { reviewId: r.id, threadId: open.threadId, resolved: true },
+      ],
+    ]);
+    press({ key: "ArrowDown" });
+    expect(focusedName()).toBe(`thread ${next.threadId}`);
+    // Back up skips the one just resolved.
+    press({ key: "ArrowUp" });
+    expect(focusedName()).toBe(`thread ${talk.threadId}`);
+  });
+
+  it("does nothing on a thread its platform cannot resolve", () => {
+    seed([talk, open]);
+    renderHook(() => useAppShortcuts());
+    press({ key: "ArrowDown" });
+    expect(focusedName()).toBe(`thread ${talk.threadId}`);
+    expect(press({ key: "s", code: "KeyS" }).defaultPrevented).toBe(false);
+    expect(writes()).toEqual([]);
   });
 });

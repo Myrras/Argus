@@ -1,7 +1,8 @@
 //! The spec's guarantees, end to end through the public `Core` API over a
 //! scripted platform (`support::Platform`) that logs every provider call:
 //!
-//! - (6) nothing is written to the platform without an explicit call;
+//! - (6) nothing is written to the platform without an explicit call
+//!   (posting, replying, approving, resolving a thread);
 //! - (7) a review leaves the active list exactly when approved;
 //! - (3) whether the review waits on the user, and why, for each status;
 //! - (1, 2) an outdated thread stays fully readable: notes, then/now code
@@ -93,6 +94,18 @@ fn nothing_reaches_the_platform_without_an_explicit_write() {
         core.approve_review(id, "c1").unwrap_err().kind,
         PostErrorKind::HeadMoved
     );
+    // Resolving a thread its platform cannot resolve (the conversation),
+    // or naming another review: refused before anything goes out.
+    let general = thread_map(&core)[GENERAL_THREAD].thread_id;
+    assert_eq!(
+        core.resolve_thread(id, general, true).unwrap_err().kind,
+        PostErrorKind::InvalidInput
+    );
+    let other = argus_core::ReviewId::from_key("github|github.com|acme-fixture/widgets|99");
+    assert_eq!(
+        core.resolve_thread(other, mine, true).unwrap_err().kind,
+        PostErrorKind::InvalidInput
+    );
 
     // The background loop, nudged twice.
     let (tx, rx) = mpsc::channel();
@@ -143,12 +156,71 @@ fn each_explicit_write_is_one_platform_write() {
     core.reply_to_thread(mine, "Still needed?").unwrap();
     assert_eq!(p.writes(), ["post_comment", "post_comment", "reply"]);
 
+    core.resolve_thread(id, mine, true).unwrap();
+    core.resolve_thread(id, mine, false).unwrap();
+    assert_eq!(
+        p.writes(),
+        [
+            "post_comment",
+            "post_comment",
+            "reply",
+            "set_thread_resolved",
+            "set_thread_resolved"
+        ]
+    );
+
     let head = the_review(&core).head_sha;
     core.approve_review(id, &head).unwrap();
     assert_eq!(
         p.writes(),
-        ["post_comment", "post_comment", "reply", "approve"]
+        [
+            "post_comment",
+            "post_comment",
+            "reply",
+            "set_thread_resolved",
+            "set_thread_resolved",
+            "approve"
+        ]
     );
+}
+
+#[test]
+fn resolving_a_thread_is_one_write_and_the_review_follows() {
+    let p = Platform::new();
+    let core = core_over(&p);
+    let id = the_review(&core).id;
+    let mine = thread_map(&core)[MY_THREAD].thread_id;
+    let before = the_review(&core);
+    assert_eq!(before.untouched_threads, 1);
+    core.thread_history(mine).unwrap();
+    p.clear_calls();
+
+    let after = core.resolve_thread(id, mine, true).unwrap();
+    assert!(after.thread.resolved);
+    // One write; the refresh after it only reads.
+    assert_eq!(p.writes(), ["set_thread_resolved"]);
+    assert!(thread_map(&core)[MY_THREAD].thread.resolved);
+    let review = the_review(&core);
+    // A resolved thread is not waiting on anyone; the watermark stays.
+    assert_eq!(review.untouched_threads, 0);
+    assert_eq!(review.last_reviewed_sha, before.last_reviewed_sha);
+    // The history is computed again and shows the resolve event.
+    let h = core.thread_history(mine).unwrap();
+    assert!(h
+        .timeline
+        .iter()
+        .any(|e| matches!(&e.event, TimelineEvent::Resolved { by } if by == ME)));
+
+    // Reading it all again writes nothing more.
+    core.refresh();
+    core.review_histories(id).unwrap();
+    assert_eq!(p.writes(), ["set_thread_resolved"]);
+
+    // Reopened: the thread waits again.
+    let after = core.resolve_thread(id, mine, false).unwrap();
+    assert!(!after.thread.resolved);
+    assert_eq!(the_review(&core).untouched_threads, 1);
+    assert_eq!(p.writes(), ["set_thread_resolved", "set_thread_resolved"]);
 }
 
 // ------------------------------------------------- (7) gone when approved

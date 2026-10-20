@@ -120,6 +120,11 @@ export interface StoredThread {
   author: string;
   createdAt: Timestamp;
   resolved: boolean;
+  /**
+   * The platform can resolve and reopen it (GitHub review threads, GitLab
+   * discussions; not GitHub's PR conversation or a GitLab single comment).
+   */
+  resolvable: boolean;
   outdated: boolean;
   /** `null` for a discussion on the MR/PR as a whole. */
   anchor: Anchor | null;

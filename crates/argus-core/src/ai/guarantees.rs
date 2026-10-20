@@ -118,6 +118,7 @@ impl Recorder {
             author: notes[0].author.clone(),
             created_at: notes[0].created_at,
             resolved: false,
+            resolvable: true,
             outdated: false,
             anchor: Some(Anchor {
                 path_old: Some(PATH.into()),
@@ -242,6 +243,12 @@ impl ReviewProvider for Recorder {
     }
     fn approve(&self, _: &ReviewRef, _: &str) -> Result<(), PostError> {
         self.log("approve", true);
+        Ok(())
+    }
+    // Logged as a write like the others, so a run that resolved a thread
+    // would fail the "only reads" checks.
+    fn set_thread_resolved(&self, _: &ReviewRef, _: &str, _: bool) -> Result<(), PostError> {
+        self.log("set_thread_resolved", true);
         Ok(())
     }
 }

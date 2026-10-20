@@ -182,6 +182,17 @@ const MIGRATIONS: &[&str] = &[
     crate::ai::store::MIGRATION_10,
     // 11: the points a checklist item relates to.
     crate::ai::store::MIGRATION_11,
+    // 12: whether the platform lets a thread be resolved
+    // (`Thread::resolvable`). Line threads are, on both platforms; of the
+    // threads without an anchor, GitHub's conversation never is and a
+    // GitLab MR-level discussion only when it is a thread rather than a
+    // single comment, which only a fetch tells. They start off: every
+    // review's next fetch rewrites its threads (the stored fingerprint
+    // covers the field), and that sets them.
+    r#"
+    ALTER TABLE threads ADD COLUMN resolvable INTEGER NOT NULL DEFAULT 0;
+    UPDATE threads SET resolvable = 1 WHERE anchor_json IS NOT NULL;
+    "#,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus
@@ -652,12 +663,13 @@ pub(crate) fn write_threads(
             .map_err(|e| CoreError::Store(e.to_string()))?;
         conn.execute(
             "INSERT INTO threads (id, review_id, provider_thread_id, author, created_at,
-                resolved, outdated, anchor_json, mine)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                resolved, outdated, anchor_json, mine, resolvable)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(id) DO UPDATE SET
                 author = excluded.author, created_at = excluded.created_at,
                 resolved = excluded.resolved, outdated = excluded.outdated,
-                anchor_json = excluded.anchor_json, mine = excluded.mine",
+                anchor_json = excluded.anchor_json, mine = excluded.mine,
+                resolvable = excluded.resolvable",
             params![
                 thread_id,
                 review.to_string(),
@@ -668,6 +680,7 @@ pub(crate) fn write_threads(
                 t.outdated,
                 anchor,
                 t.is_mine(me),
+                t.resolvable,
             ],
         )?;
         let mut note_ids: Vec<&str> = Vec::with_capacity(t.notes.len());
@@ -717,7 +730,7 @@ pub(crate) fn read_threads(conn: &Connection, review: ReviewId) -> CoreResult<Ve
         .unwrap_or_default();
     let mut stmt = conn.prepare(
         "SELECT id, provider_thread_id, author, created_at, resolved, outdated,
-            anchor_json, mine
+            anchor_json, mine, resolvable
          FROM threads WHERE review_id = ?1 ORDER BY created_at, provider_thread_id",
     )?;
     let mut notes_stmt = conn.prepare(
@@ -738,6 +751,7 @@ pub(crate) fn read_threads(conn: &Connection, review: ReviewId) -> CoreResult<Ve
                 author: r.get(2)?,
                 created_at: r.get(3)?,
                 resolved: r.get(4)?,
+                resolvable: r.get(8)?,
                 outdated: r.get(5)?,
                 anchor,
                 notes: Vec::new(),

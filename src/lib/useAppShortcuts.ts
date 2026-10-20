@@ -8,8 +8,12 @@
  * from a shortcut outside a composer; the then/now of the thread last
  * clicked; with the AI pass on, toggle the AI panel and the last-clicked
  * finding's selection — selecting, not posting).
- * M6 (`keyboardFlow`): `n`/`p` move the page focus, and the then/now,
- * selection, comment, Enter/reply/edit/dismiss keys act on the focused item;
+ * M6 (`keyboardFlow`): `n`/`p` move the page focus, ↑/↓ through the open
+ * threads (from the review page: the sidebar keeps them for the list
+ * cursor, a diff's code for picking lines; the files scope goes first, so
+ * that is decided in `keyboardFlow.onReviewPage`), and the then/now,
+ * selection, comment, Enter/reply/edit/dismiss and resolve (`s`, the one
+ * key that writes, on the focused thread) keys act on the focused item;
  * ⌘K opens the command palette, ? the shortcut help. `runShortcut` runs an
  * action as its key would (the palette).
  * Those are ignored while typing in a field or inside a dialog (also while

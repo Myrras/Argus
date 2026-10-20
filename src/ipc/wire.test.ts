@@ -123,6 +123,7 @@ const thread: StoredThread = {
   author: "rev-fixture",
   createdAt: T,
   resolved: false,
+  resolvable: true,
   outdated: true,
   anchor: {
     pathOld: "src/cache.rs",

@@ -186,6 +186,7 @@ pub fn run() {
             commands::post::post_comments,
             commands::post::reply_to_thread,
             commands::post::approve_review,
+            commands::post::resolve_thread,
             commands::post::commentable_lines,
             commands::settings::get_settings,
             commands::settings::update_settings,

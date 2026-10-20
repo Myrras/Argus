@@ -11,9 +11,13 @@
  * Once its history is in, the notes become the thread's `Timeline` (notes,
  * commits and resolve events); until then, or when it fails, the plain
  * notes. "Reply" opens a reply composer at the foot of the thread
- * (`ReplyComposer`; posted only on its Reply button or ⌘↩).
+ * (`ReplyComposer`; posted only on its Reply button or ⌘↩). "Resolve" /
+ * "Unresolve" (only on a thread its platform can resolve) writes that to
+ * the platform at once (`threadStore.setResolved`; reversible, so no
+ * confirmation); the badge follows the re-read.
  * The keyboard (M6, `focusStore`): the focused thread has a ring and the
- * DOM focus; Enter (or `o`) opens or folds it, `r` starts a reply.
+ * DOM focus; Enter (or `t`) opens or folds it, `r` starts a reply, `s`
+ * resolves or reopens it.
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
@@ -37,6 +41,9 @@ import { useNow } from "../lib/useNow";
 import { useThreadHistory } from "../lib/useThreadHistory";
 import { threadDescription } from "../lib/focusModel";
 import { useThreadFocus } from "../state/focusStore";
+import { useThreadStore } from "../state/threadStore";
+import { useKeymap } from "../lib/useKeymap";
+import { withHint } from "../lib/keymap";
 import { Badge } from "./Badge";
 import { ReplyComposer } from "./CommentBlocks";
 import { CaretIcon } from "./icons";
@@ -76,6 +83,9 @@ export function ThreadBlock({
   const focus = useHistoryStore((s) => s.focus);
   const past = useThreadHistory(t);
   const replying = useCommentStore((s) => !!s.replies[t.threadId]);
+  const resolving = useThreadStore((s) => !!s.resolving[t.threadId]);
+  const setResolved = useThreadStore((s) => s.setResolved);
+  const keymap = useKeymap();
   const openReply = useCommentStore((s) => s.openReply);
   const comments = t.notes.filter((n) => !n.system).length;
   const anchored = !isConversationThread(t);
@@ -166,6 +176,31 @@ export function ThreadBlock({
         >
           Reply
         </button>
+        {t.resolvable && (
+          <button
+            type="button"
+            className={`ghost ${styles.history}`}
+            aria-label={`${t.resolved ? "Unresolve" : "Resolve"} ${t.author}'s thread`}
+            title={withHint(
+              t.resolved
+                ? "Reopen the thread on the platform"
+                : "Resolve the thread on the platform",
+              keymap,
+              "resolveThread",
+            )}
+            aria-busy={resolving}
+            disabled={resolving}
+            onClick={() => void setResolved(t, !t.resolved)}
+          >
+            {resolving
+              ? t.resolved
+                ? "Reopening…"
+                : "Resolving…"
+              : t.resolved
+                ? "Unresolve"
+                : "Resolve"}
+          </button>
+        )}
         {anchored && (
           <button
             type="button"

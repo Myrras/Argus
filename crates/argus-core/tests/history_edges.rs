@@ -35,6 +35,7 @@ fn add_thread(p: &Platform, id: &str, anchor: Anchor, outdated: bool) {
             author: ME.into(),
             created_at: at(10, 13),
             resolved: false,
+            resolvable: true,
             outdated,
             anchor: Some(anchor),
             notes: vec![note(id, ME, at(10, 13), &format!("Comment {id}"))],

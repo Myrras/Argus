@@ -57,6 +57,8 @@ export function thread(overrides: Partial<StoredThread> = {}): StoredThread {
     author: "bob-fixture",
     createdAt: "2026-10-15T09:00:00Z",
     resolved: false,
+    // Off by default: a test about resolving turns it on.
+    resolvable: false,
     outdated: false,
     anchor: {
       pathOld: "src/cache.rs",

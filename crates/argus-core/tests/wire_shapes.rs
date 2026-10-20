@@ -292,6 +292,7 @@ fn current() -> Value {
             author: "rev-fixture".into(),
             created_at: t,
             resolved: false,
+            resolvable: true,
             outdated: true,
             anchor: Some(Anchor {
                 path_old: Some("src/cache.rs".into()),

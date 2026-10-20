@@ -28,6 +28,7 @@ import {
   cardOf,
   findingItem,
   moveFocus,
+  moveToOpenThread,
   pageStops,
   sameItem,
   threadItem,
@@ -67,6 +68,11 @@ interface FocusState {
   ) => void;
   /** `n` / `p`: false at the end of the page or without stops. */
   move: (reviewId: ReviewId, delta: 1 | -1) => boolean;
+  /**
+   * ↑/↓: the next or previous thread that is not resolved, opened; false
+   * at the end of the page or without one.
+   */
+  moveOpen: (reviewId: ReviewId, delta: 1 | -1) => boolean;
   /** j/k moved the selection: the page takes the DOM focus. */
   pageMoved: () => void;
   commandThread: (threadId: ThreadId, action: ThreadCommand["action"]) => void;
@@ -179,6 +185,23 @@ export const useFocusStore = create<FocusState>((set, get) => ({
     const current = s.reviewId === reviewId ? s.item : null;
     const next = moveFocus(currentStops(reviewId), current, delta);
     if (!next) return false;
+    get().focusItem(reviewId, next, { move: true });
+    return true;
+  },
+
+  moveOpen: (reviewId, delta) => {
+    const s = get();
+    const current = s.reviewId === reviewId ? s.item : null;
+    const threads = useThreadStore.getState().byReview[reviewId]?.threads ?? [];
+    const next = moveToOpenThread(
+      currentStops(reviewId),
+      current,
+      delta,
+      threads,
+    );
+    if (next?.kind !== "thread") return false;
+    // Opened as well: a folded thread is one line, and the jump is to read it.
+    quietly(() => useHistoryStore.getState().setOpen(next.threadId, true));
     get().focusItem(reviewId, next, { move: true });
     return true;
   },

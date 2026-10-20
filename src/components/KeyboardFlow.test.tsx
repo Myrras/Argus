@@ -40,12 +40,13 @@ const other = review({ title: "Fixture docs tweak", status: "needsReReview" });
 const t = thread({ reviewId: r.id, author: "bob-fixture", anchor: null });
 const mockInvoke = vi.mocked(invoke);
 
-/** The four writes; the palette never runs one by itself. */
+/** The writes; the palette never runs one by itself. */
 const WRITES = [
   "post_comments",
   "reply_to_thread",
   "approve_review",
   "post_findings",
+  "resolve_thread",
 ];
 const noWrites = () => {
   for (const cmd of WRITES) {
@@ -355,6 +356,87 @@ describe("CommandPalette", () => {
   });
 });
 
+describe("CommandPalette: resolving the focused thread", () => {
+  const focusOn = (threadId: string) =>
+    act(() =>
+      useFocusStore.getState().focusItem(r.id, {
+        kind: "thread",
+        threadId,
+        mine: false,
+        card: CONVERSATION,
+        line: 0,
+        side: null,
+      }),
+    );
+
+  it("offers Resolve thread and runs it once on Enter", async () => {
+    const open = { ...t, resolvable: true };
+    useThreadStore.setState({
+      byReview: { [r.id]: { threads: [open], loading: false, error: null } },
+    });
+    mockInvoke.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === "resolve_thread"
+          ? { ...open, resolved: true }
+          : cmd === "list_threads"
+            ? [{ ...open, resolved: true }]
+            : [],
+      ),
+    );
+    render(<Shell />);
+    focusOn(open.threadId);
+    const field = openPalette();
+    fireEvent.change(field, { target: { value: "resolve thread" } });
+    const first = screen.getAllByRole("option")[0];
+    expect(first).toHaveTextContent("Resolve thread");
+    expect(within(first).getByText("S")).toBeInTheDocument();
+    // Listing it writes nothing.
+    noWrites();
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() =>
+      expect(useThreadStore.getState().byReview[r.id].threads[0].resolved).toBe(
+        true,
+      ),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "resolve_thread"),
+    ).toEqual([
+      [
+        "resolve_thread",
+        { reviewId: r.id, threadId: open.threadId, resolved: true },
+      ],
+    ]);
+  });
+
+  it("offers Unresolve thread on a resolved one, nothing on a conversation", () => {
+    const done = { ...t, resolvable: true, resolved: true };
+    useThreadStore.setState({
+      byReview: { [r.id]: { threads: [done], loading: false, error: null } },
+    });
+    render(<Shell />);
+    focusOn(done.threadId);
+    fireEvent.change(openPalette(), { target: { value: "resolve thread" } });
+    expect(screen.getAllByRole("option")[0]).toHaveTextContent(
+      "Unresolve thread",
+    );
+    press({ key: "Escape" });
+    act(() =>
+      useThreadStore.setState({
+        byReview: { [r.id]: { threads: [t], loading: false, error: null } },
+      }),
+    );
+    act(() => useOverlayStore.setState({ open: null }));
+    fireEvent.change(openPalette(), { target: { value: "resolve thread" } });
+    expect(
+      screen
+        .getAllByRole("option")
+        .map((o) => o.textContent)
+        .some((text) => /^(Un)?resolve thread/i.test(text ?? "")),
+    ).toBe(false);
+    noWrites();
+  });
+});
+
 describe("ShortcutHelp", () => {
   it("opens on ? and lists the shortcuts by where they work", () => {
     useSettingsStore.getState().setShortcut("nextItem", ["BracketRight"]);
@@ -366,6 +448,9 @@ describe("ShortcutHelp", () => {
     // The live keymap, rebinding included.
     expect(within(review).getByText("]")).toBeVisible();
     expect(within(review).getByText("Reply to thread")).toBeVisible();
+    expect(within(review).getByText("Resolve or reopen thread")).toBeVisible();
+    expect(within(review).getByText("Next open thread")).toBeVisible();
+    expect(within(review).getByText("↓")).toBeVisible();
     const anywhere = within(dialog).getByRole("region", { name: "Anywhere" });
     expect(within(anywhere).getByText("Refresh")).toBeVisible();
     expect(within(anywhere).getByText("Shift+R")).toBeVisible();

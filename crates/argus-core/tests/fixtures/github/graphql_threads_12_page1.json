@@ -6,16 +6,19 @@
           "pageInfo": { "hasNextPage": true, "endCursor": "Y3Vyc29yOjI=" },
           "nodes": [
             {
+              "id": "PRRT_fixture_501",
               "isResolved": true,
               "isOutdated": false,
               "comments": { "nodes": [{ "url": "https://github.com/acme-fixture/widgets/pull/12#discussion_r501" }] }
             },
             {
+              "id": "PRRT_fixture_510",
               "isResolved": false,
               "isOutdated": true,
               "comments": { "nodes": [{ "url": "https://github.com/acme-fixture/widgets/pull/12#discussion_r510" }] }
             },
             {
+              "id": "PRRT_fixture_9999",
               "isResolved": true,
               "isOutdated": false,
               "comments": { "nodes": [{ "url": "https://github.com/acme-fixture/widgets/pull/12#discussion_r9999" }] }

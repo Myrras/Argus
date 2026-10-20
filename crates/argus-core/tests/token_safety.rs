@@ -182,6 +182,11 @@ fn every_error(p: &dyn ReviewProvider, r: &ReviewRef) -> Vec<(&'static str, Stri
     if let Err(e) = p.approve(r, HEAD) {
         post("approve", e);
     }
+    for resolved in [true, false] {
+        if let Err(e) = p.set_thread_resolved(r, "4001", resolved) {
+            post("set_thread_resolved", e);
+        }
+    }
     out
 }
 
@@ -200,7 +205,7 @@ fn github_errors_with(status: &str, stderr: &str) {
             // All but `thread_resolutions` (no such call on GitHub) fail.
             assert_eq!(
                 errors.len(),
-                10,
+                12,
                 "{account:?} {body} / {stderr}: {errors:?}"
             );
             for (what, text) in errors {
@@ -217,7 +222,7 @@ fn github_errors_with(status: &str, stderr: &str) {
                 checked += 1;
             }
         }
-        assert!(checked >= 168);
+        assert!(checked >= 196);
     }
 }
 
@@ -272,6 +277,63 @@ fn the_platforms_reason_still_comes_through_redacted() {
             "{account:?}"
         );
     }
+}
+
+/// A `gh` whose GraphQL read of the PR's threads works (thread 4001 has a
+/// node id) and whose resolve mutation fails with `stdout` / `stderr`: the
+/// write itself is fuzzed, not only the read before it.
+const FAKE_GH_RESOLVE: &str = r#"
+case "$*" in
+  "auth token"*) echo "$TOKEN"; exit 0 ;;
+  "api graphql -f query="*)
+    echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"id":"PRRT_fixture_4001","isResolved":false,"isOutdated":false,"comments":{"nodes":[{"url":"https://github.com/acme-fixture/widgets/pull/12#discussion_r4001"}]}}]}}}}}'
+    exit 0 ;;
+esac
+cat > /dev/null
+cat "$DIR/stdout"
+cat "$DIR/stderr" >&2
+exit 1
+"#;
+
+#[test]
+#[cfg(unix)]
+fn github_resolve_refusals_never_carry_the_token() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let gh = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\nDIR='{}'\nTOKEN='{GH_TOKEN}'\n{FAKE_GH_RESOLVE}",
+        dir.path().display()
+    );
+    std::fs::write(&gh, script).unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gh = GithubProvider::with_binary(gh.to_string_lossy().into_owned(), "github.com", None);
+    // GraphQL's own error shape on top of the REST ones.
+    let mut all = bodies();
+    all.extend([
+        r#"{"data":{"resolveReviewThread":null},"errors":[{"type":"FORBIDDEN","message":"{T} may not resolve"}]}"#.to_string(),
+        r#"{"errors":[{"message":"a"},{"message":"{T}"}]}"#.to_string(),
+    ]);
+    let stderrs = [
+        "gh: {T} may not resolve",
+        "gh: Bad credentials (HTTP 401) {T}",
+        "gh: HTTP 502 {T}",
+    ];
+    let mut checked = 0;
+    for body in &all {
+        for stderr in stderrs {
+            std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
+            std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
+            for resolved in [true, false] {
+                let e = gh
+                    .set_thread_resolved(&github_pr(), "4001", resolved)
+                    .expect_err("the mutation fails");
+                assert_clean(GH_TOKEN, "set_thread_resolved", &format!("{e} / {e:?}"));
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, all.len() * 6);
 }
 
 // ------------------------------------------------------------------- GitLab

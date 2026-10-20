@@ -15,8 +15,10 @@ import {
   parseBinding,
   resolveKeymap,
   serializeBinding,
+  sharesByContext,
   shortcutHint,
   withHint,
+  type ActionId,
   type KeyEventLike,
 } from "./keymap";
 
@@ -204,9 +206,11 @@ describe("defaults", () => {
           if (!a.fixed) {
             expect(bindingProblem(parsed!, mac), `${a.id} ${b}`).toBeNull();
           }
-          expect(seen.get(b), `${b} used by ${a.id} and ${seen.get(b)}`).toBe(
-            undefined,
-          );
+          const other = seen.get(b);
+          // ↑/↓: the list's and the review page's, by where the focus is.
+          if (!other || !sharesByContext(a.id, other as ActionId)) {
+            expect(other, `${b} used by ${a.id} and ${other}`).toBe(undefined);
+          }
           seen.set(b, a.id);
         }
       }
@@ -433,5 +437,34 @@ describe("isBrowserShortcut", () => {
         false,
       ),
     ).toBe(false);
+  });
+});
+
+describe("thread keys", () => {
+  it("are s to resolve and ↑/↓ for the open threads, shared with the list", () => {
+    expect(DEFAULT_KEYMAP.resolveThread).toEqual(["KeyS"]);
+    expect(DEFAULT_KEYMAP.nextOpenThread).toEqual(["ArrowDown"]);
+    expect(DEFAULT_KEYMAP.prevOpenThread).toEqual(["ArrowUp"]);
+    const down = parseBinding("ArrowDown")!;
+    // Sharing ↓ with the list cursor is no conflict; with anything else it is.
+    expect(findConflict(DEFAULT_KEYMAP, "nextOpenThread", down, true)).toBe(
+      null,
+    );
+    expect(findConflict(DEFAULT_KEYMAP, "nextReview", down, true)).toBe(null);
+    expect(findConflict(DEFAULT_KEYMAP, "prevOpenThread", down, true)).toBe(
+      "nextReview",
+    );
+    expect(
+      findConflict(
+        DEFAULT_KEYMAP,
+        "resolveThread",
+        parseBinding("KeyR")!,
+        true,
+      ),
+    ).toBe("replyThread");
+    // Rebindable like the others.
+    expect(resolveKeymap({ resolveThread: ["KeyQ"] }).resolveThread).toEqual([
+      "KeyQ",
+    ]);
   });
 });

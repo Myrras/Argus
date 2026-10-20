@@ -202,6 +202,7 @@ pub(super) fn threads(mut entries: Vec<Entry>, me: &str, pr_author: &str) -> Vec
                     author: e.author.clone(),
                     created_at: e.created_at,
                     resolved: false,
+                    resolvable: false,
                     outdated: false,
                     anchor: None,
                     notes: vec![note],
