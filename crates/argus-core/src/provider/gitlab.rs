@@ -108,7 +108,9 @@ impl TokenSource for KeychainToken {
 /// Where tokens are kept, by account (the instance host): the OS keychain,
 /// or memory in tests.
 trait SecretStore {
-    fn get(&self, account: &str) -> Option<String>;
+    /// `Ok(None)` when there is no such entry; `Err` when the store could
+    /// not be read (a locked keychain, a denied prompt).
+    fn get(&self, account: &str) -> CoreResult<Option<String>>;
     fn set(&self, account: &str, secret: &str) -> CoreResult<()>;
     fn delete(&self, account: &str) -> CoreResult<()>;
 }
@@ -117,8 +119,12 @@ trait SecretStore {
 struct Keychain;
 
 impl SecretStore for Keychain {
-    fn get(&self, account: &str) -> Option<String> {
-        keychain_entry(account).ok()?.get_password().ok()
+    fn get(&self, account: &str) -> CoreResult<Option<String>> {
+        match keychain_entry(account)?.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(_) => Err(CoreError::Provider("could not read the keychain".into())),
+        }
     }
     fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
         keychain_entry(account)?
@@ -184,6 +190,13 @@ fn nonblank(token: Option<String>) -> Option<String> {
     token.filter(|t| !t.is_empty())
 }
 
+/// What a read of `account` finds, a keychain that cannot be read taken as
+/// nothing there: right for using a token (no token is what the user then
+/// sees), never for deciding a move happened.
+fn found(store: &dyn SecretStore, account: &str) -> Option<String> {
+    nonblank(store.get(account).ok().flatten())
+}
+
 /// Delete an entry a token was moved from or that a save replaces. A
 /// failure is logged, not returned: the token itself is where it belongs,
 /// and the leftover only matters as a fallback.
@@ -197,11 +210,11 @@ fn delete_leftover(store: &dyn SecretStore, account: &str) {
 /// the current one on the way.
 fn read_token(store: &dyn SecretStore, base_url: &str) -> Option<String> {
     let TokenKeys { key, fallbacks } = token_keys(base_url);
-    if let Some(token) = nonblank(store.get(&key)) {
+    if let Some(token) = found(store, &key) {
         return Some(token);
     }
     for old in fallbacks {
-        let Some(token) = nonblank(store.get(&old)) else {
+        let Some(token) = found(store, &old) else {
             continue;
         };
         // The old entry goes only once the new one holds the token.
@@ -235,19 +248,23 @@ fn write_token(store: &dyn SecretStore, base_url: &str, token: &str) -> CoreResu
 /// its token under its host. The user set it up that way on purpose and it
 /// works, so the token moves to the instance's http account instead of
 /// being asked for again. Anything else is left alone: an https instance,
-/// or one that already has an http token. Never run again afterwards (the
-/// caller keeps a marker): a later switch from https to http must find no
-/// token.
-fn migrate_plain_http_token(store: &dyn SecretStore, base_url: &str) {
+/// or one that already has an http token (moved before).
+///
+/// `Ok` when there is nothing (left) to move, so the caller records it done
+/// and never runs it again: a later switch from https to http must find no
+/// token. `Err` when the keychain could not be read or written (anything
+/// but "no such entry"): nothing is recorded and the next start tries
+/// again. The host entry goes only once the http one holds the token.
+fn migrate_plain_http_token(store: &dyn SecretStore, base_url: &str) -> CoreResult<()> {
     if !is_insecure(base_url) {
-        return;
+        return Ok(());
     }
     let Some(base) = normalize_base_url(base_url) else {
-        return;
+        return Ok(());
     };
     let key = token_keys(&base).key;
-    if nonblank(store.get(&key)).is_some() {
-        return;
+    if nonblank(store.get(&key)?).is_some() {
+        return Ok(());
     }
     let host = url_host(&base).to_string();
     let raw = url_host(base_url.trim()).to_string();
@@ -255,23 +272,20 @@ fn migrate_plain_http_token(store: &dyn SecretStore, base_url: &str) {
     if !raw.is_empty() && !old.contains(&raw) {
         old.push(raw);
     }
-    let Some((from, token)) = old
-        .iter()
-        .find_map(|a| nonblank(store.get(a)).map(|t| (a, t)))
-    else {
-        return;
-    };
-    if store.set(&key, &token).is_err() {
-        tracing::warn!("could not move the GitLab token to its plain-http entry");
-        return;
+    for account in &old {
+        if let Some(token) = nonblank(store.get(account)?) {
+            store.set(&key, &token)?;
+            delete_leftover(store, account);
+            return Ok(());
+        }
     }
-    delete_leftover(store, from);
+    Ok(())
 }
 
 /// [`migrate_plain_http_token`] on the OS keychain. Touches the keychain
 /// only for a plain-http instance URL.
-pub fn gitlab_migrate_plain_http_token(base_url: &str) {
-    migrate_plain_http_token(&Keychain, base_url);
+pub fn gitlab_migrate_plain_http_token(base_url: &str) -> CoreResult<()> {
+    migrate_plain_http_token(&Keychain, base_url)
 }
 
 /// Store the token for the instance at `base_url`; a blank token deletes it.
@@ -1748,8 +1762,8 @@ mod tests {
     struct MemStore(Mutex<HashMap<String, String>>);
 
     impl SecretStore for MemStore {
-        fn get(&self, account: &str) -> Option<String> {
-            self.0.lock().unwrap().get(account).cloned()
+        fn get(&self, account: &str) -> CoreResult<Option<String>> {
+            Ok(self.0.lock().unwrap().get(account).cloned())
         }
         fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
             self.0.lock().unwrap().insert(account.into(), secret.into());
@@ -1926,7 +1940,7 @@ mod tests {
         // a deliberately configured http instance was under its host.
         let store = MemStore::default();
         store.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "http://gitlab.vpn.test");
+        migrate_plain_http_token(&store, "http://gitlab.vpn.test").unwrap();
         assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
         assert_eq!(
             read_token(&store, "http://gitlab.vpn.test").as_deref(),
@@ -1935,23 +1949,101 @@ mod tests {
         // An old raw-host spelling moves too.
         let store = MemStore::default();
         store.set("GitLab.vpn.test:80", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "http://GitLab.vpn.test:80");
+        migrate_plain_http_token(&store, "http://GitLab.vpn.test:80").unwrap();
         assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
         // An https instance, or one with an http token already, is left as is.
         let store = MemStore::default();
         store.set("gitlab.example.test", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "https://gitlab.example.test");
-        migrate_plain_http_token(&store, "http://localhost");
+        migrate_plain_http_token(&store, "https://gitlab.example.test").unwrap();
+        migrate_plain_http_token(&store, "http://localhost").unwrap();
         assert_eq!(keys(&store), ["gitlab.example.test"]);
         store
             .set("http://gitlab.example.test", "glpat-fixture-http")
             .unwrap();
-        migrate_plain_http_token(&store, "http://gitlab.example.test");
+        migrate_plain_http_token(&store, "http://gitlab.example.test").unwrap();
         assert_eq!(
-            store.get("http://gitlab.example.test").as_deref(),
+            store.get("http://gitlab.example.test").unwrap().as_deref(),
             Some("glpat-fixture-http")
         );
         assert_eq!(keys(&store).len(), 2);
+    }
+
+    /// A keychain whose reads or writes fail (a locked keychain, a denied
+    /// prompt): not the same as an entry that is not there.
+    #[derive(Default)]
+    struct Failing {
+        inner: MemStore,
+        get: bool,
+        set: bool,
+    }
+
+    impl SecretStore for Failing {
+        fn get(&self, account: &str) -> CoreResult<Option<String>> {
+            if self.get {
+                return Err(CoreError::Provider("could not read the keychain".into()));
+            }
+            self.inner.get(account)
+        }
+        fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
+            if self.set {
+                return Err(CoreError::Provider("could not update the keychain".into()));
+            }
+            self.inner.set(account, secret)
+        }
+        fn delete(&self, account: &str) -> CoreResult<()> {
+            self.inner.delete(account)
+        }
+    }
+
+    #[test]
+    fn a_failed_one_time_move_fails_and_keeps_the_token_where_it_was() {
+        // A keychain that cannot be read: the move did not happen, so it
+        // must not be recorded as done (the caller retries next start).
+        let store = Failing {
+            get: true,
+            ..Failing::default()
+        };
+        store.inner.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
+        assert!(migrate_plain_http_token(&store, "http://gitlab.vpn.test").is_err());
+        assert_eq!(keys(&store.inner), ["gitlab.vpn.test"]);
+        // The http entry cannot be written: the old one is never deleted.
+        let store = Failing {
+            set: true,
+            ..Failing::default()
+        };
+        store.inner.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
+        assert!(migrate_plain_http_token(&store, "http://gitlab.vpn.test").is_err());
+        assert_eq!(keys(&store.inner), ["gitlab.vpn.test"]);
+        // Retried once the keychain answers: moved.
+        migrate_plain_http_token(&store.inner, "http://gitlab.vpn.test").unwrap();
+        assert_eq!(keys(&store.inner), ["http://gitlab.vpn.test"]);
+        // An https instance never touches the keychain, failing or not.
+        let store = Failing {
+            get: true,
+            set: true,
+            ..Failing::default()
+        };
+        migrate_plain_http_token(&store, "https://gitlab.example.test").unwrap();
+    }
+
+    #[test]
+    fn the_one_time_move_heals_whatever_an_earlier_build_left() {
+        // Moved already: the http entry has it, nothing changes.
+        let store = MemStore::default();
+        store.set("http://gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
+        migrate_plain_http_token(&store, "http://gitlab.vpn.test").unwrap();
+        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
+        // Marked done after a failed move: still under the host, moved now.
+        let store = MemStore::default();
+        store.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
+        migrate_plain_http_token(&store, "http://gitlab.vpn.test").unwrap();
+        assert_eq!(
+            read_token(&store, "http://gitlab.vpn.test").as_deref(),
+            Some(FIXTURE_TOKEN)
+        );
+        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
+        // No token anywhere: nothing to do, and that is done too.
+        migrate_plain_http_token(&MemStore::default(), "http://gitlab.vpn.test").unwrap();
     }
 
     /// A keychain whose deletes fail (a locked or denied item).
@@ -1959,7 +2051,7 @@ mod tests {
     struct NoDelete(MemStore);
 
     impl SecretStore for NoDelete {
-        fn get(&self, account: &str) -> Option<String> {
+        fn get(&self, account: &str) -> CoreResult<Option<String>> {
             self.0.get(account)
         }
         fn set(&self, account: &str, secret: &str) -> CoreResult<()> {

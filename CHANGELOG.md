@@ -193,7 +193,8 @@ when it merges.
   Settings and an "Unencrypted" badge in the Providers section. A token
   stored for https is never sent over plain http: switching the URL to http
   asks for the token again, and Settings says why. A plain-http GitLab set
-  up before keeps its token.
+  up before keeps its token; if the keychain could not be read when Argus
+  first moved it, the move is tried again on the next start.
 - On a pull request too large for GitHub to find its merge base, removed
   lines take no comments (the file says why; the `c` key and posting refuse
   them as well, so nothing lands on the wrong line), unless a local clone supplies

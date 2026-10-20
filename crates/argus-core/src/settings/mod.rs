@@ -16,6 +16,10 @@ use crate::provider::gitlab::normalize_base_url;
 use crate::provider::ReviewRef;
 
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 180;
+
+/// The one-time move of a plain-http GitLab token to its own keychain entry
+/// (see [`crate::provider::gitlab::gitlab_migrate_plain_http_token`]).
+pub(crate) const GITLAB_HTTP_TOKEN: &str = "gitlabHttpToken";
 /// Floor for the poll interval, so a typo cannot hammer the APIs.
 pub const MIN_POLL_INTERVAL_SECS: u64 = 30;
 
@@ -95,9 +99,22 @@ impl Default for AiSettings {
     }
 }
 
-impl Settings {
+/// What `settings.json` holds: the settings, and the one-time steps the
+/// core has run (`migrations`, by name). Those are the core's own
+/// bookkeeping: never in [`Settings`], so they never go to the UI and a
+/// save of what the UI sends cannot drop them.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsFile {
+    #[serde(flatten)]
+    settings: Settings,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    migrations: Vec<String>,
+}
+
+impl SettingsFile {
     /// Read `path`; a missing or corrupt file is the defaults.
-    pub fn load(path: &Path) -> Self {
+    fn read(path: &Path) -> Self {
         let Ok(raw) = std::fs::read_to_string(path) else {
             return Self::default();
         };
@@ -109,7 +126,7 @@ impl Settings {
 
     /// Atomically write to `path`: a temp file renamed over the old one, so
     /// a crash mid-write never leaves a torn file.
-    pub fn save(&self, path: &Path) -> CoreResult<()> {
+    fn write(&self, path: &Path) -> CoreResult<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -119,6 +136,42 @@ impl Settings {
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+/// Whether `settings.json` at `path` records the one-time step `name`.
+pub(crate) fn migration_done(path: &Path, name: &str) -> bool {
+    SettingsFile::read(path)
+        .migrations
+        .iter()
+        .any(|m| m == name)
+}
+
+/// Record the one-time step `name` in `settings.json` at `path` (saved
+/// atomically, the settings in it unchanged).
+pub(crate) fn record_migration(path: &Path, name: &str) -> CoreResult<()> {
+    let mut file = SettingsFile::read(path);
+    if file.migrations.iter().any(|m| m == name) {
+        return Ok(());
+    }
+    file.migrations.push(name.to_string());
+    file.write(path)
+}
+
+impl Settings {
+    /// Read `path`; a missing or corrupt file is the defaults.
+    pub fn load(path: &Path) -> Self {
+        SettingsFile::read(path).settings
+    }
+
+    /// Atomically write to `path` (see [`SettingsFile::write`]), keeping
+    /// the one-time steps the file records.
+    pub fn save(&self, path: &Path) -> CoreResult<()> {
+        SettingsFile {
+            settings: self.clone(),
+            migrations: SettingsFile::read(path).migrations,
+        }
+        .write(path)
     }
 
     /// Normalise and check: trims hosts, drops a trailing slash from the
@@ -217,6 +270,34 @@ mod tests {
             updated_at: None,
         };
         assert_eq!(s.clone_path(&r), Some(Path::new("/src/widgets")));
+    }
+
+    #[test]
+    fn one_time_steps_are_recorded_in_the_file_and_kept_by_every_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        assert!(!migration_done(&path, GITLAB_HTTP_TOKEN));
+        // Recorded without a settings file yet: written with the defaults.
+        record_migration(&path, GITLAB_HTTP_TOKEN).unwrap();
+        assert!(migration_done(&path, GITLAB_HTTP_TOKEN));
+        assert_eq!(Settings::load(&path), Settings::default());
+        record_migration(&path, GITLAB_HTTP_TOKEN).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw.matches(GITLAB_HTTP_TOKEN).count(), 1, "{raw}");
+        // A settings save (what the UI sends has no such field) keeps it.
+        let s = Settings {
+            poll_interval_secs: 60,
+            ..Settings::default()
+        };
+        s.save(&path).unwrap();
+        assert!(migration_done(&path, GITLAB_HTTP_TOKEN));
+        assert_eq!(Settings::load(&path), s);
+        // Never part of the settings the UI reads.
+        let wire = serde_json::to_string(&Settings::load(&path)).unwrap();
+        assert!(!wire.contains("migrations"), "{wire}");
+        // A file from before has none.
+        std::fs::write(&path, r#"{"pollIntervalSecs":60}"#).unwrap();
+        assert!(!migration_done(&path, GITLAB_HTTP_TOKEN));
     }
 
     #[test]
