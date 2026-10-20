@@ -39,6 +39,7 @@ import { useSettingsStore } from "../state/settingsStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { CommandPalette } from "./CommandPalette";
+import { ConversationCard } from "./ConversationCard";
 import { ReviewDialogs } from "./ReviewDialogs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { ThreadBlock } from "./ThreadBlock";
@@ -191,6 +192,7 @@ describe("revealing a thread far down a file", () => {
   const far = thread({
     reviewId: r.id,
     author: "erin-fixture",
+    resolvable: true,
     anchor: { ...thread().anchor!, pathNew: "src/cache.rs", lineNew: 900 },
   });
 
@@ -237,7 +239,8 @@ describe("revealing a thread far down a file", () => {
         <Card />
       </>,
     );
-    act(() => void runFlowAction("nextOpenThread", r.id, null));
+    // The header's ⌄: the conversation thread cannot be resolved, so the
+    // first unresolved one is far down the file.
     act(() => void runFlowAction("nextOpenThread", r.id, null));
     const card = await screen.findByRole("article", {
       name: "Thread by erin-fixture",
@@ -250,6 +253,46 @@ describe("revealing a thread far down a file", () => {
     // Never the file card in its place.
     expect(scrolled.some((el) => el.matches("[data-file-card]"))).toBe(false);
     Element.prototype.scrollIntoView = original;
+  });
+});
+
+describe("revealing a thread in the folded Resolved group", () => {
+  const done = thread({
+    reviewId: r.id,
+    author: "carol-fixture",
+    anchor: null,
+    resolvable: true,
+    resolved: true,
+  });
+
+  it("unfolds the group, then focuses the thread itself", async () => {
+    useThreadStore.setState({
+      byReview: { [r.id]: { threads: [done], loading: false, error: null } },
+    });
+    render(
+      <>
+        <Shell />
+        <ConversationCard
+          conversation={[done]}
+          elsewhere={[]}
+          provider="gitlab"
+          loading={false}
+          error={null}
+          selected={false}
+          now={NOW}
+          onSelect={() => undefined}
+          cardRef={() => undefined}
+        />
+      </>,
+    );
+    expect(
+      screen.queryByRole("article", { name: "Thread by carol-fixture" }),
+    ).toBeNull();
+    act(() => void runFlowAction("nextItem", r.id, null));
+    const card = await screen.findByRole("article", {
+      name: "Thread by carol-fixture",
+    });
+    await waitFor(() => expect(card).toHaveFocus());
   });
 });
 
