@@ -30,8 +30,8 @@ use argus_core::provider::{
     ProviderStatus, ReviewRef, ReviewState, Side, Thread,
 };
 use argus_core::{
-    RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewStatus, RoundReason, Settings,
-    StoredThread, ThreadId,
+    MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewStatus,
+    ReviewVerdict, RoundReason, Settings, StoredThread, ThreadId,
 };
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -124,11 +124,12 @@ fn post_error_kinds() -> Vec<PostErrorKind> {
         PostRejected,
         LineNotInDiff,
         HeadMoved,
+        Unsupported,
     ];
     for k in &all {
         match k {
             NotFound | InvalidInput | GithubUnavailable | GitlabNotConfigured | GitlabAuth
-            | Provider | Store | Io | PostRejected | LineNotInDiff | HeadMoved => {}
+            | Provider | Store | Io | PostRejected | LineNotInDiff | HeadMoved | Unsupported => {}
         }
     }
     all
@@ -270,6 +271,9 @@ fn current() -> Value {
         untouched_threads: 1,
         requested: true,
         rerequested_at: Some(t),
+        my_review_state: MyReviewState::RequestedChanges,
+        my_reviewed_at: Some(t),
+        my_reviewed_sha: Some("c1".into()),
         listed: true,
         viewer: "rev-fixture".into(),
         fingerprint: "never on the wire".into(),
@@ -559,6 +563,25 @@ fn current() -> Value {
             values(&[ReviewState::Open, ReviewState::Merged, ReviewState::Closed]),
         ),
         ("ReviewStatus", values(&review_statuses())),
+        (
+            "MyReviewState",
+            values(&[
+                MyReviewState::AwaitingReview,
+                MyReviewState::ReviewStarted,
+                MyReviewState::RequestedChanges,
+                MyReviewState::Commented,
+                MyReviewState::Approved,
+                MyReviewState::NotReviewer,
+            ]),
+        ),
+        (
+            "ReviewVerdict",
+            values(&[
+                ReviewVerdict::Approve,
+                ReviewVerdict::RequestChanges,
+                ReviewVerdict::Comment,
+            ]),
+        ),
         ("RoundReason", values(&round_reasons())),
         ("Side", values(&[Side::Old, Side::New])),
         ("GitlabProblem", values(&[GitlabProblem::InvalidUrl])),

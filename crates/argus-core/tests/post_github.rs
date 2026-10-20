@@ -9,7 +9,9 @@
 use std::path::PathBuf;
 
 use argus_core::post::{DiffLine, LineKind, PlacedComment, PostErrorKind};
-use argus_core::provider::{GithubProvider, ProviderId, ReviewProvider, ReviewRef, Side};
+use argus_core::provider::{
+    GithubProvider, ProviderId, ReviewProvider, ReviewRef, ReviewVerdict, Side,
+};
 use serde_json::{json, Value};
 
 const HEAD: &str = "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3";
@@ -361,4 +363,57 @@ fn approves_with_an_approve_review() {
         gh.reply(&pr(99), "1", "x").unwrap_err().kind,
         PostErrorKind::NotFound
     );
+}
+
+// ---------------------------------------------------------------------------
+// Submit review: one GitHub review per submit.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn submits_each_verdict_as_one_review_pinned_to_the_head() {
+    let f = fake();
+    let gh = f.provider();
+    gh.submit_review(&pr(12), ReviewVerdict::Approve, HEAD, None)
+        .unwrap();
+    gh.submit_review(
+        &pr(12),
+        ReviewVerdict::RequestChanges,
+        HEAD,
+        Some("Please add a test for the TTL."),
+    )
+    .unwrap();
+    gh.submit_review(&pr(12), ReviewVerdict::Comment, HEAD, Some("Looks close."))
+        .unwrap();
+    gh.submit_review(&pr(12), ReviewVerdict::Approve, HEAD, Some("LGTM"))
+        .unwrap();
+    assert_eq!(
+        f.bodies(),
+        [
+            json!({ "event": "APPROVE", "commit_id": HEAD }),
+            json!({
+                "event": "REQUEST_CHANGES",
+                "commit_id": HEAD,
+                "body": "Please add a test for the TTL."
+            }),
+            json!({ "event": "COMMENT", "commit_id": HEAD, "body": "Looks close." }),
+            json!({ "event": "APPROVE", "commit_id": HEAD, "body": "LGTM" }),
+        ]
+    );
+    let calls = f.calls();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|l| l.starts_with(
+                "api --method POST repos/acme-fixture/widgets/pulls/12/reviews --input -"
+            ))
+            .count(),
+        4
+    );
+    // GitHub's refusal comes back with its reason.
+    let err = gh
+        .submit_review(&pr(13), ReviewVerdict::RequestChanges, HEAD, Some("x"))
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert!(!err.message.contains("fake-gh-token"));
 }

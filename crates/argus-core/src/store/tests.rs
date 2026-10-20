@@ -246,6 +246,50 @@ fn viewed_marks_reset_when_the_file_changed() {
     assert!(store.viewed(r.id).unwrap().is_empty());
 }
 
+/// Insert `r` with the columns every schema since v1 has (the store's own
+/// write also sets later ones, which an old schema lacks).
+fn insert_old_review(store: &Store, r: &ReviewRecord) {
+    store
+        .conn()
+        .execute(
+            "INSERT INTO reviews (id, provider, host, repo, number, title, author, url, state,
+                draft, head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at,
+                round, round_reasons, status, untouched_threads, requested, rerequested_at,
+                listed, viewer, fingerprint, updated_at, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+            params![
+                r.id.to_string(),
+                r.review.provider.as_str(),
+                r.review.host,
+                r.review.repo,
+                r.review.number,
+                r.review.title,
+                r.review.author,
+                r.review.url,
+                r.state.as_str(),
+                r.draft,
+                r.head_sha,
+                r.base_sha,
+                r.last_reviewed_sha,
+                r.last_reviewed_at,
+                r.approved_at,
+                r.round,
+                serde_json::to_string(&r.round_reasons).unwrap(),
+                r.status.as_str(),
+                r.untouched_threads,
+                r.requested,
+                r.rerequested_at,
+                r.listed,
+                r.viewer,
+                r.fingerprint,
+                r.review.updated_at,
+                r.fetched_at,
+            ],
+        )
+        .unwrap();
+}
+
 /// A database at schema `version` as that release left it, holding a review
 /// with a thread, a viewed mark and v1 AI rows (findings without a side).
 /// Written through the store's own code on the unmigrated connection, so
@@ -262,7 +306,7 @@ fn old_database(path: &Path, version: usize) -> (ReviewRecord, ThreadId) {
     let mut r = record();
     r.last_reviewed_sha = Some("h0".into());
     r.last_reviewed_at = Some(at(9, 8));
-    store.upsert_review(&r).unwrap();
+    insert_old_review(&store, &r);
     let t = thread(
         "t1",
         ME,
@@ -519,4 +563,38 @@ fn upgrading_to_v8_makes_threads_the_user_replied_in_theirs() {
     assert_eq!(mine["t1"], (true, true));
     assert_eq!(mine["t2"], (true, false));
     assert_eq!(mine["t3"], (false, false));
+}
+
+#[test]
+fn keeps_the_users_platform_review_state() {
+    let store = Store::in_memory().unwrap();
+    let mut r = record();
+    assert_eq!(r.my_review_state, MyReviewState::NotReviewer);
+    r.my_review_state = MyReviewState::RequestedChanges;
+    r.my_reviewed_at = Some(at(10, 12));
+    r.my_reviewed_sha = Some("h1".into());
+    store.upsert_review(&r).unwrap();
+    assert_eq!(store.review(r.id).unwrap(), Some(r.clone()));
+    // A database from before step 13 reads as "not a reviewer" until the
+    // next fetch says otherwise (see the upgrade test for every version).
+    r.my_review_state = MyReviewState::AwaitingReview;
+    store.upsert_review(&r).unwrap();
+    assert_eq!(
+        store.review(r.id).unwrap().unwrap().my_review_state,
+        MyReviewState::AwaitingReview
+    );
+}
+
+#[test]
+fn marks_a_set_of_files_viewed_at_once() {
+    let store = Store::in_memory().unwrap();
+    let r = record();
+    store.upsert_review(&r).unwrap();
+    store.set_viewed(r.id, "a.rs", "old", at(10, 1)).unwrap();
+    let files = HashMap::from([
+        ("a.rs".to_string(), "new".to_string()),
+        ("b.rs".to_string(), "b1".to_string()),
+    ]);
+    store.set_viewed_all(r.id, &files, at(10, 2)).unwrap();
+    assert_eq!(store.viewed(r.id).unwrap(), files);
 }

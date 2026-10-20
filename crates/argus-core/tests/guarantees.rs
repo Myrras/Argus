@@ -18,7 +18,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use argus_core::history::{LineChange, TimelineEvent};
-use argus_core::provider::{ReviewState, Reviewer, ReviewerState, Side};
+use argus_core::provider::{
+    MyReviewState, ReviewState, ReviewVerdict, Reviewer, ReviewerState, Side,
+};
 use argus_core::{
     CoreError, LineStatus, NewComment, PostErrorKind, PostResult, ReviewStatus, RoundReason,
     VerdictLabel,
@@ -462,4 +464,139 @@ fn from_new_commits_to_a_posted_comment_without_leaving_argus() {
     assert_eq!(r.status, ReviewStatus::WaitingOnAuthor);
     assert_eq!(r.last_reviewed_sha.as_deref(), Some("c2"));
     assert!(thread_map(&core).contains_key(&posted.provider_thread_id));
+}
+
+// ------------------------------------------------ Submit review
+
+/// Submit review writes exactly one review state per submit (plus a
+/// summary when given, and the pending comments the UI posts first), and
+/// only when called.
+#[test]
+fn a_submit_is_one_review_state_write() {
+    let p = Platform::new();
+    p.with(|w| w.detail.my_review_state = MyReviewState::AwaitingReview);
+    let core = core_over(&p);
+    let id = the_review(&core).id;
+    assert_eq!(the_review(&core).status, ReviewStatus::NeedsReview);
+    // Refreshing, reading files and marking a round write nothing.
+    core.refresh();
+    core.list_files(id, false).unwrap();
+    assert!(p.writes().is_empty());
+
+    // The drafts first (the UI's "Post N pending comments with it"), then
+    // the verdict.
+    let results = core
+        .post_comments(id, vec![comment(5, "Why five?")])
+        .unwrap();
+    assert!(results[0].is_posted());
+    let head = the_review(&core).head_sha;
+    let after = core
+        .submit_review(
+            id,
+            ReviewVerdict::RequestChanges,
+            &head,
+            Some("Fix the TTL."),
+        )
+        .unwrap();
+    assert_eq!(p.writes(), ["post_comment", "request_changes", "summary"]);
+    // Requested changes: the author's move now.
+    assert_eq!(after.my_review_state, MyReviewState::RequestedChanges);
+    assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+    assert!(after.is_active());
+
+    // Invalid submissions never reach the platform.
+    p.clear_calls();
+    assert_eq!(
+        core.submit_review(id, ReviewVerdict::Comment, &head, None)
+            .unwrap_err()
+            .kind,
+        PostErrorKind::InvalidInput
+    );
+    assert_eq!(
+        core.submit_review(id, ReviewVerdict::Approve, "", None)
+            .unwrap_err()
+            .kind,
+        PostErrorKind::InvalidInput
+    );
+    assert!(p.writes().is_empty());
+
+    // New commits since: needs re-review; a submit of the old head is
+    // refused with nothing written.
+    p.with(|w| w.push_commit("c2", 11));
+    core.refresh();
+    assert_eq!(the_review(&core).status, ReviewStatus::NeedsReReview);
+    assert_eq!(
+        core.submit_review(id, ReviewVerdict::Approve, &head, None)
+            .unwrap_err()
+            .kind,
+        PostErrorKind::HeadMoved
+    );
+    assert!(p.writes().is_empty());
+
+    // Approving the new head: one write, and the review leaves the lists.
+    let head = the_review(&core).head_sha;
+    let approved = core
+        .submit_review(id, ReviewVerdict::Approve, &head, None)
+        .unwrap();
+    assert_eq!(p.writes(), ["approve"]);
+    assert_eq!(approved.status, ReviewStatus::Approved);
+    assert!(active(&core).is_empty());
+}
+
+/// "Pressing approve should also mark all files as viewed": every file of
+/// the review's diff at the approved head, locally; nothing on a failed or
+/// refused approval; a later push unmarks what changed (content keys).
+#[test]
+fn approving_marks_every_file_viewed_at_the_approved_head() {
+    let p = Platform::new();
+    let core = core_over(&p);
+    let id = the_review(&core).id;
+    let viewed = |core: &argus_core::Core| -> Vec<bool> {
+        core.list_files(id, false)
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| f.viewed)
+            .collect()
+    };
+    assert_eq!(viewed(&core), [false]);
+
+    // A refused approval (the head moved on the platform) marks nothing.
+    p.with(|w| w.push_commit("c2", 11));
+    let stale = the_review(&core).head_sha;
+    assert_eq!(
+        core.approve_review(id, &stale).unwrap_err().kind,
+        PostErrorKind::HeadMoved
+    );
+    assert_eq!(viewed(&core), [false]);
+
+    // So does one refused for a push the store has not seen yet.
+    let head = the_review(&core).head_sha;
+    p.with(|w| w.detail.head_sha = "c3".into());
+    assert!(core.approve_review(id, &head).is_err());
+    assert_eq!(viewed(&core), [false]);
+    p.with(|w| w.detail.head_sha = "c2".into());
+    core.refresh();
+
+    // Request changes marks nothing either.
+    p.with(|w| w.detail.my_review_state = MyReviewState::AwaitingReview);
+    let head = the_review(&core).head_sha;
+    core.submit_review(id, ReviewVerdict::RequestChanges, &head, Some("Not yet."))
+        .unwrap();
+    assert_eq!(viewed(&core), [false]);
+    assert_eq!(p.writes(), ["request_changes", "summary"]);
+
+    // Approved: every file viewed, without another platform write.
+    core.approve_review(id, &head).unwrap();
+    assert_eq!(viewed(&core), [true]);
+    assert_eq!(p.writes(), ["request_changes", "summary", "approve"]);
+
+    // A later push changes the file: it shows unviewed again.
+    p.with(|w| {
+        w.detail.approved_by_me = false;
+        w.detail.my_review_state = MyReviewState::AwaitingReview;
+        w.push_commit("c3", 12);
+    });
+    core.refresh();
+    assert_eq!(viewed(&core), [false]);
 }

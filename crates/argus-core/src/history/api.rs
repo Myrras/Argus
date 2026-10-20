@@ -232,17 +232,7 @@ fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
         // As the stored round reads the notes: a reply kept unanswered is
         // not untouched (see `keep_unanswered`).
         let n = untouched_agreeing(
-            &RoundInput {
-                state: current.state,
-                head_sha: &current.head_sha,
-                last_reviewed_sha: current.last_reviewed_sha.as_deref(),
-                last_reviewed_at: current.last_reviewed_at,
-                approved_at: current.approved_at,
-                rerequested_at: current.rerequested_at,
-                threads: &threads,
-                me: &current.viewer,
-                seen_at: None,
-            },
+            &RoundInput::of(&current, &threads),
             &current.round_reasons,
             Some(&touches),
         );

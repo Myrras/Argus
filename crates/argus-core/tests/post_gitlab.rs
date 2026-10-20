@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use argus_core::post::{DiffLine, LineKind, PlacedComment, PostErrorKind};
 use argus_core::provider::{
-    GitlabProvider, ProviderId, ReviewProvider, ReviewRef, Side, StaticToken,
+    GitlabProvider, MyReviewState, ProviderId, ReviewProvider, ReviewRef, ReviewVerdict, Side,
+    StaticToken,
 };
 use argus_core::store::Store;
 use argus_core::{Core, NewComment, PostResult, ReviewStatus};
@@ -546,9 +547,11 @@ fn posting_and_approving_through_the_core() {
     assert_eq!(bodies[1]["position"]["old_line"], 2);
     assert_eq!(bodies[0]["position"]["head_sha"], HEAD_SHA);
 
+    // Posting moves the watermark; the review stays the user's while
+    // GitLab still awaits their review (only a submitted review sets it).
     let after = core.review(id).unwrap();
     assert_eq!(after.last_reviewed_sha.as_deref(), Some(HEAD_SHA));
-    assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(after.status, ReviewStatus::NeedsReview);
 
     let approved = core.approve_review(id, HEAD_SHA).unwrap();
     assert!(approved.approved_at.is_some());
@@ -652,4 +655,243 @@ fn a_failing_reviewers_call_does_not_block_approving() {
     core.approve_review(id, HEAD_SHA).unwrap();
     let approval = posts(&log).last().unwrap().clone();
     assert_eq!(approval.path, format!("{MR21}/approve"));
+}
+
+// ---------------------------------------------------------------------------
+// Submit review: approve / request changes, with a summary note.
+// ---------------------------------------------------------------------------
+
+/// How the double answers a submit: the instance's version, whether the
+/// user is a reviewer, and how `/request_changes` goes.
+#[derive(Clone, Copy)]
+struct Submit {
+    version: &'static str,
+    reviewer: bool,
+    /// GitLab runs the quick action (202) rather than saving it as a note.
+    recognised: bool,
+    /// The quick action sets the user's reviewer state.
+    takes: bool,
+    /// What a plain note (the summary) gets.
+    note_status: &'static str,
+}
+
+const SUBMIT: Submit = Submit {
+    version: "17.5.1-ee",
+    reviewer: true,
+    recognised: true,
+    takes: true,
+    note_status: "201 Created",
+};
+
+/// The fixture instance with the submit routes on top.
+fn submitting(how: Submit) -> (String, Log) {
+    let changed = Arc::new(Mutex::new(false));
+    serve(move |req: &Request| {
+        let route = req
+            .path
+            .split_once('?')
+            .map_or(req.path.as_str(), |(r, _)| r);
+        let me_state = if *changed.lock().unwrap() {
+            "requested_changes"
+        } else {
+            "unreviewed"
+        };
+        match (req.method.as_str(), route) {
+            ("GET", "/api/v4/version") => reply(
+                "200 OK",
+                format!(r#"{{"version":"{}","revision":"fixture"}}"#, how.version),
+            ),
+            ("GET", r) if r == format!("{MR21}/reviewers") => {
+                let mut list = vec![json!({
+                    "user": { "id": 45, "username": "dana-fixture" }, "state": "approved"
+                })];
+                if how.reviewer {
+                    list.push(json!({
+                        "user": { "id": 42, "username": "rev-fixture" }, "state": me_state
+                    }));
+                }
+                reply("200 OK", Value::Array(list).to_string())
+            }
+            ("POST", r) if r == format!("{MR21}/notes") => {
+                if req.json()["body"] == "/request_changes" {
+                    if !how.recognised {
+                        return reply("201 Created", r#"{"id":9010,"body":"/request_changes"}"#);
+                    }
+                    if how.takes {
+                        *changed.lock().unwrap() = true;
+                    }
+                    return reply(
+                        "202 Accepted",
+                        r#"{"commands_changes":{},"summary":["Changes requested to the current merge request."]}"#,
+                    );
+                }
+                if how.note_status.starts_with('2') {
+                    reply(how.note_status, r#"{"id":9011,"body":"x"}"#)
+                } else {
+                    reply(how.note_status, r#"{"message":"403 Forbidden"}"#)
+                }
+            }
+            _ => instance(req),
+        }
+    })
+}
+
+#[test]
+fn requests_changes_with_the_quick_action_then_posts_the_summary() {
+    let (base, log) = submitting(SUBMIT);
+    provider(&base)
+        .submit_review(
+            &mr(&base),
+            ReviewVerdict::RequestChanges,
+            HEAD_SHA,
+            Some("Please add the retry test."),
+        )
+        .unwrap();
+    let posts = posts(&log);
+    let sent: Vec<(String, Value)> = posts.iter().map(|p| (p.path.clone(), p.json())).collect();
+    assert_eq!(
+        sent,
+        [
+            (
+                format!("{MR21}/notes"),
+                json!({ "body": "/request_changes" })
+            ),
+            (
+                format!("{MR21}/notes"),
+                json!({ "body": "Please add the retry test." })
+            ),
+        ]
+    );
+    assert!(posts.iter().all(|p| p.token));
+    // The version and the reviewer were read before the write.
+    let seen = log.lock().unwrap();
+    let first_post = seen.iter().position(|r| r.method == "POST").unwrap();
+    assert!(seen[..first_post]
+        .iter()
+        .any(|r| r.path == "/api/v4/version"));
+    assert!(seen[..first_post]
+        .iter()
+        .any(|r| r.path.starts_with(&format!("{MR21}/reviewers"))));
+}
+
+#[test]
+fn a_gitlab_without_request_changes_is_refused_before_any_write() {
+    let (base, log) = submitting(Submit {
+        version: "17.1.4-ee",
+        ..SUBMIT
+    });
+    let err = provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::Unsupported);
+    assert!(err
+        .message
+        .contains("Your GitLab doesn't support requesting changes via the API"));
+    assert!(posts(&log).is_empty());
+}
+
+#[test]
+fn only_a_reviewer_can_request_changes() {
+    let (base, log) = submitting(Submit {
+        reviewer: false,
+        ..SUBMIT
+    });
+    let err = provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert!(err.message.contains("reviewer"));
+    assert!(posts(&log).is_empty());
+}
+
+#[test]
+fn a_change_request_gitlab_did_not_take_is_an_error() {
+    // Saved as a plain note: the command was not recognised.
+    let (base, _) = submitting(Submit {
+        recognised: false,
+        ..SUBMIT
+    });
+    let err = provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::Unsupported);
+    assert!(err.message.contains("delete it there"));
+
+    // Run, but the reviewer state did not move: GitLab's words, no token.
+    let (base, log) = submitting(Submit {
+        takes: false,
+        ..SUBMIT
+    });
+    let err = provider(&base)
+        .submit_review(
+            &mr(&base),
+            ReviewVerdict::RequestChanges,
+            HEAD_SHA,
+            Some("Summary"),
+        )
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert!(err.message.contains("Changes requested to the current"));
+    assert!(!err.message.contains(TOKEN));
+    // No summary after a failed verdict.
+    assert_eq!(posts(&log).len(), 1);
+}
+
+#[test]
+fn approves_with_a_summary_note_and_refuses_a_comment_review() {
+    let (base, log) = submitting(SUBMIT);
+    provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::Approve, HEAD_SHA, Some("LGTM"))
+        .unwrap();
+    let sent: Vec<(String, Value)> = posts(&log)
+        .iter()
+        .map(|p| (p.path.clone(), p.json()))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (format!("{MR21}/approve"), json!({ "sha": HEAD_SHA })),
+            (format!("{MR21}/notes"), json!({ "body": "LGTM" })),
+        ]
+    );
+
+    let (base, log) = submitting(SUBMIT);
+    let err = provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::Comment, HEAD_SHA, Some("x"))
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::Unsupported);
+    assert!(posts(&log).is_empty());
+}
+
+#[test]
+fn a_failed_summary_says_the_verdict_went_through() {
+    let (base, _) = submitting(Submit {
+        note_status: "403 Forbidden",
+        ..SUBMIT
+    });
+    let err = provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::Approve, HEAD_SHA, Some("LGTM"))
+        .unwrap_err();
+    assert!(err
+        .message
+        .starts_with("Your review was submitted, but its summary was not posted"));
+}
+
+#[test]
+fn requesting_changes_through_the_core_waits_on_the_author() {
+    let (base, log) = submitting(SUBMIT);
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let id = core.reviews().unwrap()[0].id;
+    let before = core.review(id).unwrap();
+    assert_eq!(before.status, ReviewStatus::NeedsReview);
+    assert_eq!(before.my_review_state, MyReviewState::AwaitingReview);
+
+    let after = core
+        .submit_review(id, ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap();
+    assert_eq!(after.my_review_state, MyReviewState::RequestedChanges);
+    assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(after.last_reviewed_sha.as_deref(), Some(HEAD_SHA));
+    assert_eq!(posts(&log).len(), 1);
 }

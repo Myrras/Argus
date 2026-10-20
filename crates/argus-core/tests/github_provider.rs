@@ -10,8 +10,8 @@
 use std::path::{Path, PathBuf};
 
 use argus_core::provider::{
-    DiffRange, FileStatus, GithubProvider, ProviderId, ReviewProvider, ReviewRef, ReviewState,
-    ReviewerState, Side, Thread,
+    DiffRange, FileStatus, GithubProvider, MyReviewState, ProviderId, ReviewProvider, ReviewRef,
+    ReviewState, ReviewerState, Side, Thread,
 };
 use argus_core::review::{classify, RoundInput};
 use argus_core::CoreError;
@@ -218,6 +218,18 @@ fn fetches_detail_with_paginated_commits_and_reviewer_states() {
 
     assert!(d.requested_from_me);
     assert!(!d.approved_by_me);
+    // Requested again after the user's comment review of c1: owed, and
+    // that review dates the user's last look.
+    assert_eq!(d.my_review_state, MyReviewState::AwaitingReview);
+    assert_eq!(
+        d.my_reviewed_at.unwrap().to_rfc3339(),
+        "2026-10-08T12:00:00+00:00"
+    );
+    assert_eq!(
+        d.my_reviewed_sha.as_deref(),
+        Some("c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1")
+    );
+    assert_eq!(d.review_requested_at, None);
     let state_of = |u: &str| {
         d.reviewers
             .iter()
@@ -248,6 +260,17 @@ fn merged_pr_with_my_approval() {
     assert!(d.approved_by_me);
     assert!(!d.requested_from_me);
     assert_eq!(d.review.author, "bob-fixture");
+    // A later comment review does not undo the approval, but it is the
+    // user's latest look.
+    assert_eq!(d.my_review_state, MyReviewState::Approved);
+    assert_eq!(
+        d.my_reviewed_at.unwrap().to_rfc3339(),
+        "2026-10-12T09:00:00+00:00"
+    );
+    assert_eq!(
+        d.my_reviewed_sha.as_deref(),
+        Some("d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2")
+    );
 }
 
 #[test]
@@ -404,6 +427,9 @@ fn the_pr_authors_conversation_answer_counts_as_a_reply() {
             threads: &threads,
             me: "rev-fixture",
             seen_at: None,
+            my_state: MyReviewState::NotReviewer,
+            platform_reviewed_sha: None,
+            platform_reviewed_at: None,
         })
     };
     // Reviewed after every review comment reply (the last is 10-10 09:00)

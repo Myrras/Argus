@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use argus_core::provider::ReviewProvider as _;
 use argus_core::store::Store;
-use argus_core::{Core, ReviewStatus};
+use argus_core::{Core, MyReviewState, ReviewStatus, RoundReason};
 
 use argus_core::provider::{
     DiffRange, FileStatus, GitlabProvider, ProviderId, ReviewRef, ReviewState, ReviewerState, Side,
@@ -66,6 +66,7 @@ fn fixture_routes(path: &str) -> Reply {
         r if r == format!("{mr21}/versions") => ok("mr_21_versions.json"),
         r if r == format!("{mr21}/reviewers") => ok("mr_21_reviewers.json"),
         r if r == format!("{mr21}/approvals") => ok("mr_21_approvals.json"),
+        r if r == format!("{mr21}/notes") => ok("mr_21_notes.json"),
         r if r == format!("{mr21}/diffs") => {
             if query.contains("page=2") {
                 Reply {
@@ -267,6 +268,14 @@ fn fetches_detail_with_versions_reviewers_and_approvals() {
     };
     assert_eq!(state_of("rev-fixture"), Some(ReviewerState::Requested));
     assert_eq!(state_of("dana-fixture"), Some(ReviewerState::Approved));
+    // "Awaiting review", first asked for in the request note; the user's
+    // comment is no review verdict.
+    assert_eq!(d.my_review_state, MyReviewState::AwaitingReview);
+    assert_eq!(
+        d.review_requested_at.unwrap().to_rfc3339(),
+        "2026-10-08T09:05:00+00:00"
+    );
+    assert_eq!(d.my_reviewed_at, None);
 }
 
 #[test]
@@ -582,8 +591,11 @@ fn refresh_end_to_end_through_the_core() {
     assert_eq!(threads.len(), 4);
     assert!(threads[0].mine && !threads[2].mine);
 
+    // A local mark moves the watermark, but GitLab still has the user's
+    // review as "Awaiting review": it keeps needing them.
+    assert_eq!(r21.my_review_state, MyReviewState::AwaitingReview);
     let marked = core.mark_reviewed(r21.id).unwrap();
-    assert_eq!(marked.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(marked.status, ReviewStatus::NeedsReview);
     assert_eq!(
         marked.last_reviewed_sha.as_deref(),
         Some(r21.head_sha.as_str())
@@ -1195,4 +1207,71 @@ fn a_commented_mr_that_keeps_failing_drops_off_the_list() {
     assert!(listed(&gl));
     failing.store(true, Ordering::SeqCst);
     assert!(listed(&gl));
+}
+
+// ------------------------------------------------- the platform review state
+
+/// !15210: GitLab shows the user's review as "Awaiting review" at every
+/// fetch (requested both times, no transition), the user marked the round
+/// in Argus at the head, then the author asked again ("requested review
+/// from @rev-fixture", dated after the mark). The review needs the user
+/// again, with the reason.
+#[test]
+fn a_re_request_note_after_the_watermark_brings_the_review_back() {
+    let rerequest: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let notes = rerequest.clone();
+    let (base, _) = serve_raw(move |path, _| {
+        let mr21 = "/api/v4/projects/grp%2Fapp/merge_requests/21";
+        match path.split_once('?').map_or(path, |(r, _)| r) {
+            r if r == format!("{mr21}/notes") => {
+                let base = fixture("mr_21_notes.json");
+                let body = match notes.lock().unwrap().as_deref() {
+                    Some(at) => {
+                        let note = format!(
+                            r#"{{"id":6060,"body":"requested review from @rev-fixture","author":{{"id":41,"username":"alice-fixture"}},"created_at":"{at}","system":true}},"#
+                        );
+                        base.replacen('[', &format!("[{note}"), 1)
+                    }
+                    None => base,
+                };
+                Reply {
+                    status: "200 OK",
+                    headers: String::new(),
+                    body,
+                }
+            }
+            _ => fixture_routes(path),
+        }
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let r21 = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.number == 21)
+        .unwrap();
+    assert_eq!(r21.status, ReviewStatus::NeedsReview);
+
+    let marked = core.mark_reviewed(r21.id).unwrap();
+    assert_eq!(
+        marked.last_reviewed_sha.as_deref(),
+        Some(r21.head_sha.as_str())
+    );
+    // Still owed on GitLab, and never re-requested since: first round.
+    assert_eq!(marked.status, ReviewStatus::NeedsReview);
+    assert!(core.refresh().changed.is_empty());
+
+    // The author re-requests: a system note after the mark. Same head,
+    // `requested` all along.
+    let later = chrono::Utc::now() + chrono::Duration::seconds(1);
+    *rerequest.lock().unwrap() = Some(later.to_rfc3339());
+    assert_eq!(core.refresh().changed, [r21.id]);
+    let again = core.review(r21.id).unwrap();
+    assert!(again.requested);
+    assert_eq!(again.head_sha, r21.head_sha);
+    assert_eq!(again.status, ReviewStatus::NeedsReReview);
+    assert_eq!(again.round_reasons, [RoundReason::ReRequested]);
+    assert_eq!(again.round, 2);
+    assert!(again.is_active());
 }

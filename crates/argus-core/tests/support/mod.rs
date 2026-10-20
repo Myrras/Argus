@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use argus_core::history::ThreadResolution;
 use argus_core::post::{PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
 use argus_core::provider::{
-    Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
-    ReviewDetail, ReviewProvider, ReviewRef, ReviewState, Side, Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, MyReviewState, Note,
+    ProviderId, ReviewDetail, ReviewProvider, ReviewRef, ReviewState, ReviewVerdict, Side, Thread,
 };
 use argus_core::store::Store;
 use argus_core::{Core, CoreError, CoreResult};
@@ -174,6 +174,10 @@ impl Platform {
             reviewers: Vec::new(),
             requested_from_me: true,
             approved_by_me: false,
+            my_review_state: Default::default(),
+            my_reviewed_at: None,
+            my_reviewed_sha: None,
+            review_requested_at: None,
         };
         let mine = Thread {
             id: MY_THREAD.into(),
@@ -413,6 +417,46 @@ impl ReviewProvider for Platform {
             return Err(PostError::new(PostErrorKind::HeadMoved, "head moved"));
         }
         w.detail.approved_by_me = true;
+        Ok(())
+    }
+
+    // --- Submit review: one logged write for the verdict (approve through
+    // `approve`), one more for a summary. The world then shows the state.
+    fn submit_review(
+        &self,
+        r: &ReviewRef,
+        verdict: ReviewVerdict,
+        head_sha: &str,
+        summary: Option<&str>,
+    ) -> Result<(), PostError> {
+        match verdict {
+            ReviewVerdict::Approve => self.approve(r, head_sha)?,
+            ReviewVerdict::RequestChanges | ReviewVerdict::Comment => {
+                self.log(
+                    if verdict == ReviewVerdict::Comment {
+                        "comment_review"
+                    } else {
+                        "request_changes"
+                    },
+                    true,
+                );
+                let mut w = self.world.lock().unwrap();
+                if w.detail.head_sha != head_sha {
+                    return Err(PostError::new(PostErrorKind::HeadMoved, "head moved"));
+                }
+                w.detail.my_review_state = if verdict == ReviewVerdict::Comment {
+                    MyReviewState::Commented
+                } else {
+                    MyReviewState::RequestedChanges
+                };
+                w.detail.requested_from_me = false;
+                w.detail.my_reviewed_at = Some(Utc::now());
+                w.detail.my_reviewed_sha = Some(head_sha.into());
+            }
+        }
+        if summary.is_some() {
+            self.log("summary", true);
+        }
         Ok(())
     }
 }

@@ -34,6 +34,14 @@
       "unlocated",
       "notCode"
     ],
+    "MyReviewState": [
+      "awaitingReview",
+      "reviewStarted",
+      "requestedChanges",
+      "commented",
+      "approved",
+      "notReviewer"
+    ],
     "PostErrorKind": [
       "notFound",
       "invalidInput",
@@ -45,7 +53,8 @@
       "io",
       "postRejected",
       "lineNotInDiff",
-      "headMoved"
+      "headMoved",
+      "unsupported"
     ],
     "ProviderId": [
       "github",
@@ -66,6 +75,11 @@
       "waitingOnAuthor",
       "closedWithoutApproval",
       "approved"
+    ],
+    "ReviewVerdict": [
+      "approve",
+      "requestChanges",
+      "comment"
     ],
     "RoundReason": [
       "newCommits",
@@ -282,6 +296,9 @@
       "lastReviewedAt",
       "lastReviewedSha",
       "listed",
+      "myReviewState",
+      "myReviewedAt",
+      "myReviewedSha",
       "number",
       "provider",
       "repo",

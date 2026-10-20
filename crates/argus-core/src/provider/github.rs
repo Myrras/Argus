@@ -35,8 +35,9 @@ use serde::Deserialize;
 use super::conditional::{Cached, ConditionalCache};
 use super::github_conversation::{self as conversation, ConversationId};
 use super::model::{
-    Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, Note, ProviderId,
-    ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side, Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, MyReviewState, Note,
+    ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, ReviewVerdict, Reviewer,
+    ReviewerState, Side, Thread,
 };
 use super::rate_limit::{default_reset, reset_at, Backoff};
 use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
@@ -946,6 +947,24 @@ impl ReviewProvider for GithubProvider {
     fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
         self.limit.active()
     }
+
+    // --- Submit review (helpers in the "Submit review" section) ---
+
+    /// GitHub records which commit a review is of (`commit_id`) and accepts
+    /// an older one, so the core checks the head before calling this.
+    fn submit_review(
+        &self,
+        r: &ReviewRef,
+        verdict: ReviewVerdict,
+        head_sha: &str,
+        summary: Option<&str>,
+    ) -> PostResultOf<()> {
+        let _: serde_json::Value = self.post_json(
+            &format!("repos/{}/pulls/{}/reviews", r.repo, r.number),
+            &review_body(verdict, head_sha, summary),
+        )?;
+        Ok(())
+    }
 }
 
 /// One entry of `pulls/{n}/files` or a compare's `files`. GitHub leaves the
@@ -1046,10 +1065,20 @@ fn assemble_detail(
     // own rule); the author's replies to review comments are reviews too and
     // are skipped.
     let mut standing: Vec<(String, ReviewerState)> = Vec::new();
+    // The user's latest submitted review, any verdict: when and at which
+    // commit they last reviewed on GitHub itself.
+    let mut my_last: Option<(DateTime<Utc>, Option<String>)> = None;
     for review in reviews {
         let Some(user) = review.user.map(|u| u.login) else {
             continue;
         };
+        if same_user(&user, me) && review.state != "PENDING" {
+            if let Some(at) = review.submitted_at {
+                if my_last.as_ref().is_none_or(|(last, _)| at >= *last) {
+                    my_last = Some((at, review.commit_id.clone()));
+                }
+            }
+        }
         if same_user(&user, &author) {
             continue;
         }
@@ -1122,6 +1151,28 @@ fn assemble_detail(
         // Approved at the current or any earlier head counts; a re-request
         // since means the author wants another look.
         approved_by_me: my_state == Some(ReviewerState::Approved) && !requested_from_me,
+        my_review_state: my_review_state(requested_from_me, my_state),
+        my_reviewed_sha: my_last.as_ref().and_then(|(_, sha)| sha.clone()),
+        my_reviewed_at: my_last.map(|(at, _)| at),
+        // GitHub's requested list carries no time; being in it is the
+        // signal (see `my_review_state`).
+        review_requested_at: None,
+    }
+}
+
+/// The user's review state: requested means owed (GitHub drops a reviewer
+/// from the list on any submitted review and adds them back on a
+/// re-request), else their standing review.
+fn my_review_state(requested: bool, standing: Option<ReviewerState>) -> MyReviewState {
+    if requested {
+        return MyReviewState::AwaitingReview;
+    }
+    match standing {
+        Some(ReviewerState::Approved) => MyReviewState::Approved,
+        Some(ReviewerState::ChangesRequested) => MyReviewState::RequestedChanges,
+        Some(ReviewerState::Commented | ReviewerState::Dismissed) => MyReviewState::Commented,
+        Some(ReviewerState::Requested) => MyReviewState::AwaitingReview,
+        None => MyReviewState::NotReviewer,
     }
 }
 
@@ -1298,6 +1349,9 @@ struct GhReview {
     body: Option<String>,
     #[serde(default)]
     submitted_at: Option<DateTime<Utc>>,
+    /// The head the review was given at.
+    #[serde(default)]
+    commit_id: Option<String>,
 }
 
 /// One comment of the PR's conversation (`issues/{n}/comments`).
@@ -1616,6 +1670,25 @@ struct GhCommitDiff {
     parents: Vec<GhRef>,
     #[serde(default)]
     files: Vec<GhFile>,
+}
+
+// ---------------------------------------------------------------------------
+// Submit review: the user's verdict as one GitHub review.
+// ---------------------------------------------------------------------------
+
+/// The JSON body of a submitted review: the verdict as `event`, the head
+/// the user reviewed as `commit_id`, the summary (if any) as `body`.
+fn review_body(verdict: ReviewVerdict, head_sha: &str, summary: Option<&str>) -> serde_json::Value {
+    let event = match verdict {
+        ReviewVerdict::Approve => "APPROVE",
+        ReviewVerdict::RequestChanges => "REQUEST_CHANGES",
+        ReviewVerdict::Comment => "COMMENT",
+    };
+    let mut body = serde_json::json!({ "event": event, "commit_id": head_sha });
+    if let Some(text) = summary {
+        body["body"] = text.into();
+    }
+    body
 }
 
 #[cfg(test)]

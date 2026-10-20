@@ -25,9 +25,9 @@ use serde::Deserialize;
 use super::conditional::{Cached, ConditionalCache};
 use super::github::check_sha;
 use super::model::{
-    Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
-    ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side,
-    Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, MyReviewState,
+    Note, ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, ReviewVerdict, Reviewer,
+    ReviewerState, Side, Thread,
 };
 use super::rate_limit::{reset_at, Backoff};
 use super::{
@@ -809,13 +809,14 @@ impl ReviewProvider for GitlabProvider {
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
         let me = self.me()?.username;
         let p = Self::mr_path(r);
-        let (mr, commits, versions, reviewers, approvals) = std::thread::scope(|s| {
+        let (mr, commits, versions, reviewers, approvals, notes) = std::thread::scope(|s| {
             let a = s.spawn(|| self.get_json::<GlMr>(&p));
             let b = s.spawn(|| self.get_all::<GlCommit>(&format!("{p}/commits")));
             let c = s.spawn(|| self.get_all::<GlVersion>(&format!("{p}/versions")));
             let d = s.spawn(|| self.get_all::<GlReviewer>(&format!("{p}/reviewers")));
             let e = s.spawn(|| self.get_json::<GlApprovals>(&format!("{p}/approvals")));
-            (join(a), join(b), join(c), join(d), join(e))
+            let f = s.spawn(|| self.review_notes(&p));
+            (join(a), join(b), join(c), join(d), join(e), join(f))
         });
         let mr = mr?;
         // Reviewer states and approvals decide whether the review is
@@ -835,7 +836,7 @@ impl ReviewProvider for GitlabProvider {
             Err(CoreError::NotFound | CoreError::GitlabAuth) => None,
             Err(e) => return Err(e),
         };
-        Ok(assemble_detail(
+        let mut detail = assemble_detail(
             self.to_ref(&mr),
             &me,
             mr,
@@ -843,7 +844,13 @@ impl ReviewProvider for GitlabProvider {
             versions?,
             reviewers,
             approved_by,
-        ))
+        );
+        // Only dates the state the reviewers read gave: without the notes
+        // (a failed read) the state still decides, undated.
+        if let Ok(notes) = notes {
+            apply_review_notes(&mut detail, &me, &notes);
+        }
+        Ok(detail)
     }
 
     /// The MR and its commits: not `/reviewers` or `/approvals`.
@@ -1054,6 +1061,31 @@ impl ReviewProvider for GitlabProvider {
             .collect())
     }
 
+    // --- Submit review (helpers in the "Review state" section) ---
+
+    fn submit_review(
+        &self,
+        r: &ReviewRef,
+        verdict: ReviewVerdict,
+        head_sha: &str,
+        summary: Option<&str>,
+    ) -> PostResultOf<()> {
+        match verdict {
+            ReviewVerdict::Approve => self.approve(r, head_sha)?,
+            ReviewVerdict::RequestChanges => self.request_changes(r)?,
+            ReviewVerdict::Comment => {
+                return Err(PostError::new(
+                    PostErrorKind::Unsupported,
+                    "GitLab has no comment-only review: approve or request changes",
+                ))
+            }
+        }
+        match summary {
+            Some(text) => self.post_summary(r, text),
+            None => Ok(()),
+        }
+    }
+
     fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
         self.limit.active()
     }
@@ -1138,6 +1170,12 @@ fn assemble_detail(
             .collect()
     });
     let i_approved = approved_by.iter().any(|u| same_user(u, me));
+    let my_entry: Option<String> = reviewers
+        .iter()
+        .flatten()
+        .find(|r| same_user(&r.user.username, me))
+        .map(|r| r.state.clone());
+    let listed_me = reviewers.is_none() && mr.reviewers.iter().any(|u| same_user(&u.username, me));
     let (mut list, requested_from_me) = match reviewers {
         Some(rs) => {
             let list: Vec<Reviewer> = rs
@@ -1215,6 +1253,11 @@ fn assemble_detail(
         reviewers: list,
         requested_from_me,
         approved_by_me: i_approved && !requested_from_me,
+        my_review_state: my_review_state(my_entry.as_deref(), listed_me, i_approved),
+        // Dated from the notes (`apply_review_notes`).
+        my_reviewed_at: None,
+        my_reviewed_sha: None,
+        review_requested_at: None,
     }
 }
 
@@ -1734,6 +1777,229 @@ struct GlResolveNote {
     resolved_at: Option<DateTime<Utc>>,
 }
 
+// ---------------------------------------------------------------------------
+// Review state: the user's own reviewer state, the notes that date it, and
+// "Submit review" (approve / request changes). The reads run with every
+// fetch; the writes only from `Core::submit_review`, on an explicit action.
+// ---------------------------------------------------------------------------
+
+/// The user's [`MyReviewState`] from their `/reviewers` entry (`entry`),
+/// or without that endpoint from being listed as a reviewer (`listed`).
+fn my_review_state(entry: Option<&str>, listed: bool, approved: bool) -> MyReviewState {
+    match entry {
+        Some("unreviewed") => MyReviewState::AwaitingReview,
+        Some("review_started") => MyReviewState::ReviewStarted,
+        Some("requested_changes") => MyReviewState::RequestedChanges,
+        Some("approved") => MyReviewState::Approved,
+        Some("reviewed" | "unapproved") => MyReviewState::Commented,
+        // A state this build does not know: owed until it says otherwise.
+        Some(_) => MyReviewState::AwaitingReview,
+        None if approved => MyReviewState::Approved,
+        None if listed => MyReviewState::AwaitingReview,
+        None => MyReviewState::NotReviewer,
+    }
+}
+
+/// The first GitLab whose `/request_changes` quick action is on by default
+/// (introduced in 16.11 behind `mr_reviewer_requests_changes`, default on
+/// in 17.2, the flag removed in 17.3). Earlier instances would post the
+/// command as a plain comment, so Argus refuses before writing.
+const REQUEST_CHANGES_SINCE: (u32, u32) = (17, 2);
+
+/// What Argus says when an instance cannot request changes by API.
+const NO_REQUEST_CHANGES: &str = "Your GitLab doesn't support requesting changes via the API (it needs GitLab 17.2 or later). Request changes in GitLab itself.";
+
+#[derive(Deserialize)]
+struct GlVersionInfo {
+    version: String,
+}
+
+/// `major.minor` of a GitLab version string (`17.5.1-ee`).
+pub(crate) fn parse_gitlab_version(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.trim().split(['.', '-']);
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// GitLab's answer to a note made only of quick actions (HTTP 202): the
+/// command ran, no note was saved. A saved note (`id`) means the command
+/// was not recognised and its text was posted as is.
+#[derive(Deserialize)]
+struct GlCommandsOnly {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    summary: Vec<String>,
+}
+
+impl GitlabProvider {
+    /// Set the user's reviewer state to "requested changes" with the
+    /// `/request_changes` quick action: the one way GitLab's API offers
+    /// before 19.x (`draft_notes/bulk_publish` with `reviewer_state` came
+    /// later, and the GraphQL `mergeRequestRequestChanges` later still).
+    /// Checked first (reads only): the instance is 17.2 or later and the
+    /// user is a reviewer of the MR (the quick action exists only for one);
+    /// checked after: GitLab ran it as a command (no note saved) and the
+    /// user's state is now `requested_changes`.
+    fn request_changes(&self, r: &ReviewRef) -> PostResultOf<()> {
+        let p = Self::mr_path(r);
+        let version: GlVersionInfo = self.get_json("/version")?;
+        if parse_gitlab_version(&version.version).is_some_and(|v| v < REQUEST_CHANGES_SINCE) {
+            return Err(PostError::new(
+                PostErrorKind::Unsupported,
+                NO_REQUEST_CHANGES,
+            ));
+        }
+        let me = self.me()?.username;
+        let mine = |reviewers: &[GlReviewer]| {
+            reviewers
+                .iter()
+                .find(|x| same_user(&x.user.username, &me))
+                .map(|x| x.state.clone())
+        };
+        let reviewers: Vec<GlReviewer> = self.get_all(&format!("{p}/reviewers"))?;
+        if mine(&reviewers).is_none() {
+            return Err(PostError::new(
+                PostErrorKind::PostRejected,
+                "GitLab only takes a change request from a reviewer of the merge request; ask to be added as one.",
+            ));
+        }
+        let answer: GlCommandsOnly = self.post_json(
+            &format!("{p}/notes"),
+            Some(&serde_json::json!({ "body": "/request_changes" })),
+            GlWrite::Comment,
+        )?;
+        if answer.id.is_some() {
+            return Err(PostError::new(
+                PostErrorKind::Unsupported,
+                format!(
+                    "{NO_REQUEST_CHANGES} It posted \"/request_changes\" as a comment; delete it there."
+                ),
+            ));
+        }
+        let after: Vec<GlReviewer> = self.get_all(&format!("{p}/reviewers"))?;
+        if mine(&after).as_deref() != Some("requested_changes") {
+            let token = self.tokens.token().unwrap_or_default();
+            let said = sanitize(&answer.summary.join(" "), &[&token]);
+            return Err(PostError::new(
+                PostErrorKind::PostRejected,
+                if said.trim().is_empty() {
+                    "GitLab did not record the change request.".to_string()
+                } else {
+                    format!("GitLab did not record the change request: {said}")
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    /// The review's summary as an MR note, after its verdict was set: a
+    /// failure says the verdict went through.
+    fn post_summary(&self, r: &ReviewRef, text: &str) -> PostResultOf<()> {
+        let posted: PostResultOf<GlCreatedNote> = self.post_json(
+            &format!("{}/notes", Self::mr_path(r)),
+            Some(&serde_json::json!({ "body": text })),
+            GlWrite::Comment,
+        );
+        posted.map(|_| ()).map_err(|e| {
+            PostError::new(
+                e.kind,
+                format!(
+                    "Your review was submitted, but its summary was not posted: {}",
+                    e.message
+                ),
+            )
+        })
+    }
+}
+
+/// How many of the newest notes are read for the review dates: one page.
+const REVIEW_NOTE_PAGES: u32 = 1;
+
+impl GitlabProvider {
+    /// The MR's newest notes (system notes included), newest first.
+    fn review_notes(&self, mr: &str) -> CoreResult<Vec<GlNote>> {
+        self.get_pages(
+            &format!("{mr}/notes?sort=desc&order_by=created_at"),
+            REVIEW_NOTE_PAGES,
+        )
+    }
+}
+
+/// Date the user's review from the MR's notes: the newest "requested
+/// review from" naming them, and their newest review verdict ("approved
+/// this merge request", "requested changes"; for a `reviewed` or
+/// `requested_changes` state without one, their newest comment), at the
+/// diff version current then.
+fn apply_review_notes(detail: &mut ReviewDetail, me: &str, notes: &[GlNote]) {
+    detail.review_requested_at = notes
+        .iter()
+        .filter(|n| n.system)
+        .filter(|n| {
+            requested_reviewers(&n.body)
+                .iter()
+                .any(|u| same_user(u, me))
+        })
+        .map(|n| n.created_at)
+        .max();
+    let mine = notes.iter().filter(|n| same_user(&n.author.username, me));
+    let verdict = mine
+        .clone()
+        .filter(|n| n.system && is_review_verdict(&n.body))
+        .map(|n| n.created_at)
+        .max();
+    let dated = verdict.or_else(|| {
+        detail
+            .my_review_state
+            .submitted_without_approval()
+            .then(|| mine.filter(|n| !n.system).map(|n| n.created_at).max())
+            .flatten()
+    });
+    detail.my_reviewed_at = dated;
+    detail.my_reviewed_sha = dated.map(|at| head_at(detail, at));
+}
+
+/// A system note that records a review verdict of its author.
+fn is_review_verdict(body: &str) -> bool {
+    let b = body.trim().to_ascii_lowercase();
+    b.starts_with("approved this merge request") || b == "requested changes"
+}
+
+/// The head the MR had at `at`: the newest diff version made by then (the
+/// oldest when all are later, the current head without versions).
+fn head_at(detail: &ReviewDetail, at: DateTime<Utc>) -> String {
+    let made_by = detail
+        .versions
+        .iter()
+        .rfind(|v| v.created_at.is_none_or(|c| c <= at));
+    made_by
+        .or(detail.versions.first())
+        .map_or_else(|| detail.head_sha.clone(), |v| v.head_sha.clone())
+}
+
+/// The usernames a "requested review from @a, @b, and @c" system note
+/// names (also "@a and @b", or one user; anything after the list, such as
+/// "and removed review request for @d", is not part of it). Empty for any
+/// other note.
+pub(crate) fn requested_reviewers(body: &str) -> Vec<String> {
+    let Some(rest) = body.trim().strip_prefix("requested review from ") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for word in rest.split_whitespace() {
+        let word = word.trim_end_matches([',', '.']);
+        if word == "and" {
+            continue;
+        }
+        match word.strip_prefix('@') {
+            Some(user) if !user.is_empty() => out.push(user.to_string()),
+            _ => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2093,5 +2359,182 @@ mod tests {
             ReviewerState::ChangesRequested
         );
         assert_eq!(reviewer_state("reviewed"), ReviewerState::Commented);
+    }
+
+    // --- Review state ---
+
+    #[test]
+    fn reads_who_a_review_request_names() {
+        assert_eq!(
+            requested_reviewers("requested review from @a, @b, and @c"),
+            ["a", "b", "c"]
+        );
+        assert_eq!(
+            requested_reviewers("requested review from @a and @b"),
+            ["a", "b"]
+        );
+        assert_eq!(
+            requested_reviewers("requested review from @rev-fixture"),
+            ["rev-fixture"]
+        );
+        // What follows the list is not part of it.
+        assert_eq!(
+            requested_reviewers("requested review from @a and removed review request for @b"),
+            ["a"]
+        );
+        assert!(requested_reviewers("removed review request for @a").is_empty());
+        assert!(requested_reviewers("approved this merge request").is_empty());
+        assert!(requested_reviewers("requested review from").is_empty());
+    }
+
+    #[test]
+    fn maps_the_users_reviewer_entry() {
+        use MyReviewState::*;
+        let state = |entry, listed, approved| my_review_state(entry, listed, approved);
+        assert_eq!(state(Some("unreviewed"), false, false), AwaitingReview);
+        assert_eq!(state(Some("review_started"), false, false), ReviewStarted);
+        assert_eq!(
+            state(Some("requested_changes"), false, false),
+            RequestedChanges
+        );
+        assert_eq!(state(Some("reviewed"), false, false), Commented);
+        assert_eq!(state(Some("unapproved"), false, false), Commented);
+        assert_eq!(state(Some("approved"), false, true), Approved);
+        assert_eq!(state(None, false, true), Approved);
+        // No `/reviewers` endpoint: listed counts as owed.
+        assert_eq!(state(None, true, false), AwaitingReview);
+        assert_eq!(state(None, false, false), NotReviewer);
+    }
+
+    #[test]
+    fn parses_gitlab_versions() {
+        assert_eq!(parse_gitlab_version("17.5.1-ee"), Some((17, 5)));
+        assert_eq!(parse_gitlab_version("16.11.0"), Some((16, 11)));
+        assert_eq!(parse_gitlab_version("18.0.0-pre"), Some((18, 0)));
+        assert_eq!(parse_gitlab_version("nightly"), None);
+        assert!(parse_gitlab_version("16.11.10-ee").unwrap() < REQUEST_CHANGES_SINCE);
+        assert!(parse_gitlab_version("17.2.0").unwrap() >= REQUEST_CHANGES_SINCE);
+    }
+
+    fn gl_note(id: u64, author: &str, at: &str, system: bool, body: &str) -> GlNote {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "body": body, "author": { "username": author },
+            "created_at": at, "system": system
+        }))
+        .unwrap()
+    }
+
+    fn mr_detail(state: MyReviewState) -> ReviewDetail {
+        let version = |head: &str, at: &str| DiffVersion {
+            head_sha: head.into(),
+            base_sha: "a0".into(),
+            start_sha: "a0".into(),
+            created_at: Some(at.parse().unwrap()),
+        };
+        ReviewDetail {
+            review: ReviewRef {
+                provider: ProviderId::Gitlab,
+                host: "gitlab.example.test".into(),
+                repo: "grp/app".into(),
+                number: 21,
+                url: String::new(),
+                title: String::new(),
+                author: "alice-fixture".into(),
+                updated_at: None,
+            },
+            description: String::new(),
+            state: ReviewState::Open,
+            draft: false,
+            head_sha: "a3".into(),
+            base_sha: "a0".into(),
+            start_sha: None,
+            commits: Vec::new(),
+            versions: vec![
+                version("a1", "2026-10-08T09:00:00Z"),
+                version("a2", "2026-10-09T09:00:00Z"),
+                version("a3", "2026-10-11T09:00:00Z"),
+            ],
+            reviewers: Vec::new(),
+            requested_from_me: state.owes_review(),
+            approved_by_me: false,
+            my_review_state: state,
+            my_reviewed_at: None,
+            my_reviewed_sha: None,
+            review_requested_at: None,
+        }
+    }
+
+    #[test]
+    fn the_notes_date_the_users_review_and_the_latest_request() {
+        let me = "rev-fixture";
+        // Newest first, as GitLab sorts them for Argus.
+        let notes = [
+            gl_note(
+                9,
+                "alice-fixture",
+                "2026-10-11T10:00:00Z",
+                true,
+                "requested review from @rev-fixture",
+            ),
+            gl_note(
+                8,
+                "alice-fixture",
+                "2026-10-11T09:00:00Z",
+                true,
+                "added 1 commit",
+            ),
+            gl_note(7, me, "2026-10-10T12:00:00Z", true, "requested changes"),
+            gl_note(6, me, "2026-10-10T11:00:00Z", false, "Why three retries?"),
+            gl_note(
+                5,
+                "dana-fixture",
+                "2026-10-10T10:00:00Z",
+                true,
+                "approved this merge request",
+            ),
+            gl_note(
+                4,
+                "alice-fixture",
+                "2026-10-08T10:00:00Z",
+                true,
+                "requested review from @dana-fixture, @erin-fixture, and @Rev-Fixture",
+            ),
+        ];
+        let mut d = mr_detail(MyReviewState::AwaitingReview);
+        apply_review_notes(&mut d, me, &notes);
+        assert_eq!(
+            d.review_requested_at,
+            Some("2026-10-11T10:00:00Z".parse().unwrap())
+        );
+        assert_eq!(
+            d.my_reviewed_at,
+            Some("2026-10-10T12:00:00Z".parse().unwrap())
+        );
+        // The version current at 10-10 12:00 was a2.
+        assert_eq!(d.my_reviewed_sha.as_deref(), Some("a2"));
+
+        // No verdict note of the user's: a `reviewed` state is dated by
+        // their newest comment; an owed one is not dated at all.
+        let quiet = &notes[..2];
+        let comments = [gl_note(
+            6,
+            me,
+            "2026-10-10T11:00:00Z",
+            false,
+            "Why three retries?",
+        )];
+        let mut d = mr_detail(MyReviewState::Commented);
+        apply_review_notes(&mut d, me, &comments);
+        assert_eq!(
+            d.my_reviewed_at,
+            Some("2026-10-10T11:00:00Z".parse().unwrap())
+        );
+        let mut d = mr_detail(MyReviewState::AwaitingReview);
+        apply_review_notes(&mut d, me, &comments);
+        assert_eq!(d.my_reviewed_at, None);
+        let mut d = mr_detail(MyReviewState::AwaitingReview);
+        apply_review_notes(&mut d, me, quiet);
+        assert_eq!(d.my_reviewed_at, None);
+        assert!(d.review_requested_at.is_some());
     }
 }

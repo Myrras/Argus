@@ -41,6 +41,10 @@ pub fn detail(head: &str) -> ReviewDetail {
         reviewers: Vec::new(),
         requested_from_me: true,
         approved_by_me: false,
+        my_review_state: Default::default(),
+        my_reviewed_at: None,
+        my_reviewed_sha: None,
+        review_requested_at: None,
     }
 }
 

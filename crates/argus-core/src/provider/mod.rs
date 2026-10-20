@@ -20,9 +20,9 @@ mod rate_limit;
 pub use github::{GhAuth, GithubProvider};
 pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
 pub use model::{
-    Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, Note,
-    ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, Reviewer, ReviewerState, Side,
-    Thread,
+    Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, MyReviewState,
+    Note, ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, ReviewVerdict, Reviewer,
+    ReviewerState, Side, Thread,
 };
 
 use std::sync::Arc;
@@ -116,6 +116,35 @@ pub trait ReviewProvider: Send + Sync {
     /// [`PostErrorKind::HeadMoved`]). Never merges.
     fn approve(&self, _r: &ReviewRef, _head_sha: &str) -> PostResultOf<()> {
         Err(read_only())
+    }
+
+    // --- Submit review: the user's verdict, set on the platform. Only
+    // `Core::submit_review` calls it, on an explicit user action.
+
+    /// Submit the user's review of the MR/PR: `verdict`, pinned to
+    /// `head_sha` (the head the user reviewed), with an optional `summary`
+    /// (markdown, already trimmed and non-empty).
+    ///
+    /// GitHub: one `POST pulls/{n}/reviews` with `event` (`APPROVE`,
+    /// `REQUEST_CHANGES`, `COMMENT`), `commit_id` and the summary as
+    /// `body`. GitLab: approve is [`approve`](Self::approve); request
+    /// changes is the `/request_changes` quick action (GitLab 17.2+, the
+    /// user a reviewer of the MR; [`PostErrorKind::Unsupported`] before
+    /// anything is written otherwise); then the summary as an MR note.
+    ///
+    /// The default approves through [`approve`](Self::approve) when there
+    /// is no summary and refuses everything else.
+    fn submit_review(
+        &self,
+        r: &ReviewRef,
+        verdict: ReviewVerdict,
+        head_sha: &str,
+        summary: Option<&str>,
+    ) -> PostResultOf<()> {
+        match (verdict, summary) {
+            (ReviewVerdict::Approve, None) => self.approve(r, head_sha),
+            _ => Err(read_only()),
+        }
     }
 
     // --- M3: thread history ---
