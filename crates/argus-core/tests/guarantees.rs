@@ -2,7 +2,8 @@
 //! scripted platform (`support::Platform`) that logs every provider call:
 //!
 //! - (6) nothing is written to the platform without an explicit call
-//!   (posting, replying, approving, resolving a thread);
+//!   (posting, replying, approving, resolving a thread): refreshing, all
+//!   reviews or one, only reads;
 //! - (7) a review leaves the active list exactly when approved;
 //! - (3) whether the review waits on the user, and why, for each status;
 //! - (1, 2) an outdated thread stays fully readable: notes, then/now code
@@ -55,6 +56,10 @@ fn nothing_reaches_the_platform_without_an_explicit_write() {
     core.refresh();
     p.with(|w| w.reply(MY_THREAD, AUTHOR, "Removed it in c2."));
     core.refresh();
+    // One review on its own, changed and not.
+    p.with(|w| w.reply(GENERAL_THREAD, AUTHOR, "Pushed c2."));
+    assert!(core.refresh_review(id).unwrap().changed);
+    assert!(!core.refresh_review(id).unwrap().changed);
 
     // The code view: files, contents, viewed marks, commentable lines.
     let files = core.list_files(id, false).unwrap();
@@ -671,4 +676,20 @@ fn approving_marks_every_file_viewed_at_the_approved_head() {
     });
     core.refresh();
     assert_eq!(viewed(&core), [false]);
+}
+
+#[test]
+fn refreshing_one_review_only_reads_that_review() {
+    let p = Platform::new();
+    let core = core_over(&p);
+    let id = the_review(&core).id;
+    p.clear_calls();
+    p.with(|w| w.push_commit("c2", 11));
+    let out = core.refresh_review(id).unwrap();
+    assert!(out.changed);
+    assert_eq!(out.review.head_sha, "c2");
+    let methods: Vec<&str> = p.calls().iter().map(|c| c.method).collect();
+    // No list call, no writes: the user, the review, its threads.
+    assert_eq!(methods, ["current_user", "fetch_review", "fetch_threads"]);
+    assert_eq!(p.writes(), Vec::<&str>::new());
 }

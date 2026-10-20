@@ -1,9 +1,9 @@
-//! Review commands: the list, one review and refreshing. (Submitting a
+//! Review commands: the list, one review and refreshing (all, or one). (Submitting a
 //! review is a write: `commands::post::submit_review`.)
 
 use tauri::{AppHandle, State};
 
-use argus_core::{RefreshReport, ReviewRecord};
+use argus_core::{RefreshReport, ReviewRecord, ReviewRefresh};
 
 use super::{blocking, parse_review_id};
 use crate::error::IpcError;
@@ -53,6 +53,32 @@ pub async fn refresh_reviews(
     AppState::record(&last, &report);
     events::emit_report(&app, &report);
     Ok(report)
+}
+
+/// Refresh one review now (blocking, off the IPC thread): it waits for a
+/// refresh under way, as every refresh does. Emits `review:changed` when its
+/// stored state changed and lets the AI pass queue its runs, as after a poll.
+/// The last-refresh report stays the full refreshes': it holds the
+/// per-provider errors the sidebar shows, which one review's success does
+/// not clear. A failure (rate limit included: kind `rateLimited`) is the
+/// call's error.
+#[tauri::command]
+pub async fn refresh_review(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<ReviewRefresh, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    let out = blocking(state, move |core| {
+        let out = core.refresh_review(id)?;
+        core.on_refresh_report(&out.report());
+        Ok(out)
+    })
+    .await?;
+    if out.changed {
+        events::emit_changed(&app, id);
+    }
+    Ok(out)
 }
 
 /// The last refresh, poll or manual; `null` before the first one finished.

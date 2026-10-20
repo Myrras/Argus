@@ -63,7 +63,7 @@ pub use files::{FileEntry, ReviewFiles};
 pub use history::{LineStatus, ThreadHistory};
 pub use ids::{ReviewId, ThreadId};
 pub use open::{LocalFile, Opener};
-pub use poll::{RefreshError, RefreshReport};
+pub use poll::{RefreshError, RefreshReport, ReviewRefresh};
 pub use post::{
     CommentableLines, NewComment, PostError, PostErrorKind, PostResult, PostedComment, PostedNote,
 };
@@ -387,6 +387,18 @@ impl Core {
     pub fn refresh(&self) -> RefreshReport {
         poll::refresh_all_unless(&self.providers(), &self.store, &Utc::now, None)
             .expect("no stop flag to stop on")
+    }
+
+    /// Refresh one review now (blocking): its detail and threads from its
+    /// provider, stored and classified as a poll would (see
+    /// [`poll::refresh_review`]). Reads only. A refresh already under way is
+    /// waited for first; one that read this review after the ask counts as
+    /// this refresh. A rate-limited provider is not called: the error says
+    /// until when.
+    pub fn refresh_review(&self, id: ReviewId) -> CoreResult<ReviewRefresh> {
+        let record = self.review(id)?;
+        let provider = self.provider_for(&record)?;
+        poll::refresh_review(provider.as_ref(), &self.store, id, &Utc::now)
     }
 
     /// The user finished this round: move the watermark to the current head.

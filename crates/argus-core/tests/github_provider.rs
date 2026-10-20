@@ -1342,3 +1342,66 @@ fn review_threads_are_resolvable_and_the_conversation_is_not() {
     let threads = gh.fetch_threads(&widgets_12()).unwrap();
     assert!(code_threads(threads).iter().all(|t| t.resolvable));
 }
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn refreshing_one_pr_revalidates_it_and_reads_nothing_else() {
+    use argus_core::Core;
+
+    // Once armed, the PR reads as pushed to c4 (a new file, so a new ETag:
+    // GitHub's answer to a changed resource).
+    let pushed = r#"  "$P")
+    [ -e "${LOG%/*}/push-armed" ] && respond "${LOG%/*}/pull_12_c4.json"
+    respond "$F/pull_12.json" ;;"#;
+    let body = FAKE.replace(r#"  "$P") respond "$F/pull_12.json" ;;"#, pushed);
+    assert_ne!(body, FAKE);
+    let fake = script(&body);
+    let dir = fake.log.parent().unwrap().to_path_buf();
+    let c4 = "c4".repeat(20);
+    let pull = std::fs::read_to_string(fixtures().join("pull_12.json")).unwrap();
+    std::fs::write(dir.join("pull_12_c4.json"), pull.replace(HEAD, &c4)).unwrap();
+
+    let core = Core::with_providers(
+        argus_core::store::Store::in_memory().unwrap(),
+        vec![std::sync::Arc::new(
+            fake.provider("github.com", Some("work")),
+        )],
+    );
+    // The search lists more PRs than the fixtures serve; only 12 matters.
+    core.refresh();
+    let id = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.repo == "acme-fixture/widgets" && r.review.number == 12)
+        .unwrap()
+        .id;
+    let since = |from: usize| fake.calls()[from..].to_string();
+
+    // Unchanged: every read is revalidated (a 304), nothing is stored anew.
+    let mark = fake.calls().len();
+    let out = core.refresh_review(id).unwrap();
+    assert!(!out.changed);
+    assert_eq!(out.review.head_sha, HEAD);
+    let calls = since(mark);
+    assert!(
+        calls.contains(
+            "api -i -H If-None-Match: \"fx-pull_12.json\" repos/acme-fixture/widgets/pulls/12 "
+        ),
+        "{calls}"
+    );
+    assert!(calls.contains("304 repos/acme-fixture/widgets/pulls/12\n"));
+    // Only this PR: no search, no other repository, no write.
+    assert!(!calls.contains("search"), "{calls}");
+    assert!(!calls.contains("gadgets"), "{calls}");
+    assert!(!calls.contains("--method"), "{calls}");
+
+    // Pushed: the cached copy is not served; the new head is stored.
+    std::fs::write(dir.join("push-armed"), "").unwrap();
+    let mark = fake.calls().len();
+    let out = core.refresh_review(id).unwrap();
+    assert!(out.changed);
+    assert_eq!(out.review.head_sha, c4);
+    assert_eq!(core.review(id).unwrap().head_sha, c4);
+    assert!(!since(mark).contains("search"));
+}

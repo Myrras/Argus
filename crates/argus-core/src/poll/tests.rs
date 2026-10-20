@@ -27,6 +27,8 @@ struct Fake {
     gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     /// `fetch_review` calls per review number.
     fetches: Mutex<HashMap<u64, usize>>,
+    /// `list_reviews` calls.
+    lists: AtomicUsize,
 }
 
 impl Fake {
@@ -44,6 +46,7 @@ impl Fake {
             calls: AtomicUsize::new(0),
             gate: Mutex::new(None),
             fetches: Mutex::new(HashMap::new()),
+            lists: AtomicUsize::new(0),
         }
     }
 
@@ -97,6 +100,7 @@ impl ReviewProvider for Fake {
         }
     }
     fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        self.lists.fetch_add(1, Ordering::SeqCst);
         Ok(self.list.lock().unwrap().clone())
     }
     fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
@@ -1183,4 +1187,234 @@ fn refreshes_run_one_at_a_time() {
     assert!(busy, "a refresh under way holds the refresh lock");
     assert!(store.refreshing.try_lock().is_ok());
     assert_eq!(refresh_all(&providers, &store, at(10, 12)).errors, []);
+}
+
+// --- Refreshing one review ---
+
+/// A core over `fakes`, refreshed once.
+fn core_over(fakes: &[Arc<Fake>]) -> crate::Core {
+    let core = crate::Core::with_providers(Store::in_memory().unwrap(), as_providers(fakes));
+    assert_eq!(core.refresh().errors, []);
+    core
+}
+
+#[test]
+fn refreshing_one_review_fetches_only_that_review() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    gh.serve(detail_n(13, "k1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let (id12, id13) = (review_ref(12).id(), review_ref(13).id());
+    let lists = gh.lists.load(Ordering::SeqCst);
+
+    // Both move on the platform; only 12 is asked for.
+    gh.serve(
+        detail_n(12, "h2"),
+        vec![thread(
+            "t1",
+            AUTHOR,
+            "h2",
+            vec![note("n1", AUTHOR, at(10, 12))],
+        )],
+    );
+    gh.serve(detail_n(13, "k2"), vec![]);
+    let out = core.refresh_review(id12).unwrap();
+    assert!(out.changed);
+    assert_eq!(out.review.id, id12);
+    assert_eq!(out.review.head_sha, "h2");
+    assert_eq!(core.review(id12).unwrap().head_sha, "h2");
+    assert_eq!(core.threads(id12).unwrap().len(), 1);
+    // The other review is untouched and was not fetched; nothing listed.
+    assert_eq!(core.review(id13).unwrap().head_sha, "k1");
+    assert_eq!((gh.fetched(12), gh.fetched(13)), (2, 1));
+    assert_eq!(gh.lists.load(Ordering::SeqCst), lists);
+    // Its report for the AI pass names it.
+    assert_eq!(out.report().changed, [id12]);
+    assert_eq!(out.report().errors, []);
+
+    // Nothing moved since: unchanged, and the report names nothing.
+    let again = core.refresh_review(id12).unwrap();
+    assert!(!again.changed);
+    assert!(again.report().changed.is_empty());
+    assert_eq!(gh.fetched(12), 3);
+}
+
+#[test]
+fn refreshing_one_review_keeps_the_round_bookkeeping() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    core.mark_reviewed(id).unwrap();
+    assert_eq!(
+        core.review(id).unwrap().status,
+        ReviewStatus::WaitingOnAuthor
+    );
+
+    gh.serve(detail_n(12, "h2"), vec![]);
+    let rec = core.refresh_review(id).unwrap().review;
+    // Classified like a poll: a new round, the watermark kept.
+    assert_eq!(rec.status, ReviewStatus::NeedsReReview);
+    assert_eq!(rec.round, 2);
+    assert_eq!(rec.round_reasons, [RoundReason::NewCommits]);
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+}
+
+#[test]
+fn an_unknown_review_is_not_found_without_a_call() {
+    let gh = github();
+    let core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    );
+    let err = core.refresh_review(review_ref(99).id()).unwrap_err();
+    assert!(matches!(err, CoreError::NotFound), "{err}");
+    assert_eq!(gh.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_rate_limited_provider_is_not_called_for_one_review() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    let until = Utc::now() + chrono::Duration::minutes(20);
+    *gh.limited.lock().unwrap() = Some(until);
+    let calls = gh.calls.load(Ordering::SeqCst);
+
+    let err = core.refresh_review(id).unwrap_err();
+    assert!(err.is_rate_limited(), "{err}");
+    let hhmm = until
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert!(
+        err.to_string()
+            .contains(&format!("GitHub is rate limited until {hhmm}")),
+        "{err}"
+    );
+    assert_eq!(gh.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(gh.fetched(12), 1);
+}
+
+#[test]
+fn a_limit_hit_during_one_review_names_the_providers_reset() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    // The fetch itself hits the limit (the fake then pauses until 13:00).
+    gh.details.lock().unwrap().insert(
+        12,
+        Err(crate::provider::rate_limited(
+            ProviderId::Github,
+            at(10, 12),
+        )),
+    );
+    let err = core.refresh_review(id).unwrap_err();
+    assert!(err.is_rate_limited(), "{err}");
+    let hhmm = at(10, 13)
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert!(err.to_string().contains(&hhmm), "{err}");
+    assert_eq!(core.review(id).unwrap().head_sha, "h1");
+}
+
+#[test]
+fn one_review_waits_for_a_full_refresh_under_way_then_reads_afresh() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+
+    // A poll's fetch is on the network with h1; the author pushes h2; the
+    // user asks for this review. It must not read alongside the poll, and
+    // what it stores must be the push, not the poll's older copy.
+    let (started, go) = gh.hold_next_fetch();
+    std::thread::scope(|s| {
+        let poll = s.spawn(|| core.refresh());
+        started.recv().unwrap();
+        gh.serve(detail_n(12, "h2"), vec![]);
+        let one = s.spawn(|| core.refresh_review(id));
+        go.send(()).unwrap();
+        assert_eq!(poll.join().unwrap().errors, []);
+        let out = one.join().unwrap().unwrap();
+        assert!(out.changed);
+        assert_eq!(out.review.head_sha, "h2");
+    });
+    assert_eq!(core.review(id).unwrap().head_sha, "h2");
+    assert_eq!(gh.fetched(12), 3);
+}
+
+#[test]
+fn one_review_holds_the_refresh_lock_while_it_fetches() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    let (started, go) = gh.hold_next_fetch();
+    let busy = std::thread::scope(|s| {
+        let one = s.spawn(|| core.refresh_review(id));
+        started.recv().unwrap();
+        // A poll starting now waits for it.
+        let busy = core.store.refreshing.try_lock().is_err();
+        go.send(()).unwrap();
+        one.join().unwrap().unwrap();
+        busy
+    });
+    assert!(busy, "a single refresh under way holds the refresh lock");
+}
+
+#[test]
+fn one_review_joins_a_refresh_that_read_it_after_the_ask() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 10));
+    let id = review_ref(12).id();
+
+    // Asked; then the refresh it waited for read the review (h2) after the
+    // ask: that answer is already current, so no second read.
+    let asked = store.begin_fetch();
+    gh.serve(detail_n(12, "h2"), vec![]);
+    refresh_all(&providers, &store, at(10, 11));
+    let out = refresh_review_asked(gh.as_ref(), &store, id, asked, &|| at(10, 12)).unwrap();
+    assert!(!out.changed, "the full refresh reported it already");
+    assert_eq!(out.review.head_sha, "h2");
+    assert_eq!(gh.fetched(12), 2);
+
+    // A refresh that read it before the ask does not count: read again.
+    gh.serve(detail_n(12, "h3"), vec![]);
+    let asked = store.begin_fetch();
+    let out = refresh_review_asked(gh.as_ref(), &store, id, asked, &|| at(10, 13)).unwrap();
+    assert!(out.changed);
+    assert_eq!(out.review.head_sha, "h3");
+    assert_eq!(gh.fetched(12), 3);
+}
+
+#[test]
+fn a_poll_that_started_before_one_review_cannot_undo_it() {
+    // The single refresh overtakes a slower fetch of the same review (the
+    // post path's, which takes no lock): the older one is dropped.
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    let older = core.store.begin_fetch();
+    gh.serve(detail_n(12, "h2"), vec![]);
+    assert!(core.refresh_review(id).unwrap().changed);
+    assert!(!persist(
+        &core.store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        at(10, 11),
+        older
+    )
+    .unwrap());
+    assert_eq!(core.review(id).unwrap().head_sha, "h2");
 }

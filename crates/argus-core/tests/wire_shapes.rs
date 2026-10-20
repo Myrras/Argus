@@ -30,8 +30,8 @@ use argus_core::provider::{
     ProviderStatus, ReviewRef, ReviewState, Side, Thread,
 };
 use argus_core::{
-    LocalFile, MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewStatus,
-    ReviewVerdict, RoundReason, Settings, StoredThread, ThreadId,
+    LocalFile, MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewRefresh,
+    ReviewStatus, ReviewVerdict, RoundReason, Settings, StoredThread, ThreadId,
 };
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -516,6 +516,13 @@ fn current() -> Value {
         }),
     );
     add("RefreshReport", val(&report));
+    add(
+        "ReviewRefresh",
+        val(ReviewRefresh {
+            review: record.clone(),
+            changed: true,
+        }),
+    );
     add("Settings", val(&settings));
     add("ProviderStatus", val(&status));
     add("ThreadHistory", val(&history));

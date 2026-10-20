@@ -27,6 +27,7 @@ import type {
   ReviewFiles,
   ReviewId,
   ReviewRecord,
+  ReviewRefresh,
   ReviewVerdict,
   Settings,
   StoredThread,
@@ -111,6 +112,15 @@ export function setFileViewed(
 /** Refresh every provider now; emits the same events a poll does. */
 export function refreshReviews(): Promise<RefreshReport> {
   return invoke("refresh_reviews");
+}
+
+/**
+ * Refresh one review now; emits `review:changed` when it changed. Rejects
+ * with kind `rateLimited` (the message says until when) when its provider
+ * is rate-limited, without calling it.
+ */
+export function refreshReview(reviewId: ReviewId): Promise<ReviewRefresh> {
+  return invoke("refresh_review", { reviewId });
 }
 
 /** The last refresh (poll or manual), `null` before the first. */

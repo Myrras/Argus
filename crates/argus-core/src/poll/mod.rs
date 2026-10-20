@@ -291,6 +291,127 @@ fn refresh_provider_with(
     (changed, errors)
 }
 
+/// What refreshing one review did ([`Core::refresh_review`](crate::Core::refresh_review)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewRefresh {
+    /// The review as stored afterwards.
+    pub review: ReviewRecord,
+    /// This refresh changed its stored state. `false` also when a full
+    /// refresh it waited for had read it after it was asked for: that one
+    /// reported the change.
+    pub changed: bool,
+}
+
+impl ReviewRefresh {
+    /// The refresh as a report, for what runs after every refresh (the AI
+    /// pass' [`on_refresh_report`](crate::Core::on_refresh_report)).
+    pub fn report(&self) -> RefreshReport {
+        RefreshReport {
+            changed: if self.changed {
+                vec![self.review.id]
+            } else {
+                Vec::new()
+            },
+            errors: Vec::new(),
+            refreshed_at: self.review.fetched_at,
+        }
+    }
+}
+
+/// Refresh the stored review `id` alone: its detail and threads, stored
+/// through [`persist`] like a poll's fetch. Nothing is listed, and the
+/// review keeps its `listed` flag (the next poll's list call decides that).
+///
+/// It is a refresh like any other: it takes the refresh lock, so it waits
+/// for a full refresh under way (and a poll waits for it). Waiting, not
+/// fetching alongside, is what keeps the two from racing to the store; and
+/// if that full refresh read this review after it was asked for, its
+/// answer is already as fresh as asked and no second read goes out (see
+/// [`refresh_review_asked`]).
+///
+/// A rate-limited provider is not called at all: the "rate limited until
+/// HH:MM" error, before and after the wait. Any other failure is the
+/// provider's error; the stored review stays as it was.
+pub(crate) fn refresh_review(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    id: ReviewId,
+    clock: Clock<'_>,
+) -> CoreResult<ReviewRefresh> {
+    // The ticket of the ask, taken before any wait.
+    let asked = store.begin_fetch();
+    refresh_review_asked(provider, store, id, asked, clock)
+}
+
+/// [`refresh_review`], asked at ticket `asked`.
+pub(crate) fn refresh_review_asked(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    id: ReviewId,
+    asked: u64,
+    clock: Clock<'_>,
+) -> CoreResult<ReviewRefresh> {
+    let pid = provider.id();
+    let limited = |now: DateTime<Utc>| {
+        provider
+            .rate_limited_until()
+            .filter(|u| *u > now)
+            .map(|until| rate_limited(pid, until))
+    };
+    // Fail fast: no wait on a full refresh for an answer known now.
+    if let Some(e) = limited(clock()) {
+        return Err(e);
+    }
+    let _one_at_a_time = store
+        .refreshing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stored = |changed| {
+        let review = store.review(id)?.ok_or(CoreError::NotFound)?;
+        Ok(ReviewRefresh { review, changed })
+    };
+    // Joined: the refresh this one waited for stored a fetch that started
+    // after the ask.
+    if store.fetched_since(id, asked) {
+        return stored(false);
+    }
+    // The wait may have ended on a limit the full refresh ran into.
+    if let Some(e) = limited(clock()) {
+        return Err(e);
+    }
+    let record = store.review(id)?.ok_or(CoreError::NotFound)?;
+    // A limit hit halfway names the provider's reset, as in a poll.
+    let latest_reset = |e: CoreError| {
+        if is_rate_limited(&e) {
+            if let Some(until) = provider.rate_limited_until() {
+                return rate_limited(pid, until);
+            }
+        }
+        e
+    };
+    let me = provider.current_user().map_err(latest_reset)?;
+    let started = clock();
+    let seq = store.begin_fetch();
+    let fetch = || {
+        let detail = provider.fetch_review(&record.review)?;
+        let threads = provider.fetch_threads(&record.review)?;
+        Ok((detail, threads))
+    };
+    let (detail, threads) = fetch().map_err(latest_reset)?;
+    let changed = persist(
+        store,
+        Some(&record),
+        &detail,
+        &threads,
+        &me,
+        record.listed,
+        started,
+        seq,
+    )?;
+    stored(changed)
+}
+
 /// How often a stored open review the list no longer has is fetched (to
 /// learn whether it was merged or closed meanwhile): once when it drops
 /// off, then at most this often.

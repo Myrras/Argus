@@ -1343,3 +1343,67 @@ fn a_re_request_note_after_the_watermark_brings_the_review_back() {
     assert_eq!(again.round, 2);
     assert!(again.is_active());
 }
+
+#[test]
+fn refreshing_one_mr_revalidates_it_and_reads_nothing_else() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let not_modified = Arc::new(Mutex::new(Vec::new()));
+    let renamed = Arc::new(AtomicBool::new(false));
+    let armed = renamed.clone();
+    let conditional = conditional_routes(not_modified.clone());
+    // Once armed, the MR's title changed on the instance: a new ETag.
+    let (base, seen) = serve_raw(move |path, req| {
+        if armed.load(Ordering::SeqCst) && path == "/api/v4/projects/grp%2Fapp/merge_requests/21" {
+            return Reply {
+                headers: "ETag: W/\"fx-renamed\"\r\n".into(),
+                body: fixture("mr_21.json").replace(
+                    "Add retry to the importer",
+                    "Add retry and backoff to the importer",
+                ),
+                ..ok("mr_21.json")
+            };
+        }
+        conditional(path, req)
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let id = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.number == 21)
+        .unwrap()
+        .id;
+
+    // Unchanged: answered by 304s, nothing stored anew, only this MR read.
+    let (mark, nm) = (
+        seen.lock().unwrap().len(),
+        not_modified.lock().unwrap().len(),
+    );
+    let out = core.refresh_review(id).unwrap();
+    assert!(!out.changed);
+    let reads: Vec<String> = seen.lock().unwrap()[mark..].to_vec();
+    assert!(!reads.is_empty());
+    assert!(
+        reads.iter().all(|l| l.starts_with("/api/v4/user ")
+            || l.starts_with("/api/v4/projects/grp%2Fapp/merge_requests/21")),
+        "{reads:?}"
+    );
+    assert!(not_modified.lock().unwrap()[nm..]
+        .iter()
+        .any(|p| p == "/api/v4/projects/grp%2Fapp/merge_requests/21"));
+
+    // Changed on the instance: the cached copy is not served.
+    renamed.store(true, Ordering::SeqCst);
+    let out = core.refresh_review(id).unwrap();
+    assert!(out.changed);
+    assert_eq!(
+        out.review.review.title,
+        "Add retry and backoff to the importer"
+    );
+    assert_eq!(
+        core.review(id).unwrap().review.title,
+        "Add retry and backoff to the importer"
+    );
+}

@@ -182,6 +182,7 @@ pub fn run() {
             commands::review::list_reviews,
             commands::review::get_review,
             commands::review::refresh_reviews,
+            commands::review::refresh_review,
             commands::review::last_refresh,
             commands::thread::list_threads,
             commands::files::list_files,

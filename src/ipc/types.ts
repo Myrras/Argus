@@ -358,6 +358,16 @@ export interface RefreshReport {
   refreshedAt: Timestamp;
 }
 
+/**
+ * `poll::ReviewRefresh`: what refreshing one review did. `changed` is
+ * false when nothing moved, or when a full refresh it waited for had
+ * already read it (that one reported the change).
+ */
+export interface ReviewRefresh {
+  review: ReviewRecord;
+  changed: boolean;
+}
+
 /** `provider::GithubStatus`. */
 export interface GithubStatus {
   enabled: boolean;
@@ -658,7 +668,11 @@ export interface Verdict {
 export interface IpcError {
   /** Human-readable, sanitized description. */
   message: string;
-  /** Stable machine-readable category, e.g. `"invalidInput"`. */
+  /**
+   * Stable machine-readable category, e.g. `"invalidInput"`; `"rateLimited"`
+   * when the platform rate-limited the provider (the message says until
+   * when).
+   */
   kind: string;
 }
 

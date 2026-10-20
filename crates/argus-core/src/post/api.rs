@@ -155,7 +155,7 @@ impl Core {
         }
         let provider = self.provider_for(&record)?;
         provider.set_thread_resolved(&record.review, &stored.thread.id, resolved)?;
-        if let Err(e) = self.refresh_review(provider.as_ref(), record.id, Utc::now()) {
+        if let Err(e) = self.refetch_after_write(provider.as_ref(), record.id, Utc::now()) {
             tracing::debug!("refreshing after resolving a thread failed: {e}");
         }
         let after = self
@@ -274,7 +274,7 @@ impl Core {
         provider: &dyn ReviewProvider,
         record: &ReviewRecord,
     ) {
-        if let Err(e) = self.refresh_review(provider, record.id, Utc::now()) {
+        if let Err(e) = self.refetch_after_write(provider, record.id, Utc::now()) {
             tracing::debug!("refreshing after a moved head failed: {e}");
         }
     }
@@ -301,7 +301,7 @@ impl Core {
         approved: bool,
     ) -> CoreResult<ReviewRecord> {
         let now = Utc::now();
-        if let Err(e) = self.refresh_review(provider, before.id, now) {
+        if let Err(e) = self.refetch_after_write(provider, before.id, now) {
             // The write went through; the watermark still moves.
             tracing::debug!("refreshing after a post failed: {e}");
         }
@@ -330,7 +330,10 @@ impl Core {
     }
 
     /// Fetch one review and its threads and store them, as a poll would.
-    fn refresh_review(
+    /// Unlike [`Core::refresh_review`] it takes no refresh lock: a post
+    /// must not wait behind a poll on the network. The fetch tickets keep
+    /// either from storing an older copy over the other.
+    fn refetch_after_write(
         &self,
         provider: &dyn ReviewProvider,
         id: ReviewId,
