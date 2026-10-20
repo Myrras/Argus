@@ -133,6 +133,15 @@ export function unresolvedCount(list: readonly StoredThread[]): number {
 }
 
 /**
+ * Open (as `unresolvedCount`) and mine (`mine`: started by the user or with a
+ * note of theirs): the only threads the file tree counts. Neither platform
+ * assigns threads, so "assigned to me" means mine.
+ */
+export function myOpenCount(list: readonly StoredThread[]): number {
+  return list.filter((t) => t.mine && t.resolvable && !t.resolved).length;
+}
+
+/**
  * The review header's line, as GitLab words it: "2 unresolved threads",
  * or "All threads resolved"; null when no thread can be resolved at all.
  */

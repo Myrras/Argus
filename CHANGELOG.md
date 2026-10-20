@@ -258,11 +258,13 @@ when it merges.
   field is already open.
 - The Conversation splits its threads into Unresolved, Comments (entries
   that cannot be resolved) and Resolved, folded until you open it, also
-  under "On other files". The file tree's Conversation entry shows how many
-  are open, and the review header says "3 unresolved threads" or "All
+  under "On other files". The review header says "3 unresolved threads" or "All
   threads resolved", with ⌃ ⌄ buttons beside it that jump between the
   unresolved threads. Resolving or reopening a thread moves it at once;
   `n`/`p` open the Resolved group when they step into it.
+- The file tree counts only your open threads: the Conversation entry says
+  "2 open" and a file shows a badge only when you have an open thread on it.
+  The header's count, the arrows and the diffs still cover every thread.
 - Resolved threads fold to one line (author, Resolved badge, the first
   words), the way GitLab collapses them: when a review opens and as soon
   as you resolve one; reopening a thread unfolds it again. Click it, reply

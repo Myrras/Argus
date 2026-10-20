@@ -58,7 +58,8 @@ sibling app Iris (`../Iris`).
     `diffThreads.groupThreads` into Unresolved, Comments (not resolvable)
     and Resolved, folded in card state, opened when `n`/`p` land in it via
     `useRevealCard`; `pageStops` walks the same order; counts:
-    `unresolvedCount` as "N open" in the tree entry and card header,
+    `unresolvedCount` as "N open" in the card header (the tree counts only
+    your open threads, `myOpenCount`: Conversation "N open", a pill per file),
     `resolutionLabel` over all threads in the header's status row) then
     one `FileDiffCard` per file, contents loaded lazily (IntersectionObserver or selection; cached per
     review/sha/path in `codeViewStore`), binary and large (>1500 lines or no

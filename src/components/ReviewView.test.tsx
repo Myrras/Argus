@@ -108,6 +108,7 @@ const threads = [
   thread({
     reviewId: r.id,
     mine: true,
+    resolvable: true,
     author: "rev-fixture",
     anchor: {
       ...anchor,
@@ -166,6 +167,7 @@ const threads = [
   thread({
     reviewId: r.id,
     mine: true,
+    resolvable: true,
     author: "rev-fixture",
     createdAt: "2026-10-13T09:00:00Z",
     anchor: null,
@@ -281,22 +283,21 @@ describe("ReviewView", () => {
     expect(
       rows.map((row) => row.textContent?.replace(/\s+/g, " ").trim()),
     ).toEqual([
-      // Conversation first: two review-level threads and one elsewhere.
-      "Conversation3",
+      // Conversation first: only my open threads count (one here).
+      "Conversation1 open",
       "assets",
       "Mlogo.png",
       "data",
       "Mbig.json+4000",
       "src",
-      "Mcache.rs2+3−1",
-      "Awidget.rs1+10",
+      "Mcache.rs1+3−1",
+      "Awidget.rs+10",
     ]);
-    const cache = within(tree()).getByLabelText("2 threads, 1 yours");
-    expect(cache).toHaveAttribute("data-mine", "true");
-    expect(within(tree()).getByLabelText("1 thread")).toHaveAttribute(
-      "data-mine",
-      "false",
-    );
+    // Bob's open thread on the same file and his outdated one don't count.
+    expect(
+      within(tree()).getByLabelText("1 open thread of yours"),
+    ).toBeInTheDocument();
+    expect(within(tree()).getAllByLabelText(/of yours/)).toHaveLength(1);
     expect(
       within(card("src/cache.rs")).getByLabelText("3 added, 1 removed"),
     ).toBeInTheDocument();

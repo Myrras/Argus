@@ -1,9 +1,8 @@
 /**
  * The review view's navigation (`data-slot="file-tree"` body): a
- * Conversation entry with its unresolved ("2 open") and thread counts
- * first, then the changed files as folders with single-child chains
+ * Conversation entry with the user's open threads ("2 open") first, then the changed files as folders with single-child chains
  * compacted, or a flat path list. Per file
- * its status, +/− counts, thread count (accent when some are the user's) and
+ * its status, +/− counts, the user's open thread count and
  * a Viewed checkbox. Selecting an entry scrolls the page to it.
  *
  * Open in editor: `fileAction` renders a per-file button (shown on hover or
@@ -18,8 +17,8 @@ import type { FileListMode } from "../state/layoutStore";
 import {
   FileStatusMark,
   LineStats,
+  MyOpenThreads,
   OpenCount,
-  ThreadCount,
 } from "./FileStatusMark";
 import { CaretIcon, ThreadsIcon } from "./icons";
 import styles from "./FileTree.module.css";
@@ -28,16 +27,18 @@ export interface FileTreeProps {
   files: readonly FileEntry[];
   mode: FileListMode;
   selected: string | null;
-  counts: ReadonlyMap<string, { total: number; mine: number }>;
+  /** Per path: the user's open threads (`myOpenCount`). */
+  counts: ReadonlyMap<string, number>;
   onSelect: (path: string) => void;
   onToggleViewed: (file: FileEntry) => void;
   /** Shown when `files` is empty; `null` shows nothing. */
   empty?: string | null;
   /** The Conversation entry above the files. */
   conversation?: {
-    count: { total: number; mine: number };
-    /** Its unresolved threads ("2 open"). */
-    open?: number;
+    /** The user's open threads ("2 open"). */
+    open: number;
+    /** All its threads; only in the tooltip. */
+    total: number;
     selected: boolean;
     onSelect: () => void;
   };
@@ -80,12 +81,14 @@ export function FileTree(props: FileTreeProps) {
               className={styles.file}
               style={{ paddingLeft: indent(0) }}
               onClick={c.onSelect}
-              title="Comments on the review as a whole"
+              title={`Comments on the review as a whole (${conversationLabel(c.open, c.total)})`}
             >
               <ThreadsIcon className={styles.conversationIcon} />
               <span className={styles.name}>Conversation</span>
-              <OpenCount count={c.open ?? 0} />
-              <ThreadCount {...c.count} />
+              <OpenCount
+                count={c.open}
+                label={conversationLabel(c.open, c.total)}
+              />
             </button>
           </li>
         )}
@@ -143,6 +146,11 @@ function renderNodes(
   });
 }
 
+function conversationLabel(open: number, total: number): string {
+  const n = (k: number) => `${k} ${k === 1 ? "thread" : "threads"}`;
+  return `${open} open ${open === 1 ? "thread" : "threads"} of yours, ${n(total)} in all`;
+}
+
 /** Tokens are px steps of --sp-3; inline because depth is data. */
 function indent(depth: number): string {
   return `calc(var(--sp-2) + ${depth} * var(--sp-3))`;
@@ -159,7 +167,7 @@ function FileRow({
   fileAction,
   onFileContextMenu,
 }: FileTreeProps & { file: FileEntry; depth: number; label: string }) {
-  const count = counts.get(f.path) ?? { total: 0, mine: 0 };
+  const count = counts.get(f.path) ?? 0;
   const isSelected = selected === f.path;
   return (
     <li
@@ -181,7 +189,7 @@ function FileRow({
       >
         <FileStatusMark status={f.status} />
         <span className={styles.name}>{label}</span>
-        <ThreadCount {...count} />
+        <MyOpenThreads count={count} />
         <LineStats additions={f.additions} deletions={f.deletions} />
       </button>
       {fileAction && <span className={styles.fileAction}>{fileAction(f)}</span>}

@@ -20,9 +20,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FileEntry, ReviewRecord, StoredThread } from "../ipc/types";
 import {
   conversationThreads,
-  threadCounts,
+  myOpenCount,
   threadsOnFile,
-  unresolvedCount,
 } from "../lib/diffThreads";
 import { filterFiles, orderFiles } from "../lib/fileTree";
 import { withHint } from "../lib/keymap";
@@ -124,8 +123,8 @@ export function ReviewView({
     () => conversationThreads(threads, files?.files ?? null, !!entry?.error),
     [threads, files, entry?.error],
   );
-  const talkCount = useMemo(
-    () => threadCounts([...talk.conversation, ...talk.elsewhere]),
+  const talkAll = useMemo(
+    () => [...talk.conversation, ...talk.elsewhere],
     [talk],
   );
 
@@ -136,8 +135,8 @@ export function ReviewView({
     return m;
   }, [files, threads]);
   const counts = useMemo(() => {
-    const m = new Map<string, { total: number; mine: number }>();
-    for (const [path, list] of byFile) m.set(path, threadCounts(list));
+    const m = new Map<string, number>();
+    for (const [path, list] of byFile) m.set(path, myOpenCount(list));
     return m;
   }, [byFile]);
 
@@ -170,8 +169,8 @@ export function ReviewView({
   }, []);
   const cardRef = (key: string) => (el: HTMLElement | null) => setCard(key, el);
   const conversationEntry = {
-    count: talkCount,
-    open: unresolvedCount([...talk.conversation, ...talk.elsewhere]),
+    open: myOpenCount(talkAll),
+    total: talkAll.length,
     selected: selected === CONVERSATION,
     onSelect: () => pick(CONVERSATION),
   };

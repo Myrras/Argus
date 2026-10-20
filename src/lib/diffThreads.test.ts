@@ -12,6 +12,7 @@ import {
   mapOldLine,
   placeThreads,
   resolutionLabel,
+  myOpenCount,
   threadCounts,
   threadsOnFile,
   unresolvedCount,
@@ -221,5 +222,20 @@ describe("collapsedRanges", () => {
       [1, 11],
       [19, 30],
     ]);
+  });
+});
+
+describe("myOpenCount", () => {
+  it("counts threads that are open and mine, nothing else", () => {
+    const mineOpen = thread({ mine: true, resolvable: true });
+    expect(
+      myOpenCount([
+        mineOpen,
+        thread({ resolvable: true }), // someone else's
+        thread({ mine: true, resolvable: true, resolved: true }), // done
+        thread({ mine: true }), // not resolvable
+      ]),
+    ).toBe(1);
+    expect(myOpenCount([])).toBe(0);
   });
 });
