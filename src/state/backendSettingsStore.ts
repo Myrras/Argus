@@ -8,8 +8,8 @@
  * and keeps what the core stored (it normalizes). Saves run one at a time,
  * each over the last one's result, and show at once (a stepper clicked
  * three times saves all three steps). The GitLab token is
- * write-only from here: `setGitlabToken` hands it to `set_gitlab_token` and
- * nowhere else (never into `Settings`), and only whether one is stored ever
+ * write-only from here: `setGitlabToken` (queued behind the saves) hands it
+ * to `set_gitlab_token` and nowhere else (never into `Settings`), and only whether one is stored ever
  * comes back. Failures are error toasts. UI-only preferences live in
  * `settingsStore` instead.
  *
@@ -137,20 +137,29 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
       return p;
     },
 
-    setGitlabToken: async (token) => {
-      const asked = Date.now();
-      try {
-        await setGitlabToken(token);
-        set((s) => ({ setupChanged: { ...s.setupChanged, gitlab: asked } }));
-      } catch (e) {
-        toastError(
-          token ? "Could not store the token" : "Could not remove the token",
-          toIpcError(e).message,
-        );
-        return false;
-      }
-      await get().refreshStatus();
-      return true;
+    setGitlabToken: (token) => {
+      // On the saves' chain: the token is stored for the URL a save before
+      // it stores, and a removal never overtakes a queued URL save.
+      const run = async (): Promise<boolean> => {
+        const asked = Date.now();
+        let ok = true;
+        try {
+          await setGitlabToken(token);
+          set((s) => ({ setupChanged: { ...s.setupChanged, gitlab: asked } }));
+        } catch (e) {
+          toastError(
+            token ? "Could not store the token" : "Could not remove the token",
+            toIpcError(e).message,
+          );
+          ok = false;
+        }
+        // Either way: a failure can come after the token was stored.
+        await get().refreshStatus();
+        return ok;
+      };
+      const p = saving.then(run);
+      saving = p.catch(() => undefined);
+      return p;
     },
   }),
 );

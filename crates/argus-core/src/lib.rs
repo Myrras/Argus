@@ -230,7 +230,8 @@ impl Core {
     }
 
     /// Validate, persist and apply new settings; returns what was stored.
-    /// The providers are rebuilt and a running poll loop restarts with them.
+    /// The providers whose section changed are rebuilt and a running poll
+    /// loop restarts with them.
     ///
     /// Saves run one at a time, from writing the file to putting the new
     /// loop in place: two quick saves interleaved could otherwise store one
@@ -246,16 +247,26 @@ impl Core {
         if let Some(path) = &self.settings_path {
             settings.save(path)?;
         }
-        *self.settings.lock().expect("settings lock poisoned") = settings.clone();
+        let before = std::mem::replace(
+            &mut *self.settings.lock().expect("settings lock poisoned"),
+            settings.clone(),
+        );
         self.ai.set_enabled(settings.ai.enabled);
         self.ai.set_adapter(&settings.ai.adapter);
-        self.rebuild_providers(&settings, one_at_a_time);
+        let mut changed = Vec::new();
+        if before.github != settings.github {
+            changed.push(provider::ProviderId::Github);
+        }
+        if before.gitlab != settings.gitlab {
+            changed.push(provider::ProviderId::Gitlab);
+        }
+        self.rebuild_providers(&settings, &changed, one_at_a_time);
         Ok(settings)
     }
 
     /// Store the GitLab token for the configured instance in the OS keychain
-    /// (a blank token deletes it). Like a settings save, the providers are
-    /// rebuilt and a running poll loop restarts with them.
+    /// (a blank token deletes it). Like a settings save, the GitLab provider
+    /// is rebuilt and a running poll loop restarts with it.
     ///
     /// The Settings form saves the URL first and the token right after: the
     /// loop the URL save restarted has already refreshed (or is refreshing)
@@ -275,15 +286,34 @@ impl Core {
             ));
         }
         (self.write_gitlab_token)(&settings.gitlab.base_url, token)?;
-        self.rebuild_providers(&settings, one_at_a_time);
+        self.rebuild_providers(&settings, &[provider::ProviderId::Gitlab], one_at_a_time);
         Ok(())
     }
 
     /// Build the providers for `settings` and restart a running poll loop
-    /// with them. `one_at_a_time` is the held `settings_update` lock: it is
-    /// let go once the new loop is in place, before the old one's grace.
-    fn rebuild_providers(&self, settings: &Settings, one_at_a_time: MutexGuard<'_, ()>) {
-        *self.providers.lock().expect("providers lock poisoned") = (self.build_providers)(settings);
+    /// with them. Only the providers in `changed` (whose settings or token
+    /// changed) are new: the others keep their instance, with its
+    /// rate-limit pause, conditional cache and user, as a fresh one would
+    /// forget them. `one_at_a_time` is the held `settings_update` lock: it
+    /// is let go once the new loop is in place, before the old one's grace.
+    fn rebuild_providers(
+        &self,
+        settings: &Settings,
+        changed: &[provider::ProviderId],
+        one_at_a_time: MutexGuard<'_, ()>,
+    ) {
+        let old = self.providers();
+        let next = (self.build_providers)(settings)
+            .into_iter()
+            .map(|fresh| {
+                let id = fresh.id();
+                if changed.contains(&id) {
+                    return fresh;
+                }
+                old.iter().find(|p| p.id() == id).cloned().unwrap_or(fresh)
+            })
+            .collect();
+        *self.providers.lock().expect("providers lock poisoned") = next;
         let running = self.poller.lock().expect("poller lock poisoned").take();
         let Some((poller, callback)) = running else {
             return;

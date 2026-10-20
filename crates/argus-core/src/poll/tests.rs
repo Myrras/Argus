@@ -825,6 +825,65 @@ fn storing_the_gitlab_token_without_a_loop_rebuilds_the_providers() {
 const FIXTURE_TOKEN: &str = "glpat-fixture-not-a-real-token";
 
 #[test]
+fn a_change_rebuilds_only_the_provider_it_is_about() {
+    // A rebuilt provider forgets its rate-limit pause and conditional
+    // cache: only the one whose setup changed is rebuilt.
+    let mut core = crate::Core::with_providers(Store::in_memory().unwrap(), Vec::new());
+    core.build_providers = Box::new(|s: &crate::Settings| {
+        let mut out: Vec<Arc<dyn ReviewProvider>> = Vec::new();
+        if s.github.enabled {
+            out.push(Arc::new(Fake::new(ProviderId::Github, &s.github.host)));
+        }
+        if s.gitlab_enabled() {
+            out.push(Arc::new(Fake::new(
+                ProviderId::Gitlab,
+                "gitlab.example.test",
+            )));
+        }
+        out
+    });
+    core.write_gitlab_token = Box::new(|_: &str, _: &str| Ok(()));
+    let get = |core: &crate::Core, id: ProviderId| {
+        core.providers()
+            .into_iter()
+            .find(|p| p.id() == id)
+            .expect("provider")
+    };
+    let mut s = core.settings();
+    s.gitlab.base_url = "https://gitlab.example.test".into();
+    core.update_settings(s.clone()).unwrap();
+    let (gh, gl) = (
+        get(&core, ProviderId::Github),
+        get(&core, ProviderId::Gitlab),
+    );
+
+    // The token is GitLab's: GitHub stays as it is.
+    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
+    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(!Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+    let gl = get(&core, ProviderId::Gitlab);
+
+    // Neither provider's section changed: both stay.
+    s.poll_interval_secs = 300;
+    core.update_settings(s.clone()).unwrap();
+    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+
+    // GitHub's section: GitLab stays.
+    s.github.host = "ghe.example.test".into();
+    core.update_settings(s.clone()).unwrap();
+    assert!(!Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+    let gh = get(&core, ProviderId::Github);
+
+    // GitLab's section: GitHub stays.
+    s.gitlab.base_url = "https://gitlab2.example.test".into();
+    core.update_settings(s).unwrap();
+    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(!Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+}
+
+#[test]
 fn a_stopped_loop_waiting_for_the_refresh_lock_does_not_refresh() {
     let gh = github();
     let store = Arc::new(Store::in_memory().unwrap());
