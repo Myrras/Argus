@@ -218,6 +218,8 @@ pub fn run() {
             commands::open::local_files,
             commands::open::open_in_editor,
             commands::open::reveal_local_file,
+            commands::open::clone_status,
+            commands::open::reveal_clone,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

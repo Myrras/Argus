@@ -273,6 +273,10 @@ when it merges.
   all: the refresh button in its header, Refresh in its right-click menu,
   "Refresh this review" in the command palette, or ⌥R (Alt+R). Its row
   shows it refreshing; a rate limit says until when.
+- A local clone indicator in the review header: the clone's short path, with
+  its full path and whether it is at the review's head in the tooltip; click
+  to show the folder in Finder. A clone that is set but missing says so and
+  opens Settings; without one, a quiet "No local clone" does the same.
 
 ### Changed
 

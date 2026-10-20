@@ -23,6 +23,7 @@ import type {
   FindingPostResult,
   LineChange,
   LineStatus,
+  CloneStatus,
   LocalFile,
   NewComment,
   PostedNote,
@@ -408,6 +409,14 @@ const localFile: LocalFile = {
   matchesReviewHead: false,
 };
 
+const cloneStatus: CloneStatus = {
+  configured: true,
+  path: "/Users/fixture/widgets",
+  found: true,
+  head: "c".repeat(40),
+  matchesReviewHead: false,
+};
+
 const structs: Record<string, unknown> = {
   ReviewRecord: record,
   StoredThread: thread,
@@ -431,6 +440,7 @@ const structs: Record<string, unknown> = {
   "FindingPostResult:posted": findingPosted,
   "FindingPostResult:failed": findingFailed,
   LocalFile: localFile,
+  CloneStatus: cloneStatus,
 };
 
 const providerIds = [

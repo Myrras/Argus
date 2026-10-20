@@ -250,6 +250,19 @@ sibling app Iris (`../Iris`).
     Settings → Editors (`lib/editorOverrides`, Iris's tab + a default
     editor). Keys `openInEditor` (`o`) and `showInFinder` (`Mod+Alt+R`),
     scope `files`, on the focused item's file.
+  - Clone indicator: core `open/` `clone_status(reviewId)` →
+    `CloneStatus { configured, path, found, head, matchesReviewHead }`
+    (read-only: `rev-parse HEAD` through `LocalClone`; `found` = the folder
+    exists and is a git repository, `.git` also counts when git is missing)
+    and `reveal_clone` (the set folder only, through the `Opener`; no new
+    webview permission). UI: `CloneChip` ends the header's meta row, fed by
+    `cloneStatusStore` (re-read on open, on a head or `clonePaths` change
+    and on window focus; a failed read leaves the chip out). Found: the
+    short path (`lib/cloneStatus.shortPath`, `~/…/elements`), tooltip with
+    the full path and HEAD against the review's, click = Show in Finder.
+    Set but missing or no repository: warning tint, click opens Settings →
+    AI (`settingsRequestStore`). Not set: a quiet "No local clone", same
+    click. Not on list rows: it would cost a git call per row.
 - ✅ **Milestone 6 — Provider polish.** Polling is polite. `provider/conditional`:
   in-memory ETag / Last-Modified cache per provider (LRU, bounded), so
   unchanged requests are a 304 (free on GitHub). GitHub: `gh api -i` with

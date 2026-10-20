@@ -30,8 +30,8 @@ use argus_core::provider::{
     ProviderStatus, ReviewRef, ReviewState, Side, Thread,
 };
 use argus_core::{
-    LocalFile, MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewRefresh,
-    ReviewStatus, ReviewVerdict, RoundReason, Settings, StoredThread, ThreadId,
+    CloneStatus, LocalFile, MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord,
+    ReviewRefresh, ReviewStatus, ReviewVerdict, RoundReason, Settings, StoredThread, ThreadId,
 };
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -568,6 +568,17 @@ fn current() -> Value {
             absolute_path: "/Users/fixture/widgets/src/cache.rs".into(),
             exists: true,
             clone_head: Some("c".repeat(40)),
+            matches_review_head: false,
+        }),
+    );
+
+    add(
+        "CloneStatus",
+        val(CloneStatus {
+            configured: true,
+            path: Some("/Users/fixture/widgets".into()),
+            found: true,
+            head: Some("c".repeat(40)),
             matches_review_head: false,
         }),
     );

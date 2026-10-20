@@ -4,7 +4,7 @@
 
 use tauri::State;
 
-use argus_core::LocalFile;
+use argus_core::{CloneStatus, LocalFile};
 
 use super::{blocking, parse_review_id};
 use crate::error::IpcError;
@@ -49,4 +49,22 @@ pub async fn reveal_local_file(
 ) -> Result<(), IpcError> {
     let id = parse_review_id(&review_id)?;
     blocking(state, move |core| core.reveal_local_file(id, &path)).await
+}
+
+/// What is set and found for the review's repository: not configured, the
+/// folder gone or no repository, or a repository with its head. Read-only.
+#[tauri::command]
+pub async fn clone_status(
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<CloneStatus, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    blocking(state, move |core| core.clone_status(id)).await
+}
+
+/// Show the review's clone folder in Finder / Explorer.
+#[tauri::command]
+pub async fn reveal_clone(state: State<'_, AppState>, review_id: String) -> Result<(), IpcError> {
+    let id = parse_review_id(&review_id)?;
+    blocking(state, move |core| core.reveal_clone(id)).await
 }

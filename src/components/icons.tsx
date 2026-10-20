@@ -27,7 +27,9 @@ import {
   FilePenLine,
   FileSymlink,
   FileX,
+  FolderGit2,
   FolderTree,
+  FolderX,
   GitCommitHorizontal,
   Image,
   GitPullRequest,
@@ -146,3 +148,7 @@ export const PrevThreadIcon = icon(ChevronUp);
 
 // Open in editor: a review's file from the local clone.
 export const OpenInEditorIcon = icon(FilePenLine, { size: 13 });
+
+// The review's local clone, found or missing.
+export const CloneIcon = icon(FolderGit2, { size: 13 });
+export const CloneMissingIcon = icon(FolderX, { size: 13 });

@@ -143,6 +143,13 @@
       "round",
       "text"
     ],
+    "CloneStatus": [
+      "configured",
+      "found",
+      "head",
+      "matchesReviewHead",
+      "path"
+    ],
     "CommentableLines": [
       "baseSha",
       "headSha",

@@ -12,6 +12,7 @@ import type {
   AiRunState,
   ChecklistId,
   ChecklistItem,
+  CloneStatus,
   CommentableLines,
   Finding,
   FindingId,
@@ -356,6 +357,16 @@ export function openInEditor(
   useDefault = false,
 ): Promise<void> {
   return invoke("open_in_editor", { reviewId, path, useDefault });
+}
+
+/** What is set and found for the review's repository (read-only). */
+export function cloneStatus(reviewId: ReviewId): Promise<CloneStatus> {
+  return invoke("clone_status", { reviewId });
+}
+
+/** Show the review's clone folder in Finder / Explorer. */
+export function revealClone(reviewId: ReviewId): Promise<void> {
+  return invoke("reveal_clone", { reviewId });
 }
 
 /** Show the review's file from its clone in Finder / Explorer. */
