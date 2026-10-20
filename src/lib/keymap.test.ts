@@ -15,10 +15,8 @@ import {
   parseBinding,
   resolveKeymap,
   serializeBinding,
-  sharesByContext,
   shortcutHint,
   withHint,
-  type ActionId,
   type KeyEventLike,
 } from "./keymap";
 
@@ -207,10 +205,8 @@ describe("defaults", () => {
             expect(bindingProblem(parsed!, mac), `${a.id} ${b}`).toBeNull();
           }
           const other = seen.get(b);
-          // ↑/↓: the list's and the review page's, by where the focus is.
-          if (!other || !sharesByContext(a.id, other as ActionId)) {
-            expect(other, `${b} used by ${a.id} and ${other}`).toBe(undefined);
-          }
+          // No default key is shared any more (↑/↓ are the list's only).
+          expect(other, `${b} used by ${a.id} and ${other}`).toBe(undefined);
           seen.set(b, a.id);
         }
       }
@@ -441,19 +437,23 @@ describe("isBrowserShortcut", () => {
 });
 
 describe("thread keys", () => {
-  it("are s to resolve and ↑/↓ for the open threads, shared with the list", () => {
+  it("are s to resolve; the unresolved-thread jumps have no default key", () => {
     expect(DEFAULT_KEYMAP.resolveThread).toEqual(["KeyS"]);
-    expect(DEFAULT_KEYMAP.nextOpenThread).toEqual(["ArrowDown"]);
-    expect(DEFAULT_KEYMAP.prevOpenThread).toEqual(["ArrowUp"]);
+    // The header's arrow buttons and the palette run them; bare ↑/↓
+    // scroll the review page and move the list's cursor.
+    expect(DEFAULT_KEYMAP.nextOpenThread).toEqual([]);
+    expect(DEFAULT_KEYMAP.prevOpenThread).toEqual([]);
+    expect(DEFAULT_KEYMAP.nextReview).toEqual(["ArrowDown"]);
+    expect(DEFAULT_KEYMAP.prevReview).toEqual(["ArrowUp"]);
     const down = parseBinding("ArrowDown")!;
-    // Sharing ↓ with the list cursor is no conflict; with anything else it is.
+    // ↓ is the list's: binding it to the jump is a conflict now.
     expect(findConflict(DEFAULT_KEYMAP, "nextOpenThread", down, true)).toBe(
-      null,
-    );
-    expect(findConflict(DEFAULT_KEYMAP, "nextReview", down, true)).toBe(null);
-    expect(findConflict(DEFAULT_KEYMAP, "prevOpenThread", down, true)).toBe(
       "nextReview",
     );
+    // A saved binding still applies.
+    expect(
+      resolveKeymap({ nextOpenThread: ["Alt+ArrowDown"] }).nextOpenThread,
+    ).toEqual(["Alt+ArrowDown"]);
     expect(
       findConflict(
         DEFAULT_KEYMAP,

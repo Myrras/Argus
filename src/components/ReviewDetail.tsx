@@ -22,7 +22,10 @@ import { useState } from "react";
 
 import type { ReviewRecord, StoredThread } from "../ipc/types";
 import { resolutionLabel, unresolvedCount } from "../lib/diffThreads";
+import { withHint } from "../lib/keymap";
 import { openExternal } from "../lib/links";
+import { runShortcut } from "../lib/useAppShortcuts";
+import { useKeymap } from "../lib/useKeymap";
 import {
   MY_STATE_LABEL,
   PROVIDER_LABEL,
@@ -37,7 +40,13 @@ import { useReviewStore } from "../state/reviewStore";
 import { useThreadStore } from "../state/threadStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
-import { ExternalLinkIcon, OpenThreadIcon, ResolvedIcon } from "./icons";
+import {
+  ExternalLinkIcon,
+  NextThreadIcon,
+  OpenThreadIcon,
+  PrevThreadIcon,
+  ResolvedIcon,
+} from "./icons";
 import { ReviewView } from "./ReviewView";
 import { SubmitReviewModal } from "./SubmitReviewModal";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -216,19 +225,49 @@ const NO_THREADS: StoredThread[] = [];
  * "3 unresolved threads" or "All threads resolved", over every thread of
  * the review (anchored ones too); nothing while they load or when none can
  * be resolved. Follows the thread store, so a resolve moves it at once.
+ * GitLab's ⌃ / ⌄ beside it jump to the previous / next unresolved thread
+ * (`prevOpenThread` / `nextOpenThread`, as the palette runs them; "No more
+ * open threads" at an end); none when everything is resolved.
  */
 function Resolution({ reviewId }: { reviewId: ReviewRecord["id"] }) {
   const threads = useThreadStore(
     (s) => s.byReview[reviewId]?.threads ?? NO_THREADS,
   );
+  const keymap = useKeymap();
   const label = resolutionLabel(threads);
   if (!label) return null;
-  const done = unresolvedCount(threads) === 0;
+  const open = unresolvedCount(threads);
+  const done = open === 0;
   const Icon = done ? ResolvedIcon : OpenThreadIcon;
   return (
     <span className={styles.resolution} data-done={done}>
       <Icon size={13} className={styles.resolutionIcon} />
       {label}
+      {!done && (
+        <span
+          className={styles.jumps}
+          role="group"
+          aria-label="Unresolved threads"
+        >
+          {(
+            [
+              ["prevOpenThread", "Previous unresolved thread", PrevThreadIcon],
+              ["nextOpenThread", "Next unresolved thread", NextThreadIcon],
+            ] as const
+          ).map(([action, name, Glyph]) => (
+            <button
+              key={action}
+              type="button"
+              className={`iconButton ${styles.jump}`}
+              aria-label={name}
+              title={withHint(name, keymap, action)}
+              onClick={() => runShortcut(action)}
+            >
+              <Glyph />
+            </button>
+          ))}
+        </span>
+      )}
     </span>
   );
 }

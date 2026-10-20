@@ -121,7 +121,8 @@ sibling app Iris (`../Iris`).
     comments (`PUT …/discussions/:id` with `resolved`). Refusals
     (permission) are `postRejected` with the platform's message. UI: a
     Resolve / Unresolve button in `ThreadBlock` (`threadStore.setResolved`:
-    busy state, toast on failure, badge after the re-read), key `s`
+    busy state, toast on failure, badge after the re-read; the header's
+    "N unresolved threads" with ⌃ ⌄ jumps), key `s`
     (`resolveThread`), palette "Resolve thread" / "Unresolve thread"; no
     confirmation (reversible).
   - UI: `DiffEditor` takes `items` (blocks under lines besides threads) and
@@ -270,11 +271,14 @@ sibling app Iris (`../Iris`).
   - Keys (all rebindable): list `↑`/`↓`, `Enter`, `1`–`4`, refresh
     `Shift+R` / `Mod+R` (was bare `r`; a saved override still wins),
     `Mod+K` palette, `?` help; app `Mod+,` settings; files `j`/`k` files,
-    `n`/`p` threads and findings, `↓`/`↑` next/previous open (unresolved)
-    thread (`nextOpenThread`/`prevOpenThread`, shared with the list's
-    `↑`/`↓` via `keymap.SHARED_BY_CONTEXT`; `keyboardFlow.onReviewPage`
-    decides: the sidebar keeps the list cursor, a diff's `.cm-content` its
-    line picking; no wrap, "No more open threads" at an end), `Enter`/`t`
+    `n`/`p` threads and findings; next/previous unresolved thread
+    (`nextOpenThread`/`prevOpenThread`: resolvable and not resolved, as the
+    header counts them; no default key, run by the header's ⌃ ⌄ buttons
+    and the palette, a saved binding still applies; no wrap, "No more open
+    threads" at an end). Bare `↑`/`↓` are the list's only: on an open
+    review's page (`keyboardFlow.onReviewPage`: not the sidebar, unless the
+    list's arrows came last) they are left to the browser and scroll (a
+    diff's `.cm-content` picks lines), `Enter`/`t`
     open or fold the thread, `r` reply, `s` resolve or reopen, `h`
     then/now, `c` comment, `v` viewed, `a` AI panel, `x` select, `e` edit,
     `d` dismiss finding; composer `Mod+Enter` submit, `Esc` (fixed)

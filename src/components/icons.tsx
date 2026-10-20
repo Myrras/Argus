@@ -15,7 +15,9 @@
 
 import {
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleAlert,
   CircleCheck,
   CircleDot,
@@ -138,6 +140,9 @@ export const ResolvedIcon = icon(CircleCheck);
 export const UnresolvedIcon = icon(RotateCcw);
 /** A thread still to settle (the Conversation's group, the header count). */
 export const OpenThreadIcon = icon(CircleDot);
+/** The header's jumps to the next / previous unresolved thread (GitLab's). */
+export const NextThreadIcon = icon(ChevronDown);
+export const PrevThreadIcon = icon(ChevronUp);
 
 // Open in editor: a review's file from the local clone.
 export const OpenInEditorIcon = icon(FilePenLine, { size: 13 });

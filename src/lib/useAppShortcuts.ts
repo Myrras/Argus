@@ -8,10 +8,10 @@
  * from a shortcut outside a composer; the then/now of the thread last
  * clicked; with the AI pass on, toggle the AI panel and the last-clicked
  * finding's selection — selecting, not posting).
- * M6 (`keyboardFlow`): `n`/`p` move the page focus, ↑/↓ through the open
- * threads (from the review page: the sidebar keeps them for the list
- * cursor, a diff's code for picking lines; the files scope goes first, so
- * that is decided in `keyboardFlow.onReviewPage`), and the then/now,
+ * M6 (`keyboardFlow`): `n`/`p` move the page focus; ↑/↓ are the list's,
+ * except on an open review's page, where they scroll natively
+ * (`keyboardFlow.onReviewPage`); the unresolved-thread jumps have no
+ * default key (the header's arrows). The then/now,
  * selection, comment, Enter/reply/edit/dismiss and resolve (`s`, the one
  * key that writes, on the focused thread) keys act on the focused item;
  * ⌘K opens the command palette, ? the shortcut help. `runShortcut` runs an
@@ -37,6 +37,7 @@ import { useReviewStore } from "../state/reviewStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import {
   commentOnFocusedItem,
+  onReviewPage,
   runFlowAction,
   runOverlayAction,
 } from "./keyboardFlow";
@@ -75,10 +76,11 @@ function runListAction(action: ActionId, target: EventTarget | null): boolean {
   const store = useReviewStore.getState();
   switch (action) {
     case "nextReview":
-      store.moveCursor(1);
-      return true;
     case "prevReview":
-      store.moveCursor(-1);
+      // On an open review's page the arrows scroll it (and pick lines in
+      // the code): left to the browser. The palette (no event) still moves.
+      if (target && store.selectedId && onReviewPage(target)) return false;
+      store.moveCursor(action === "nextReview" ? 1 : -1);
       return true;
     case "openReview":
       // A focused button or link handles its own Enter; without a cursor

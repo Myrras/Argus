@@ -129,19 +129,17 @@ export function focusedStoredThread(reviewId: ReviewId) {
 }
 
 /**
- * Whether ↑/↓ belong to the review page (the open-thread jumps) rather
- * than the review list's cursor or the code's line picking: not from the
- * sidebar, not from a diff's code area (it picks lines with them,
- * `DiffEditor`); from anywhere in the review, yes; from nowhere in
- * particular (the page body), unless ↑/↓ in the list came last. The
- * palette (no target) acts on the page.
+ * Whether a press is on the review page rather than the review list:
+ * there bare ↑/↓ scroll natively (and a diff's code area picks lines with
+ * them, `DiffEditor`), so the list's cursor keys leave it alone. From the
+ * sidebar, no; from anywhere in the review or the AI panel, yes; from
+ * nowhere in particular (the page body), unless ↑/↓ in the list came last.
  */
 export function onReviewPage(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) {
-    return target === null || useFocusStore.getState().zone !== "list";
+    return useFocusStore.getState().zone !== "list";
   }
   if (target.closest('[aria-label="Sidebar"]')) return false;
-  if (target.classList.contains("cm-content")) return false;
   if (
     target.closest('[aria-label="Review detail"], [aria-label="AI review"]')
   ) {
@@ -178,7 +176,7 @@ export function runFlowAction(
       return focus.move(reviewId, action === "nextItem" ? 1 : -1);
     case "nextOpenThread":
     case "prevOpenThread": {
-      if (!onReviewPage(target)) return false;
+      // The header's arrows, the palette or a key the user bound.
       const moved = focus.moveOpen(
         reviewId,
         action === "nextOpenThread" ? 1 : -1,

@@ -38,6 +38,8 @@ import { clearCommentableCache, useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useHistoryStore } from "../state/historyStore";
 import { useReviewStore } from "../state/reviewStore";
+import { useSettingsStore } from "../state/settingsStore";
+import { useToastStore } from "../state/toastStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { ReviewDetail } from "./ReviewDetail";
@@ -168,6 +170,8 @@ beforeEach(() => {
     true,
   );
   useFocusStore.setState({ reviewId: r.id, item: null, zone: "page" });
+  useSettingsStore.getState().resetShortcuts();
+  useToastStore.setState({ toasts: [] });
 });
 
 function Shell() {
@@ -248,6 +252,13 @@ describe("the Conversation's resolved split", () => {
     threads = all.map((t) => ({ ...t, resolved: t.resolvable }));
     const { unmount } = render(<Shell />);
     expect(await screen.findByText("All threads resolved")).toBeVisible();
+    // Nothing to go to: no arrows, only the line.
+    expect(
+      screen.queryByRole("button", { name: "Next unresolved thread" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Previous unresolved thread" }),
+    ).toBeNull();
     const entry = within(tree()).getByRole("button", { name: /Conversation/ });
     expect(within(entry).queryByText(/open$/)).toBeNull();
     // Nothing is unresolved: no Unresolved group at all.
@@ -360,21 +371,37 @@ describe("the keys over a folded Resolved group", () => {
     expect(authors(resolved)).toEqual(["Thread by erin-fixture"]);
   });
 
-  it("↓ walks the open threads and never unfolds Resolved", async () => {
+  it("the header's arrows walk the unresolved threads, Resolved stays folded", async () => {
     await opened();
+    const down = screen.getByRole("button", { name: "Next unresolved thread" });
+    const up = screen.getByRole("button", {
+      name: "Previous unresolved thread",
+    });
+    expect(down).toBeEnabled();
+    expect(down).toHaveAttribute("title", "Next unresolved thread");
     const seen: (string | null)[] = [];
-    for (let i = 0; i < 5; i++) {
-      press("ArrowDown");
+    for (let i = 0; i < 4; i++) {
+      fireEvent.click(down);
       seen.push(focused());
     }
-    // Resolved ones are skipped, here and in "On other files".
+    // Only what the count counts: resolved ones and the plain comment are
+    // skipped, here and in "On other files".
     expect(seen).toEqual([
       mineOpen.threadId,
       carolOpen.threadId,
-      daveComment.threadId,
       awayOpen.threadId,
       onCache.threadId,
     ]);
+    // At the end it stays and says so.
+    fireEvent.click(down);
+    expect(focused()).toBe(onCache.threadId);
+    expect(
+      useToastStore
+        .getState()
+        .toasts.some((t) => t.message === "No more open threads"),
+    ).toBe(true);
+    fireEvent.click(up);
+    expect(focused()).toBe(awayOpen.threadId);
     expect(
       within(group(talk(), "Resolved")).getByRole("button", {
         name: /^Resolved/,
@@ -385,5 +412,28 @@ describe("the keys over a folded Resolved group", () => {
         name: /^Resolved/,
       }),
     ).toHaveAttribute("aria-expanded", "false");
+    // Nothing was written.
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "resolve_thread"),
+    ).toEqual([]);
+  });
+
+  it("names a saved shortcut in the arrows' tooltips", async () => {
+    act(() =>
+      useSettingsStore.getState().setShortcut("nextOpenThread", ["KeyG"]),
+    );
+    await opened();
+    expect(
+      screen.getByRole("button", { name: "Next unresolved thread" }),
+    ).toHaveAttribute("title", "Next unresolved thread (G)");
+    // A bound key runs the same action.
+    press("g", "KeyG");
+    expect(focused()).toBe(mineOpen.threadId);
+  });
+
+  it("bare ↓ leaves the thread focus alone", async () => {
+    await opened();
+    press("ArrowDown");
+    expect(focused()).toBeNull();
   });
 });

@@ -187,6 +187,20 @@
   color: var(--warning);
 }
 
+/* GitLab's ⌃ ⌄ beside the count: a tight pair, smaller than a toolbar
+   button so the status row keeps its height. */
+.jumps {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+}
+
+.jumps .jump {
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+}
+
 .resolution[data-done="true"],
 .resolution[data-done="true"] .resolutionIcon {
   color: var(--success);
