@@ -25,8 +25,9 @@ when it merges.
   need another look say why (new commits, the author replied, or your review
   was re-requested) and how many of your threads nobody has touched since.
   Threads you started or replied in count as yours: they are shown first,
-  tracked for rounds (a reply after your last comment there counts) and
-  judged by the AI. "Mark round reviewed" moves the item to Waiting on
+  tracked for rounds (a reply after your last comment there counts, and so
+  does one you had not seen yet when you posted from Argus) and judged by
+  the AI. "Mark round reviewed" moves the item to Waiting on
   author, with a confirmation; items you approved drop off the list.
 - A detail view per review, on one scrolling page like a platform's "Files
   changed" tab combined with its conversation, better organised: its title,
@@ -187,7 +188,10 @@ when it merges.
   for a refresh that is still talking to GitHub or GitLab.
 - A self-hosted GitLab may use plain http (for example behind a VPN). Argus
   warns that the token then travels unencrypted: a note under the URL in
-  Settings and an "Unencrypted" badge in the Providers section.
+  Settings and an "Unencrypted" badge in the Providers section. A token
+  stored for https is never sent over plain http: switching the URL to http
+  asks for the token again, and Settings says why. A plain-http GitLab set
+  up before keeps its token.
 - On a pull request too large for GitHub to find its merge base, removed
   lines take no comments (the file says why; the `c` key and posting refuse
   them as well, so nothing lands on the wrong line), unless a local clone supplies
@@ -200,7 +204,11 @@ when it merges.
 - The macOS menu bar has a Window menu: Minimize (⌘M), Zoom, full screen and
   Close Window (⌘W).
 - GitHub pull request conversation comments and review summaries now show in
-  the Conversation section and count for rounds and the AI pass.
+  the Conversation section and count for rounds and the AI pass. Replies
+  you post from Argus stay in their thread. Quote replies count only when
+  they quote whole lines (one short line like "> ok" is no reply), and only
+  the author's first real answer after your comment counts as a reply to
+  you: not `/retest`, `@dependabot rebase` or a remark to someone else.
 
 ## [0.1.0] - 2026-10-16
 
