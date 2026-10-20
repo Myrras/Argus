@@ -54,6 +54,8 @@ pub(crate) struct RawCheck {
     pub related: Vec<String>,
     /// As [`RawFinding::repeat`].
     pub repeat: Option<Repeat>,
+    /// As [`RawFinding::related_to`].
+    pub related_to: Vec<RaisedRef>,
 }
 
 /// Tests write items as plain text (nothing related) and compare by text.
@@ -64,6 +66,7 @@ impl From<&str> for RawCheck {
             text: text.into(),
             related: Vec::new(),
             repeat: None,
+            related_to: Vec::new(),
         }
     }
 }
@@ -210,6 +213,7 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
             text: non_empty(o, "text", &at)?.to_string(),
             related: related(o, &at)?,
             repeat: None,
+            related_to: Vec::new(),
         });
     }
     for (i, item) in array(top, "verdicts")?.iter().enumerate() {

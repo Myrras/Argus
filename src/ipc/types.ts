@@ -546,9 +546,10 @@ export interface Finding {
    */
   repeatOf: RepeatOf | null;
   /**
-   * The points of the review the agent said this overlaps, when it does not
-   * repeat them ("related to bob's comment"). A high-severity finding is
-   * never set aside on the agent's mark alone: it lists them here.
+   * The points of the review this overlaps without repeating them ("related
+   * to bob's comment"): the ones the agent marked, then the ones Argus finds
+   * it close to. A high-severity finding is never set aside on the agent's
+   * mark alone: it lists them here.
    */
   relatedTo: RelatedRef[];
 }
@@ -584,6 +585,8 @@ export interface ChecklistItem {
    * aside as already raised, and kept once the user shows it anyway.
    */
   repeatOf: RepeatOf | null;
+  /** What it relates to without repeating it, as `Finding.relatedTo`. */
+  relatedTo: RelatedRef[];
 }
 
 /** `ai::FindingPost`: a finding to post, with the user's edit of its text. */

@@ -5,13 +5,15 @@
 //! [`MIGRATION_7`]) and, since migration 9 ([`MIGRATION_9`]), those
 //! findings themselves with what they repeat, plus the platform ids of a
 //! posted finding; since migration 10 ([`MIGRATION_10`]) the checklist
-//! items that repeat the review too, and what a finding relates to.
+//! items that repeat the review too, and what a finding relates to; since
+//! migration 11 ([`MIGRATION_11`]) what a checklist item relates to.
 
 use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension, Row};
 
+use super::dedupe::RaisedRef;
 use super::model::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, RelatedRef, RepeatOf,
     RepeatReason, Severity, Verdict, VerdictLabel,
@@ -88,6 +90,13 @@ pub(crate) const MIGRATION_10: &str = r#"
     ALTER TABLE checklist ADD COLUMN repeat_of_finding TEXT;
     ALTER TABLE checklist ADD COLUMN shown_anyway INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE findings ADD COLUMN related_to TEXT;
+"#;
+
+/// Migration 11: a checklist item keeps the points it relates to, as a
+/// finding does (`related_to`, migration 10). Rows from before relate to
+/// nothing.
+pub(crate) const MIGRATION_11: &str = r#"
+    ALTER TABLE checklist ADD COLUMN related_to TEXT;
 "#;
 
 /// Error text of a run that was running when Argus stopped.
@@ -279,12 +288,7 @@ pub(crate) fn save_done(
         }
         let was_dismissed = dismissed.contains(&key);
         let repeat = f.repeat.map(|r| r.repeat_of());
-        let related: Vec<RelatedRef> = f.related_to.iter().map(|r| r.related_ref()).collect();
-        let related = if related.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(&related).map_err(|e| CoreError::Store(e.to_string()))?)
-        };
+        let related = related_json(&f.related_to)?;
         tx.execute(
             "INSERT INTO findings (id, review_id, round, path, line, side, severity, title, body,
                 dismissed, head_sha, base_sha, repeat_reason, repeat_of_thread,
@@ -336,8 +340,8 @@ pub(crate) fn save_done(
         let repeat = c.repeat.map(|r| r.repeat_of());
         tx.execute(
             "INSERT INTO checklist (id, review_id, round, text, checked, repeat_reason,
-                repeat_of_thread, repeat_of_finding, shown_anyway)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                repeat_of_thread, repeat_of_finding, shown_anyway, related_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 ChecklistId::new().to_string(),
                 rid,
@@ -354,6 +358,7 @@ pub(crate) fn save_done(
                     .and_then(|r| r.finding_id)
                     .map(|f| f.to_string()),
                 repeat.is_some() && shown_items.contains(&c.text),
+                related_json(&c.related_to)?,
             ],
         )?;
     }
@@ -406,6 +411,25 @@ pub(crate) fn save_done(
     }
     tx.commit()?;
     Ok(())
+}
+
+/// Related points as stored: a JSON array of [`RelatedRef`], NULL for none.
+fn related_json(related: &[RaisedRef]) -> CoreResult<Option<String>> {
+    if related.is_empty() {
+        return Ok(None);
+    }
+    let refs: Vec<RelatedRef> = related.iter().map(|r| r.related_ref()).collect();
+    serde_json::to_string(&refs)
+        .map(Some)
+        .map_err(|e| CoreError::Store(e.to_string()))
+}
+
+/// Related points as read back (column `at`).
+fn related_at(r: &Row<'_>, at: usize) -> rusqlite::Result<Vec<RelatedRef>> {
+    match r.get::<_, Option<String>>(at)? {
+        None => Ok(Vec::new()),
+        Some(json) => serde_json::from_str(&json).map_err(|_| bad("related points")),
+    }
 }
 
 fn side_str(side: Side) -> &'static str {
@@ -464,10 +488,7 @@ fn finding_row(r: &Row<'_>) -> rusqlite::Result<Finding> {
         posted_at: r.get(10)?,
         posted_url: r.get(11)?,
         repeat_of: repeat_at(r, 12)?,
-        related_to: match r.get::<_, Option<String>>(15)? {
-            None => Vec::new(),
-            Some(json) => serde_json::from_str(&json).map_err(|_| bad("related points"))?,
-        },
+        related_to: related_at(r, 15)?,
     })
 }
 
@@ -619,8 +640,8 @@ pub(crate) fn mark_posted(
     Ok(())
 }
 
-const CHECKLIST_COLUMNS: &str =
-    "id, review_id, round, text, checked, repeat_reason, repeat_of_thread, repeat_of_finding";
+const CHECKLIST_COLUMNS: &str = "id, review_id, round, text, checked, repeat_reason,
+    repeat_of_thread, repeat_of_finding, related_to";
 
 fn checklist_row(r: &Row<'_>) -> rusqlite::Result<ChecklistItem> {
     let id: String = r.get(0)?;
@@ -632,6 +653,7 @@ fn checklist_row(r: &Row<'_>) -> rusqlite::Result<ChecklistItem> {
         text: r.get(3)?,
         checked: r.get(4)?,
         repeat_of: repeat_at(r, 5)?,
+        related_to: related_at(r, 8)?,
     })
 }
 

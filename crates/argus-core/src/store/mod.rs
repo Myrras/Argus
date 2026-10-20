@@ -180,6 +180,8 @@ const MIGRATIONS: &[&str] = &[
     // 10: checklist items set aside as repeats of the review, kept; the
     // points a finding relates to.
     crate::ai::store::MIGRATION_10,
+    // 11: the points a checklist item relates to.
+    crate::ai::store::MIGRATION_11,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus

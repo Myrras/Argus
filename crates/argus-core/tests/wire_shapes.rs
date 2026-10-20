@@ -473,6 +473,10 @@ fn current() -> Value {
             thread_id: Some(thread_id),
             finding_id: Some(finding_id),
         }),
+        related_to: vec![RelatedRef {
+            thread_id: Some(thread_id),
+            finding_id: Some(finding_id),
+        }],
     };
     let verdict = Verdict {
         thread_id,

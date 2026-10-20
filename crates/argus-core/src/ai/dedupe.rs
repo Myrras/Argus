@@ -13,11 +13,12 @@
 //!    The prompt tells it to leave out a point that adds nothing and to
 //!    describe only the new part of one that does; so a marked point
 //!    repeats its thread only when the text also says what the thread says
-//!    ([`RELATED_SIMILARITY`]): a related point the agent kept anyway is
-//!    caught, a new part on the same code is kept. A high-severity finding
-//!    is never set aside on the agent's mark alone (an over-eager or
-//!    steered mark must not bury it): it stays a finding and names what it
-//!    relates to. So does every other marked finding that is kept.
+//!    ([`RELATED_SIMILARITY`], without the title's share in a note: a short
+//!    title shares its subject with any note on it); a checklist item needs
+//!    [`MIN_CHECK_SHARED`] shared words besides. A related point the agent
+//!    kept anyway is caught, a new part on the same code is kept. A
+//!    high-severity finding is never set aside on the agent's mark alone
+//!    (an over-eager or steered mark must not bury it).
 //! 2. A net of Argus' own for a point the agent did not mark: the same
 //!    file and side, its line within [`LINE_SLACK`] of the thread's lines
 //!    (where it was left, where the platform shows it now, where the thread
@@ -29,26 +30,39 @@
 //!    [`GLOBAL_SIMILARITY`]. A similar text far away from a thread on the
 //!    same side is a new point (the same mistake in another place).
 //!
+//! Every finding and item that is kept names the points it relates to
+//! ("related to …"): the ones the agent marked, and the ones close to it
+//! by the same words ([`Raised::relates`]: near the thread at
+//! [`RELATED_SIMILARITY`], elsewhere at [`NEAR_SIMILARITY`]). So a close
+//! call the net keeps is never shown as if the review said nothing there.
+//!
 //! Only prose words count: code says what the line is, not what is wrong
 //! with it. Left out are fenced blocks (code, suggestions), inline code
-//! spans, identifier-shaped words (`snake_case`, `camelCase`, with digits)
-//! and every word of the code the point is on (the thread's hunk end and
-//! the finding's own line). Words are lower-cased and stemmed (English and
-//! Dutch suffixes, repeatedly), and then English and Dutch stop words and
-//! stock review phrases are left out (by stem, so `fixed` goes with
-//! `fix`). At least [`MIN_SHARED_WORDS`] words must be shared.
+//! spans and identifier-shaped words (`snake_case`, `camelCase`, with
+//! digits). The words of the code the point is on (the thread's hunk end
+//! and the finding's own line) count only when the two texts also share a
+//! word of their own that is not a mere part of a program
+//! ([`GENERIC_NOUNS`]): "this unwrap panics" and "unwrap on an unknown user
+//! panics" make one point about the line, "validate the email input" and
+//! "the email input is logged" two. Words are lower-cased and stemmed
+//! (English and Dutch suffixes, repeatedly; a doubled final consonant
+//! single), and then English and Dutch stop words and stock review phrases
+//! are left out (by stem, so `fixed` goes with `fix`; an agent noun such as
+//! `gebruiker` is no inflection of `gebruik`). At least
+//! [`MIN_SHARED_WORDS`] words must be shared.
 //!
 //! Similarity is the best of the Jaccard index of the point against the
 //! whole thread, the share of the finding's title found in a note (titles
-//! of at least [`MIN_TOKENS`] words), and the share of a note found in the
-//! finding. The last one catches a comment whose point a longer finding
-//! contains in full, which plain Jaccard dilutes; it counts only for a note
-//! of at least [`MIN_NOTE_WORDS`] words whose words the finding's title
-//! shares too: three words of a short note ("the cache never expires
-//! entries") are its subject, and a finding about something else on that
-//! subject mentions them in its body.
+//! of at least [`MIN_TOKENS`] words: a two-word title wholly in a note is
+//! its point), and the share of a note found in the finding. The last one
+//! catches a comment whose point a longer finding contains in full, which
+//! plain Jaccard dilutes; it counts only for a note of at least
+//! [`MIN_NOTE_WORDS`] words whose words the finding's title shares too:
+//! three words of a short note ("the cache never expires entries") are its
+//! subject, and a finding about something else on that subject mentions
+//! them in its body.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use super::model::{Finding, FindingId, RelatedRef, RepeatOf, RepeatReason, Severity};
@@ -72,11 +86,15 @@ pub(crate) const GLOBAL_SIMILARITY: f64 = 0.7;
 /// shared code on the same line is what a new part has too).
 pub(crate) const RELATED_SIMILARITY: f64 = 0.3;
 /// The share of a title found in a note only counts for titles at least
-/// this big: two shared words of a two-word title prove nothing.
-pub(crate) const MIN_TOKENS: usize = 3;
+/// this big. With [`MIN_SHARED_WORDS`] shared, a two-word title counts only
+/// when wholly in the note ("Password logged"): it says nothing else.
+pub(crate) const MIN_TOKENS: usize = 2;
 /// The share of a note found in a finding only counts for notes at least
 /// this big (see the module docs).
 pub(crate) const MIN_NOTE_WORDS: usize = 5;
+/// The agent's mark sets a checklist item aside only with at least this
+/// many shared words.
+pub(crate) const MIN_CHECK_SHARED: usize = 3;
 /// The net needs at least this many shared words: one shared word ("cache")
 /// is a subject, not a point.
 pub(crate) const MIN_SHARED_WORDS: usize = 2;
@@ -166,6 +184,7 @@ const STOP_WORDS: &[&str] = &[
     "only",
     "or",
     "other",
+    "others",
     "our",
     "out",
     "over",
@@ -325,12 +344,14 @@ const STOP_WORDS: &[&str] = &[
     "jij",
     "kan",
     "kun",
+    "mag",
     "kunnen",
     "maar",
     "met",
     "mij",
     "mijn",
     "moet",
+    "mogen",
     "moeten",
     "na",
     "naar",
@@ -424,15 +445,54 @@ const STOP_WORDS: &[&str] = &[
 static STOP: LazyLock<HashSet<&'static str>> =
     LazyLock::new(|| STOP_WORDS.iter().copied().collect());
 /// Stems of the longer stop words, so their inflections go too (`fixed`,
-/// `issues`). Short function words only match as written: their stems
-/// (`dat`, `op`) are stems of real words (`date`, `ops`).
-static STOP_STEMS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-    STOP_WORDS
-        .iter()
-        .filter(|w| w.chars().count() >= 4)
-        .map(|w| stem(w))
-        .collect()
+/// `issues`), each with whether the stop word itself lost an `-er`. Short
+/// function words only match as written: their stems (`dat`, `op`) are
+/// stems of real words (`date`, `ops`).
+static STOP_STEMS: LazyLock<HashMap<String, bool>> = LazyLock::new(|| {
+    let mut stems = HashMap::new();
+    for w in STOP_WORDS.iter().filter(|w| w.chars().count() >= 4) {
+        let (stemmed, agent) = stem_parts(w);
+        *stems.entry(stemmed).or_insert(false) |= agent;
+    }
+    stems
 });
+
+/// Nouns that name a part of a program, not what is wrong with it: shared
+/// alone (`the email address input`), they say two texts are about the
+/// same code, not that they make the same point. Compared by stem.
+const GENERIC_NOUNS: &[&str] = &[
+    "argument",
+    "arguments",
+    "array",
+    "data",
+    "element",
+    "field",
+    "function",
+    "input",
+    "method",
+    "number",
+    "object",
+    "output",
+    "parameter",
+    "result",
+    "string",
+    "type",
+    "value",
+    "variable",
+    // Dutch.
+    "functie",
+    "gegevens",
+    "invoer",
+    "methode",
+    "resultaat",
+    "uitvoer",
+    "variabele",
+    "veld",
+    "waarde",
+];
+
+static GENERIC: LazyLock<HashSet<String>> =
+    LazyLock::new(|| GENERIC_NOUNS.iter().map(|w| stem(w)).collect());
 
 /// Suffixes stripped, longest first, until none applies (English and Dutch
 /// inflections; `tokens`/`token` and `ontbreken`/`ontbreekt` end alike).
@@ -441,28 +501,55 @@ const SUFFIXES: &[&str] = &[
     "ings", "ing", "edly", "ies", "ied", "ed", "es", "en", "er", "ly", "s", "e", "t", "y",
 ];
 
-/// A word as compared: lower case, suffixes off, Dutch double vowels single.
+/// A word as compared: lower case, suffixes off, a doubled final consonant
+/// single (`logged`/`log`, `dropped`/`drop`), Dutch double vowels single.
 pub(crate) fn stem(word: &str) -> String {
+    stem_parts(word).0
+}
+
+/// [`stem`], and whether an `-er` came off: an agent noun (`gebruiker`,
+/// `issuer`, `maker`) is a word of its own, not an inflection of the verb
+/// it shares a stem with (`gebruik`, `issue`, `make`).
+fn stem_parts(word: &str) -> (String, bool) {
     let mut w = word.to_lowercase();
+    let mut agent = false;
     loop {
         let stripped = SUFFIXES.iter().find_map(|suffix| {
             let rest = w.strip_suffix(suffix)?;
             (rest.chars().count() >= 3 && !(*suffix == "s" && rest.ends_with('s')))
-                .then(|| rest.to_string())
+                .then(|| (rest.to_string(), *suffix == "er"))
         });
         match stripped {
-            Some(rest) => w = rest,
+            Some((rest, er)) => {
+                w = rest;
+                agent |= er;
+            }
             None => break,
+        }
+    }
+    let chars: Vec<char> = w.chars().collect();
+    if let [.., a, b] = chars[..] {
+        if chars.len() >= 4 && a == b && a.is_alphabetic() && !"aeiouy".contains(a) {
+            w.pop();
         }
     }
     for (double, single) in [("ee", "e"), ("aa", "a"), ("oo", "o"), ("uu", "u")] {
         w = w.replace(double, single);
     }
-    w
+    (w, agent)
 }
 
-fn is_stop(lower: &str, stemmed: &str) -> bool {
-    STOP.contains(lower) || STOP_STEMS.contains(stemmed)
+/// A stop word as written, or an inflection of a longer one: not when only
+/// an agent noun's `-er` makes the stems meet (`gebruiker` is not
+/// `gebruik`), unless the stop word ends so itself (`others`/`other`).
+fn is_stop(lower: &str) -> bool {
+    if STOP.contains(lower) {
+        return true;
+    }
+    let (stemmed, agent) = stem_parts(lower);
+    STOP_STEMS
+        .get(&stemmed)
+        .is_some_and(|stop_agent| !agent || *stop_agent)
 }
 
 /// A word written like code: `snake_case`, `camelCase`, with a digit.
@@ -510,34 +597,26 @@ impl Text {
         t
     }
 
-    fn extend(&mut self, other: &Text) {
-        self.prose.extend(other.prose.iter().cloned());
-    }
-
-    /// The comparable words of this text (stemmed) given `code` (lower-cased
-    /// words of the code the point is on, which do not count).
-    fn words(&self, code: &HashSet<String>) -> HashSet<String> {
+    /// The comparable words of this text: stemmed, without identifiers and
+    /// stop words.
+    fn words(&self) -> HashSet<String> {
         self.prose
             .iter()
             .filter(|w| !identifier(w))
             .filter_map(|w| {
                 let lower = w.to_lowercase();
-                let stemmed = stem(&lower);
-                (!is_stop(&lower, &stemmed) && !code.contains(&lower)).then_some(stemmed)
+                (!is_stop(&lower)).then(|| stem(&lower))
             })
             .collect()
     }
 }
 
-/// Words of code lines, lower-cased: what a point on them cannot be judged by.
+/// Words of code lines, stemmed: what a point on them is about, not what it
+/// says about them.
 fn code_words<'a>(lines: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
     lines
         .into_iter()
-        .flat_map(|l| {
-            words_of(diff_content(l))
-                .map(str::to_lowercase)
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|l| words_of(diff_content(l)).map(stem).collect::<Vec<_>>())
         .collect()
 }
 
@@ -566,24 +645,58 @@ fn contained(a: &HashSet<String>, b: &HashSet<String>, min: usize) -> f64 {
     shared(a, b) as f64 / a.len() as f64
 }
 
+/// How much a point says what a raised point says (see the module docs).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Overlap {
+    /// The best of all three measures: what the net goes by.
+    pub net: f64,
+    /// Without the share of the title found in a note: what the agent's
+    /// mark goes by. A short title shares its subject with any note on it
+    /// ("Order query ignores soft-deleted flag" and a note on the order
+    /// query's N+1), and the mark already says the subject is the same.
+    pub marked: f64,
+    /// The words the point and the notes share.
+    pub shared: usize,
+}
+
+impl Overlap {
+    fn max(self, other: Overlap) -> Overlap {
+        Overlap {
+            net: self.net.max(other.net),
+            marked: self.marked.max(other.marked),
+            shared: self.shared.max(other.shared),
+        }
+    }
+}
+
 /// How much a point (`title` and `whole`, title included) says what
 /// `notes` say (see the module docs), counting only overlaps of at least
 /// [`MIN_SHARED_WORDS`] words.
-fn similarity(title: &HashSet<String>, whole: &HashSet<String>, notes: &[HashSet<String>]) -> f64 {
+fn similarity(
+    title: &HashSet<String>,
+    whole: &HashSet<String>,
+    notes: &[HashSet<String>],
+) -> Overlap {
     let all: HashSet<String> = notes.iter().flatten().cloned().collect();
-    let mut best = 0.0_f64;
-    if shared(whole, &all) >= MIN_SHARED_WORDS {
-        best = jaccard(whole, &all);
+    let n = shared(whole, &all);
+    if n < MIN_SHARED_WORDS {
+        return Overlap::default();
     }
-    for n in notes {
-        if shared(whole, n) < MIN_SHARED_WORDS || shared(title, n) < MIN_SHARED_WORDS {
+    let j = jaccard(whole, &all);
+    let mut o = Overlap {
+        net: j,
+        marked: j,
+        shared: n,
+    };
+    for note in notes {
+        if shared(whole, note) < MIN_SHARED_WORDS || shared(title, note) < MIN_SHARED_WORDS {
             continue;
         }
-        best = best
-            .max(contained(n, whole, MIN_NOTE_WORDS))
-            .max(contained(title, n, MIN_TOKENS));
+        let note_in = contained(note, whole, MIN_NOTE_WORDS);
+        o.marked = o.marked.max(note_in);
+        o.net = o.net.max(note_in).max(contained(title, note, MIN_TOKENS));
     }
-    best
+    o
 }
 
 /// Lines `start..=end` of `path` on `side`; `None` lines: the whole file
@@ -668,8 +781,9 @@ impl Repeat {
 pub(crate) struct Raised {
     pub of: RaisedRef,
     pub places: Vec<Place>,
-    /// Per human note (or per posted finding, its title and body).
-    notes: Vec<Text>,
+    /// The words of each human note (or of a posted finding, its title and
+    /// body).
+    notes: Vec<HashSet<String>>,
     /// Words of the code it was left on (its hunk end, its then-code).
     code: HashSet<String>,
 }
@@ -680,17 +794,17 @@ pub(crate) struct Candidate<'a> {
     place: Option<(&'a str, Side, u32)>,
     /// A high-severity finding: never set aside on the agent's mark alone.
     high: bool,
-    title: Text,
-    whole: Text,
+    title: HashSet<String>,
+    /// Title and body.
+    whole: HashSet<String>,
     code: HashSet<String>,
 }
 
 impl<'a> Candidate<'a> {
     /// `line_text`: the diff's text at the finding's line, when known.
     pub fn finding(f: &'a RawFinding, line_text: Option<&str>) -> Self {
-        let title = Text::new(&f.title);
-        let mut whole = Text::new(&f.body);
-        whole.extend(&title);
+        let title = Text::new(&f.title).words();
+        let whole = Text::new(&f.body).words().union(&title).cloned().collect();
         Candidate {
             place: Some((f.path.as_str(), f.side, f.line)),
             high: f.severity == Severity::High,
@@ -701,7 +815,7 @@ impl<'a> Candidate<'a> {
     }
 
     pub fn check(c: &'a RawCheck) -> Self {
-        let title = Text::new(&c.text);
+        let title = Text::new(&c.text).words();
         Candidate {
             place: None,
             high: false,
@@ -717,31 +831,54 @@ impl Raised {
         Self {
             of,
             places,
-            notes: texts.iter().map(|t| Text::new(t)).collect(),
+            notes: texts.iter().map(|t| Text::new(t).words()).collect(),
             code,
         }
     }
 
-    /// How much `c` says what this point says: prose words only, the
-    /// words of the code either is on left out.
-    pub fn score(&self, c: &Candidate<'_>) -> f64 {
+    /// How much `c` says what this point says, prose words only. Words of
+    /// the code either is on count only when the two also share a word of
+    /// their own that is no mere part of a program ([`GENERIC_NOUNS`]):
+    /// then a line word both use as prose ("this unwrap panics", "unwrap
+    /// on an unknown user panics") is part of the point; without one, it is
+    /// only the code both are on.
+    pub fn overlap(&self, c: &Candidate<'_>) -> Overlap {
         let code: HashSet<String> = self.code.union(&c.code).cloned().collect();
-        let notes: Vec<HashSet<String>> = self.notes.iter().map(|n| n.words(&code)).collect();
-        similarity(&c.title.words(&code), &c.whole.words(&code), &notes)
+        let prose =
+            |s: &HashSet<String>| -> HashSet<String> { s.difference(&code).cloned().collect() };
+        let notes: Vec<HashSet<String>> = self.notes.iter().map(prose).collect();
+        let strict = similarity(&prose(&c.title), &prose(&c.whole), &notes);
+        let own = notes
+            .iter()
+            .flatten()
+            .any(|w| c.whole.contains(w) && !GENERIC.contains(w));
+        if code.is_empty() || !own {
+            return strict;
+        }
+        strict.max(similarity(&c.title, &c.whole, &self.notes))
+    }
+
+    /// The net's score of `c` (see [`Self::overlap`]).
+    pub fn score(&self, c: &Candidate<'_>) -> f64 {
+        self.overlap(c).net
     }
 
     /// Whether `c` repeats this point, and why (`related`: the agent listed
     /// this point's id for it).
     pub fn judge(&self, c: &Candidate<'_>, related: bool) -> Option<(RepeatReason, f64)> {
-        let words = self.score(c);
-        if related && !c.high && words >= RELATED_SIMILARITY {
-            return Some((RepeatReason::AgentMarked, words));
+        let o = self.overlap(c);
+        // A checklist item is a short question: two shared words are its
+        // subject, not its point.
+        let enough = c.place.is_some() || o.shared >= MIN_CHECK_SHARED;
+        if related && !c.high && enough && o.marked >= RELATED_SIMILARITY {
+            return Some((RepeatReason::AgentMarked, o.marked));
         }
+        let words = o.net;
         let similar = match c.place {
             _ if self.places.is_empty() => words >= GLOBAL_SIMILARITY,
             None => words >= GLOBAL_SIMILARITY,
             Some((path, side, line)) => {
-                let near = self.places.iter().any(|p| p.near(path, side, line));
+                let near = self.near(path, side, line);
                 // A thread with a place on the finding's side is "near" or
                 // nothing there: far down the same side is another place,
                 // even when the thread's hunk also maps it across.
@@ -751,6 +888,22 @@ impl Raised {
             }
         };
         similar.then_some((RepeatReason::Similar, words))
+    }
+
+    /// Whether `c` is about this point without (necessarily) repeating it:
+    /// near it and [`RELATED_SIMILARITY`], or anywhere and
+    /// [`NEAR_SIMILARITY`]. It then names this point ("related to …"), so a
+    /// close call the net keeps is never shown as unrelated.
+    pub fn relates(&self, c: &Candidate<'_>) -> bool {
+        let words = self.score(c);
+        match c.place {
+            Some((path, side, line)) if self.near(path, side, line) => words >= RELATED_SIMILARITY,
+            _ => words >= NEAR_SIMILARITY,
+        }
+    }
+
+    fn near(&self, path: &str, side: Side, line: u32) -> bool {
+        self.places.iter().any(|p| p.near(path, side, line))
     }
 }
 
@@ -976,24 +1129,37 @@ fn finding_line<'d>(diff: &'d FileDiff, f: &RawFinding) -> Option<&'d str> {
     line_at(file.patch.as_deref()?, f.side, f.line)
 }
 
+/// The points `c` names as related: the ones the agent marked, then the
+/// ones Argus finds it about ([`Raised::relates`]).
+fn related_points(c: &Candidate<'_>, related: &[String], raised: &[Raised]) -> Vec<RaisedRef> {
+    let marked = raised.iter().filter(|r| related.contains(&r.of.id()));
+    let found = raised
+        .iter()
+        .filter(|r| !related.contains(&r.of.id()) && r.relates(c));
+    marked.chain(found).map(|r| r.of).collect()
+}
+
 /// Mark the findings and checklist items of `run` that repeat one of
 /// `raised` (counted in `dropped_duplicates` and `skipped_checklist`), and
-/// name on each finding the points the agent said it relates to. `diff` is
-/// the diff the agent read: the text of a finding's line is code, not a
-/// point.
+/// name on each the points it relates to. `diff` is the diff the agent
+/// read: the text of a finding's line is code, not a point.
 pub(crate) fn classify(run: &mut RunOutput, raised: &[Raised], diff: &FileDiff) {
     for f in &mut run.findings {
         let c = Candidate::finding(f, finding_line(diff, f));
-        f.repeat = best_repeat(&c, &f.related, raised);
-        f.related_to = raised
-            .iter()
-            .filter(|r| f.related.contains(&r.of.id()))
-            .map(|r| r.of)
-            .collect();
+        let (repeat, related) = (
+            best_repeat(&c, &f.related, raised),
+            related_points(&c, &f.related, raised),
+        );
+        (f.repeat, f.related_to) = (repeat, related);
     }
     run.dropped_duplicates = run.findings.iter().filter(|f| f.repeat.is_some()).count() as u32;
     for item in &mut run.checklist {
-        item.repeat = best_repeat(&Candidate::check(item), &item.related, raised);
+        let c = Candidate::check(item);
+        let (repeat, related) = (
+            best_repeat(&c, &item.related, raised),
+            related_points(&c, &item.related, raised),
+        );
+        (item.repeat, item.related_to) = (repeat, related);
     }
     run.skipped_checklist = run.checklist.iter().filter(|c| c.repeat.is_some()).count() as u32;
 }
@@ -1696,6 +1862,7 @@ mod tests {
                 Vec::new()
             },
             repeat: None,
+            related_to: Vec::new(),
         };
         let mut run = RunOutput {
             checklist: vec![
@@ -1726,6 +1893,52 @@ mod tests {
             ]
         );
         assert_eq!(run.skipped_checklist, 2);
+        // A kept item the agent marked names the thread; so does an
+        // unmarked one close to it, and one about something else nothing.
+        let thread = vec![RaisedRef::Thread(st.thread_id)];
+        let related: Vec<_> = run.checklist.iter().map(|c| c.related_to.clone()).collect();
+        assert_eq!(
+            related,
+            vec![thread.clone(), Vec::new(), thread.clone(), thread]
+        );
+    }
+
+    #[test]
+    fn a_close_call_the_net_keeps_names_the_thread() {
+        // Same line, same query, another point: kept, but tagged, so it is
+        // never shown as if nothing was said about this code.
+        let st = stored(
+            AUTHOR,
+            &["This runs one query per order inside the loop (N+1). Batch it."],
+            true,
+        );
+        let raised = raised_points(&[(&st, None)], &[]);
+        let patch = "@@ -9,3 +9,3 @@\n ctx\n+for o in orders { db.lines(o.id)?; }\n tail";
+        let mut run = RunOutput {
+            findings: vec![
+                finding(
+                    "src/cache.rs",
+                    10,
+                    "Order query ignores soft-deleted flag",
+                    "Deleted orders are still returned by this query; filter on `deleted_at IS NULL`.",
+                ),
+                finding(
+                    "src/cache.rs",
+                    10,
+                    "TTL of 0 disables the cache",
+                    "With `ttl = 0` every lookup misses.",
+                ),
+            ],
+            ..RunOutput::default()
+        };
+        classify(&mut run, &raised, &diff("src/cache.rs", patch));
+        assert_eq!(run.findings[0].repeat, None);
+        assert_eq!(
+            run.findings[0].related_to,
+            vec![RaisedRef::Thread(st.thread_id)]
+        );
+        assert!(run.findings[1].related_to.is_empty());
+        assert_eq!(run.dropped_duplicates, 0);
     }
 
     #[test]
@@ -1791,7 +2004,7 @@ mod tests {
         let t = Text::new(
             "Please consider caching the widgets; the cache is used twice. Fixed, issues resolved. `HashMap` user_id\n```\nlet hidden = 1;\n```",
         );
-        let w = t.words(&HashSet::new());
+        let w = t.words();
         assert!(w.contains("cach"));
         assert!(w.contains(&stem("widget")));
         // Stop words, inline code, identifiers and fences are no words.
@@ -1812,17 +2025,28 @@ mod tests {
             assert_eq!(stem(a), stem(z), "{a} / {z}");
         }
         // A short stop word only goes as written.
-        assert!(Text::new("date ops")
-            .words(&HashSet::new())
-            .contains(&stem("date")));
-        assert!(Text::new("a 42 x").words(&HashSet::new()).is_empty());
+        assert!(Text::new("date ops").words().contains(&stem("date")));
+        assert!(Text::new("a 42 x").words().is_empty());
     }
 
     /// The thresholds against the cases they were set on: each pair's word
     /// score, and what the rules make of it unmarked (`net`), marked by the
-    /// agent (`marked`, medium severity) and marked as a high-severity
-    /// finding (`high`). `cargo test -p argus-core calibration --
-    /// --nocapture` prints them.
+    /// agent (`marked`, medium severity), marked as a high-severity finding
+    /// (`high`), and whether the unmarked one, kept, still names the thread
+    /// (`tag`, "related to …"). `said`: a person reads the finding as the
+    /// note's point; such a finding is never kept untagged, and a new point
+    /// is never set aside by the net. `cargo test -p argus-core calibration
+    /// -- --nocapture` prints the table.
+    /// Whether a person reads a finding as the note's point.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Said {
+        Yes,
+        /// Yes, in other words or another language: no word to go by, only
+        /// the agent's mark names the thread.
+        Paraphrase,
+        No,
+    }
+
     #[test]
     fn calibration() {
         struct Case {
@@ -1830,22 +2054,28 @@ mod tests {
             note: &'static str,
             title: &'static str,
             body: &'static str,
-            /// The thread's hunk and the finding's line text, when on code.
-            code: Option<(&'static str, &'static str)>,
+            /// The thread's hunk (the code it was left on).
+            hunk: Option<&'static str>,
+            /// The text of the finding's line.
+            line_text: Option<&'static str>,
             /// The finding's line (the thread is on new 10).
             line: u32,
             /// A thread on the merge request as a whole.
             general: bool,
-            expect: (bool, bool, bool),
+            said: Said,
+            /// `net`, `marked`, `high`, `tag`.
+            expect: (bool, bool, bool, bool),
         }
-        let case = |name, note, title, body, expect| Case {
+        let case = |name, note, title, body, said, expect| Case {
             name,
             note,
             title,
             body,
-            code: None,
+            hunk: None,
+            line_text: None,
             line: 10,
             general: false,
+            said,
             expect,
         };
         let mut cases = vec![
@@ -1854,21 +2084,24 @@ mod tests {
                 EMPTY_LIST,
                 "Indexing an empty items list panics",
                 "`items[0]` panics when `items` is empty. Guard with `is_empty()` or use `first()`.",
-                (true, true, true),
+                Said::Yes,
+                (true, true, true, true),
             ),
             case(
                 "paraphrase (EN)",
                 "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
                 "Finding a widget walks the whole Vec",
                 "Every call iterates all widgets to match the id; index them in a map instead.",
-                (false, false, false),
+                Said::Paraphrase,
+                (false, false, false, false),
             ),
             case(
                 "close paraphrase (EN)",
                 "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
                 "Linear lookup by widget id",
                 "Each lookup scans the Vec; key a HashMap by the widget id.",
-                (true, true, true),
+                Said::Yes,
+                (true, true, true, true),
             ),
             Case {
                 line: 40,
@@ -1877,7 +2110,8 @@ mod tests {
                     "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
                     "Lookups by widget id are linear",
                     "Every lookup scans the widgets; a HashMap keyed by id avoids the scan.",
-                    (false, true, false),
+                    Said::Yes,
+                    (false, true, false, true),
                 )
             },
             case(
@@ -1885,60 +2119,69 @@ mod tests {
                 "De cache wordt nooit geïnvalideerd na een schrijfactie, dus lezers zien verouderde widgets tot de TTL verloopt.",
                 "Cache wordt niet geïnvalideerd na schrijven",
                 "Na een schrijfactie blijven verouderde widgets in de cache staan tot de TTL verloopt.",
-                (true, true, true),
+                Said::Yes,
+                (true, true, true, true),
             ),
             case(
                 "Dutch comment, English finding",
                 "Dit crasht als `items` leeg is: `items[0]` heeft geen check. Gebruik eerst `is_empty()`.",
                 "Indexing an empty items list panics",
                 "`items[0]` panics when `items` is empty; guard with `is_empty()` first.",
-                (false, false, false),
+                Said::Paraphrase,
+                (false, false, false, false),
             ),
             case(
                 "probe: naming nit vs auth",
                 "Rename `user_id` to `owner_id` in `load_widget`.",
                 "Missing authorization check in load_widget",
                 "`load_widget` returns any widget by `user_id` without checking the caller owns it; compare `owner_id` with the session user.",
-                (false, false, false),
+                Said::No,
+                (false, false, false, false),
             ),
             case(
                 "probe: suggestion vs TTL",
                 "```suggestion\nlet ttl = Duration::from_secs(300);\n```",
                 "TTL of 0 disables the cache",
                 "With `ttl = 0` every lookup misses; default to `Duration::from_secs(300)`.",
-                (false, false, false),
+                Said::No,
+                (false, false, false, false),
             ),
             case(
                 "probe: filler words",
                 "Thanks, fixed. Issues resolved.",
                 "Retry loop keeps firing after the first request resolved",
                 "The fixed-interval retry issues a new request even after the first one resolved; stop the loop on success.",
-                (false, false, false),
+                Said::No,
+                (false, false, false, false),
             ),
             case(
                 "different issue, same line",
                 EMPTY_LIST,
                 "TTL of 0 disables the cache",
                 "With `ttl = 0` every lookup misses, so the cache never serves a hit. Default to 300.",
-                (false, false, false),
+                Said::No,
+                (false, false, false, false),
             ),
             case(
                 "new part of a marked thread",
                 "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
                 "The widget map is never cleared on logout",
                 "Entries of a logged-out user stay in memory for good; clear them in `logout`.",
-                (false, false, false),
+                Said::No,
+                (false, false, false, false),
             ),
         ];
         for (i, (title, body)) in NEW_PARTS.into_iter().enumerate() {
             cases.push(Case {
-                code: Some((LOOKUP_HUNK, LOOKUP_LINE)),
+                hunk: Some(LOOKUP_HUNK),
+                line_text: Some(LOOKUP_LINE),
                 ..case(
                     ["probe r2: memory", "probe r2: unwrap", "probe r2: tenant"][i],
                     LOOKUP_NOTE,
                     title,
                     body,
-                    (false, false, false),
+                    Said::No,
+                    (false, false, false, false),
                 )
             });
         }
@@ -1949,7 +2192,8 @@ mod tests {
                 "Please add a test for the token refresh path.",
                 "Token is logged in plain text",
                 "The token is logged by the debug call below; the refresh path leaks it.",
-                (false, false, false),
+                Said::No,
+                (false, false, false, false),
             )
         });
         cases.push(Case {
@@ -1959,49 +2203,316 @@ mod tests {
                 "The cache never expires entries.",
                 "Cache entries race on concurrent writes",
                 "Two writers to the cache can interleave so entries are lost; the cache needs a lock.",
-                // Marked by the agent, two of the title's five words are
-                // the note's: set aside when medium, kept when high.
-                (false, true, false),
+                Said::No,
+                // Two of the title's five words are the note's subject: no
+                // longer enough for the agent's mark.
+                (false, false, false, false),
             )
         });
         cases.push(Case {
-            code: Some(("@@ -8,3 +8,3 @@\n ctx\n ctx2\n+let first = items[0];", "")),
+            hunk: Some("@@ -8,3 +8,3 @@\n ctx\n ctx2\n+let first = items[0];"),
             line: 80,
             ..case(
                 "probe r2: same mistake at new 80",
                 EMPTY_LIST,
                 "Indexing an empty items list panics",
                 "`items[0]` panics when `items` is empty. Guard with `is_empty()` or use `first()`.",
-                (false, true, false),
+                Said::No,
+                (false, true, false, true),
             )
         });
-        eprintln!("{:<34} {:>6}  net    marked high", "case", "words");
+        // Loop 2 round 3 probes: on the finding's own line, with its text.
+        let on_line = |name, note, title, body, line_text, said, expect| Case {
+            line_text: Some(line_text),
+            ..case(name, note, title, body, said, expect)
+        };
+        cases.extend([
+            on_line(
+                "r3: token logged",
+                "This logs the token in plain text; secrets end up in our log files.",
+                "Token logged in plain text",
+                "The bearer token is written to the info log; redact it.",
+                "log::info!(\"token: {}\", token);",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: error dropped",
+                "Errors are dropped silently here.",
+                "Error silently dropped",
+                "The error from `save` is dropped; propagate it with `?`.",
+                "let _ = save(x);",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            Case {
+                line: 11,
+                ..on_line(
+                    "r3: unwrap on None",
+                    "Missing null check: `user` can be None here and the unwrap panics.",
+                    "Unwrap on optional user panics",
+                    "`find_user` returns None for unknown ids; `unwrap()` then panics. Return a 404 instead.",
+                    "let user = find_user(id).unwrap();",
+                    Said::Yes,
+                    (true, true, true, true),
+                )
+            },
+            on_line(
+                "r3: unwrap, short",
+                "This unwrap will panic when the user is not found.",
+                "Panic on unknown user",
+                "`unwrap()` panics if no user matches the id; return a 404 instead.",
+                "let user = find_user(id).unwrap();",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: N+1",
+                "This runs one query per order inside the loop (N+1). Batch it.",
+                "N+1 query in order loop",
+                "Each iteration issues a separate query for the order lines; fetch them in one batched query.",
+                "for o in orders { db.lines(o.id)?; }",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: SQL injection",
+                "SQL injection: the name is concatenated into the query string.",
+                "SQL injection via string concatenation",
+                "`name` is concatenated into the SQL string; use a bound parameter.",
+                "let q = format!(\"SELECT * FROM t WHERE name = '{}'\", name);",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: racy balance check",
+                "Race condition: two requests can both pass the balance check and overdraw.",
+                "Balance check is racy",
+                "Concurrent withdrawals can both pass the check before either writes, overdrawing the account. Lock the row.",
+                "if account.balance >= amount {",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: NL authorisation",
+                "De gebruiker kan hier facturen van andere klanten opvragen; er ontbreekt een autorisatiecheck.",
+                "Autorisatiecheck ontbreekt bij facturen",
+                "Een gebruiker kan facturen van andere klanten ophalen omdat de autorisatiecheck ontbreekt.",
+                "let factuur = repo.get(id)?;",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: NL timeout",
+                "Er staat geen timeout op deze HTTP-call; bij een trage server blijft de request hangen.",
+                "HTTP-call zonder timeout",
+                "Zonder timeout blijft de request hangen als de server traag reageert.",
+                "let resp = client.get(url).send()?;",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: NL password logged",
+                "Hier wordt het wachtwoord gelogd, dat mag niet.",
+                "Wachtwoord wordt gelogd",
+                "Het wachtwoord komt in de logging terecht; laat het weg.",
+                "log::debug!(\"{:?}\", req);",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: EN password logged",
+                "Password is logged here, not allowed.",
+                "Password logged",
+                "The password ends up in the debug log; remove it.",
+                "debug!(\"{:?}\", req);",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: API key logged",
+                "The API key gets logged here.",
+                "API key written to the log",
+                "The request's API key is logged at debug level; redact it before logging.",
+                "debug!(\"{:?}\", req);",
+                Said::Yes,
+                (true, true, true, true),
+            ),
+            on_line(
+                "r3: query, other point",
+                "This runs one query per order inside the loop (N+1). Batch it.",
+                "Order query ignores soft-deleted flag",
+                "Deleted orders are still returned by this query; filter on `deleted_at IS NULL`.",
+                "for o in orders { db.lines(o.id)?; }",
+                Said::No,
+                (false, false, false, true),
+            ),
+            on_line(
+                "r3: cache key, short note",
+                "Cache key looks wrong.",
+                "Cache key collides across tenants",
+                "The cache key is the widget id only, so tenants share entries and read each other's widgets.",
+                "let key = widget.id;",
+                Said::No,
+                (false, false, false, true),
+            ),
+            on_line(
+                "r3: NL error message",
+                "De foutmelding hier is niet duidelijk voor de gebruiker.",
+                "Foutmelding lekt interne details",
+                "De foutmelding toont de stacktrace en het SQL-statement aan de klant; log die intern en toon een generieke melding.",
+                "return Err(e.to_string());",
+                Said::No,
+                (false, false, false, false),
+            ),
+            on_line(
+                "r3: backoff vs cap",
+                "Retries should use exponential backoff.",
+                "Retries are not capped",
+                "The retry loop never stops on a permanent error; cap the retries at a maximum count.",
+                "loop { if send().is_ok() { break; } }",
+                Said::No,
+                (false, false, false, false),
+            ),
+            on_line(
+                "r3: validate vs logged",
+                "Please validate the email address input.",
+                "Email address input is logged",
+                "The raw email address input is written to the access log, which is personal data.",
+                "let email = form.email;",
+                Said::No,
+                (false, false, false, false),
+            ),
+        ]);
+        let mut wrong = Vec::new();
+        eprintln!(
+            "{:<34} {:<10} {:>6}  net    marked high   tag",
+            "case", "said", "words"
+        );
         for c in &cases {
             let mut st = stored(AUTHOR, &[c.note], !c.general);
-            if let Some((hunk, _)) = c.code {
+            if let Some(hunk) = c.hunk {
                 st = with_hunk(st, hunk);
             }
             let raised = raised_points(&[(&st, None)], &[]);
-            let line_text = c.code.map(|(_, l)| l).filter(|l| !l.is_empty());
             let f = finding("src/cache.rs", c.line, c.title, c.body);
             let high = of_severity(f.clone(), Severity::High);
-            let words = raised[0].score(&Candidate::finding(&f, line_text));
+            let medium = Candidate::finding(&f, c.line_text);
+            let words = raised[0].score(&medium);
             let got = (
+                raised[0].judge(&medium, false).is_some(),
+                raised[0].judge(&medium, true).is_some(),
                 raised[0]
-                    .judge(&Candidate::finding(&f, line_text), false)
+                    .judge(&Candidate::finding(&high, c.line_text), true)
                     .is_some(),
-                raised[0]
-                    .judge(&Candidate::finding(&f, line_text), true)
-                    .is_some(),
-                raised[0]
-                    .judge(&Candidate::finding(&high, line_text), true)
-                    .is_some(),
+                raised[0].relates(&medium),
             );
             eprintln!(
-                "{:<34} {:>6.2}  {:<6} {:<6} {}",
-                c.name, words, got.0, got.1, got.2
+                "{:<34} {:<10} {:>6.2}  {:<6} {:<6} {:<6} {}",
+                c.name,
+                format!("{:?}", c.said),
+                words,
+                got.0,
+                got.1,
+                got.2,
+                got.3
             );
-            assert_eq!(got, c.expect, "{}: {words}", c.name);
+            if got != c.expect {
+                wrong.push(format!("{}: {got:?} ({words:.2})", c.name));
+            }
+            // What the review already says is never shown untagged; a new
+            // point is never set aside by the net.
+            assert!(c.said != Said::Yes || got.0 || got.3, "{} untagged", c.name);
+            assert!(c.said != Said::No || !got.0, "{} set aside", c.name);
+        }
+
+        // Checklist items against a comment on the merge request as a whole
+        // (the item has no place): (`net`, `marked`, `tag`).
+        type Check = (
+            &'static str,
+            &'static str,
+            &'static str,
+            Said,
+            (bool, bool, bool),
+        );
+        let checks: [Check; 5] = [
+            (
+                "check: migration",
+                "No migration for old caches: existing entries keep the old format.",
+                "Do old cache entries need a migration on upgrade?",
+                Said::Yes,
+                (true, true, true),
+            ),
+            (
+                "check: cache key, short note",
+                "Cache key looks wrong.",
+                "Cache key collides across tenants",
+                Said::No,
+                (false, false, false),
+            ),
+            (
+                "check: query, other point",
+                "This runs one query per order inside the loop (N+1). Batch it.",
+                "Order query ignores soft-deleted flag",
+                Said::No,
+                (false, false, false),
+            ),
+            (
+                "check: validate vs logged",
+                "Please validate the email address input.",
+                "Email address input is logged",
+                Said::No,
+                (false, false, true),
+            ),
+            (
+                "check: NL password logged",
+                "Hier wordt het wachtwoord gelogd, dat mag niet.",
+                "Wachtwoord wordt gelogd",
+                Said::Yes,
+                (true, true, true),
+            ),
+        ];
+        for (name, note, text, said, expect) in checks {
+            let st = stored(AUTHOR, &[note], false);
+            let raised = raised_points(&[(&st, None)], &[]);
+            let item = RawCheck::from(text);
+            let c = Candidate::check(&item);
+            let words = raised[0].score(&c);
+            let got = (
+                raised[0].judge(&c, false).is_some(),
+                raised[0].judge(&c, true).is_some(),
+                raised[0].relates(&c),
+            );
+            eprintln!(
+                "{:<34} {:<10} {:>6.2}  {:<6} {:<6} -      {}",
+                name,
+                format!("{said:?}"),
+                words,
+                got.0,
+                got.1,
+                got.2
+            );
+            if got != expect {
+                wrong.push(format!("{name}: {got:?} ({words:.2})"));
+            }
+            assert!(said != Said::Yes || got.0 || got.2, "{name} untagged");
+            assert!(said != Said::No || !got.0, "{name} set aside");
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn stems_undo_doubled_consonants_and_keep_agent_nouns() {
+        for (a, z) in [("logged", "log"), ("dropped", "drop"), ("logging", "logs")] {
+            assert_eq!(stem(a), stem(z), "{a} / {z}");
+        }
+        // An agent noun is a word of its own, not the stop word's verb.
+        for noun in ["gebruiker", "gebruikers", "issuer", "maker"] {
+            assert!(!is_stop(noun), "{noun}");
+        }
+        // Inflections of stop words still go, also those ending in -er.
+        for stop in ["gebruikt", "issues", "makes", "others"] {
+            assert!(is_stop(stop), "{stop}");
         }
     }
 }

@@ -59,6 +59,7 @@ export function checklistItem(
     text: `Check fixture thing ${seq}`,
     checked: false,
     repeatOf: null,
+    relatedTo: [],
     ...overrides,
   };
 }
