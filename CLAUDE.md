@@ -84,9 +84,14 @@ sibling app Iris (`../Iris`).
     `toggleViewed` (scope `files`).
   - GitHub conversation (`provider/github_conversation.rs`): issue comments
     and non-empty submitted review bodies are anchor-less threads
-    (`issuecomment-<id>`, `pullrequestreview-<id>`); threading by quote (`>`
-    block found in an earlier entry) or the PR author answering after the
-    user; replies post an issue comment quoting the thread's root.
+    (`issuecomment-<id>`, `pullrequestreview-<id>`); threading by Argus's
+    hidden marker (`<!-- argus:reply-to <thread> -->`, last line, honoured
+    only for an earlier entry of the same PR), by quote (`>` block of whole
+    lines of an earlier entry; one line needs >= 12 chars; alerts and
+    indented `>` are not quotes) or the PR author's first real answer after
+    the user (not `/commands`, not remarks to someone else); replies post an
+    issue comment quoting the thread's root (`@` defused, HTML skipped) plus
+    the marker.
 - ✅ **Milestone 4 — Posting.** Core `post/`: `post_comments` (one by one,
   a result per comment in order, moved to the platform's current head),
   `reply_to_thread`, `approve_review` (pinned to the head the user saw:

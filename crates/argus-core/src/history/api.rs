@@ -239,6 +239,7 @@ fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
                 rerequested_at: current.rerequested_at,
                 threads: &threads,
                 me: &current.viewer,
+                seen_at: None,
             },
             Some(&touches),
         );

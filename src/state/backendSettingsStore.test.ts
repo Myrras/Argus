@@ -139,6 +139,53 @@ describe("backendSettingsStore", () => {
     ).toBeGreaterThanOrEqual(asked);
   });
 
+  it("re-checks the providers even when storing the token failed", async () => {
+    // The keychain may hold the new token although the call failed (a
+    // leftover entry that would not go): what is stored is re-read.
+    backend(status(), false);
+    await useBackendSettingsStore.getState().load();
+    mockInvoke.mockClear();
+    mockInvoke.mockRejectedValueOnce({ kind: "provider", message: "nope" });
+    const ok = await useBackendSettingsStore.getState().setGitlabToken(TOKEN);
+    expect(ok).toBe(false);
+    expect(toastError).toHaveBeenCalledWith(
+      "Could not store the token",
+      "nope",
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("provider_status");
+    expect(mockInvoke).toHaveBeenCalledWith("gitlab_token_present");
+  });
+
+  it("stores or removes the token only after the saves before it", async () => {
+    backend(status(), true);
+    await useBackendSettingsStore.getState().load();
+    const answer = mockInvoke.getMockImplementation()!;
+    const order: string[] = [];
+    let release = () => undefined as void;
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "set_gitlab_token" || cmd === "update_settings") {
+        order.push(cmd);
+      }
+      if (cmd !== "update_settings") return answer(cmd, args as never);
+      const body = (args as { settings: Settings }).settings;
+      return new Promise((r) => {
+        release = () => r(body);
+      });
+    });
+    const store = useBackendSettingsStore.getState();
+    const saved = store.save({
+      gitlab: { baseUrl: "https://gl.example.test" },
+    });
+    const removed = store.setGitlabToken("");
+    await vi.waitFor(() => expect(order).toEqual(["update_settings"]));
+    // The URL save is still on its way: the token waits for it.
+    await Promise.resolve();
+    expect(order).toEqual(["update_settings"]);
+    release();
+    expect(await Promise.all([saved, removed])).toEqual([true, true]);
+    expect(order).toEqual(["update_settings", "set_gitlab_token"]);
+  });
+
   it("re-checks the providers after every refresh", async () => {
     const loggedOut = status({
       github: {

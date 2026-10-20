@@ -108,18 +108,32 @@ pub struct RoundInput<'a> {
     pub threads: &'a [Thread],
     /// The current user's username on the review's platform.
     pub me: &'a str,
+    /// When the view the user's newest notes were written over was fetched,
+    /// if known: another's note after it was not on the user's screen, so
+    /// a later note of the user's does not answer it. Known right after a
+    /// post from Argus (the stored fetch the post started from); `None`
+    /// otherwise, where a note (posted on the platform, with everything
+    /// before it on screen) answers what came before it.
+    pub seen_at: Option<DateTime<Utc>>,
 }
 
 /// Where the notes of a thread start being new to the user: the later of
 /// `watermark` and the user's own last note in it (a reply the user
-/// answered was seen).
-fn new_since(t: &Thread, me: &str, watermark: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+/// answered was seen), that note capped at `seen_at` (what was on screen
+/// when it was written). A system note (resolving, say) answers nothing.
+fn new_since(
+    t: &Thread,
+    me: &str,
+    watermark: Option<DateTime<Utc>>,
+    seen_at: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
     let my_last = t
         .notes
         .iter()
-        .filter(|n| same_user(&n.author, me))
+        .filter(|n| !n.system && same_user(&n.author, me))
         .map(|n| n.created_at)
-        .max();
+        .max()
+        .map(|m| seen_at.map_or(m, |seen| m.min(seen)));
     match (watermark, my_last) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
@@ -167,7 +181,7 @@ pub fn classify_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> R
         .threads
         .iter()
         .filter(|t| t.is_mine(input.me))
-        .any(|t| replied_since(t, input.me, new_since(t, input.me, Some(at))));
+        .any(|t| replied_since(t, input.me, new_since(t, input.me, Some(at), input.seen_at)));
     if replied {
         reasons.push(RoundReason::AuthorReplied);
     }
@@ -217,7 +231,11 @@ pub fn untouched_with(input: &RoundInput<'_>, touches: Option<&LineTouches>) -> 
             if code_touched {
                 return false;
             }
-            !replied_since(t, me, new_since(t, me, input.last_reviewed_at))
+            !replied_since(
+                t,
+                me,
+                new_since(t, me, input.last_reviewed_at, input.seen_at),
+            )
         })
         .count();
     u32::try_from(count).unwrap_or(u32::MAX)
@@ -283,9 +301,11 @@ pub fn advance_with(
             rerequested_at,
             threads,
             me,
+            seen_at: None,
         },
         touches,
     );
+    let round = keep_unanswered(prev, round, threads, me);
     let prev_round = prev.map_or(1, |p| p.round);
     let entered = round.status == ReviewStatus::NeedsReReview
         && prev.is_none_or(|p| p.status != ReviewStatus::NeedsReReview);
@@ -343,11 +363,49 @@ pub fn mark_reviewed(
         rerequested_at: next.rerequested_at,
         threads,
         me: &next.viewer,
+        seen_at: None,
     });
     next.status = round.status;
     next.round_reasons = round.reasons;
     next.untouched_threads = round.untouched_threads;
     next
+}
+
+/// A reply found unanswered stays so until the user acts: a fetch knows
+/// only what the user saw when a note was posted right after the post
+/// ([`RoundInput::seen_at`]); the fetches after it would take the user's
+/// note as the answer. So [`RoundReason::AuthorReplied`] stands while the
+/// watermark is where it was and the user wrote nothing since the last
+/// fetch (a new note of theirs is classified afresh).
+fn keep_unanswered(
+    prev: Option<&ReviewRecord>,
+    mut round: Round,
+    threads: &[Thread],
+    me: &str,
+) -> Round {
+    let Some(p) = prev else {
+        return round;
+    };
+    let reviewed = matches!(
+        round.status,
+        ReviewStatus::NeedsReReview | ReviewStatus::WaitingOnAuthor
+    );
+    let wrote_since = threads
+        .iter()
+        .flat_map(|t| &t.notes)
+        .any(|n| !n.system && same_user(&n.author, me) && n.created_at > p.fetched_at);
+    if !reviewed
+        || wrote_since
+        || p.status != ReviewStatus::NeedsReReview
+        || !p.round_reasons.contains(&RoundReason::AuthorReplied)
+        || round.reasons.contains(&RoundReason::AuthorReplied)
+    {
+        return round;
+    }
+    round.reasons.push(RoundReason::AuthorReplied);
+    round.reasons.sort();
+    round.status = ReviewStatus::NeedsReReview;
+    round
 }
 
 #[cfg(test)]

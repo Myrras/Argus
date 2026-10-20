@@ -344,7 +344,7 @@ fn the_conversation_and_review_summaries_are_threads_without_an_anchor() {
                 "issuecomment-8002".into(),
                 "rev-fixture".into(),
                 // The PR author's plain answer, then another reviewer's
-                // quote reply.
+                // quote reply (of the whole line: part of one is no quote).
                 owned(&[
                     "issuecomment-8002",
                     "issuecomment-8004",
@@ -403,6 +403,7 @@ fn the_pr_authors_conversation_answer_counts_as_a_reply() {
             rerequested_at: None,
             threads: &threads,
             me: "rev-fixture",
+            seen_at: None,
         })
     };
     // Reviewed after every review comment reply (the last is 10-10 09:00)

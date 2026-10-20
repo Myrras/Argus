@@ -87,6 +87,28 @@ type ProviderBuilder = Box<dyn Fn(&Settings) -> Vec<Arc<dyn ReviewProvider>> + S
 /// own).
 type TokenWriter = Box<dyn Fn(&str, &str) -> CoreResult<()> + Send + Sync>;
 
+/// The file next to `settings.json` that says the one-time move of a
+/// plain-http GitLab token to its own keychain entry ran (see
+/// [`provider::gitlab::gitlab_migrate_plain_http_token`]).
+const PLAIN_HTTP_TOKEN_MOVED: &str = "gitlab-http-token-moved";
+
+/// Run `f` unless `marker` exists, then create it. A marker that cannot be
+/// written is logged: `f` runs again on the next start, which only matters
+/// if the GitLab URL went from https to http in between.
+fn once(marker: &Path, f: impl FnOnce()) {
+    if marker.exists() {
+        return;
+    }
+    f();
+    let written = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(marker, "done\n"));
+    if written.is_err() {
+        tracing::warn!("could not record the one-time GitLab token move");
+    }
+}
+
 /// The application's single entry point.
 ///
 /// Cheap to share: hold it behind an `Arc` in the shell and clone the handle
@@ -143,6 +165,11 @@ impl Core {
     pub fn open(db_path: &Path, settings_path: &Path) -> CoreResult<Self> {
         let store = Store::open(db_path)?;
         let settings = Settings::load(settings_path);
+        // Before any provider reads the token.
+        once(
+            &settings_path.with_file_name(PLAIN_HTTP_TOKEN_MOVED),
+            || provider::gitlab::gitlab_migrate_plain_http_token(&settings.gitlab.base_url),
+        );
         Ok(Self::with_parts(
             store,
             Some(settings_path.to_path_buf()),
@@ -203,7 +230,8 @@ impl Core {
     }
 
     /// Validate, persist and apply new settings; returns what was stored.
-    /// The providers are rebuilt and a running poll loop restarts with them.
+    /// The providers whose section changed are rebuilt and a running poll
+    /// loop restarts with them.
     ///
     /// Saves run one at a time, from writing the file to putting the new
     /// loop in place: two quick saves interleaved could otherwise store one
@@ -219,16 +247,26 @@ impl Core {
         if let Some(path) = &self.settings_path {
             settings.save(path)?;
         }
-        *self.settings.lock().expect("settings lock poisoned") = settings.clone();
+        let before = std::mem::replace(
+            &mut *self.settings.lock().expect("settings lock poisoned"),
+            settings.clone(),
+        );
         self.ai.set_enabled(settings.ai.enabled);
         self.ai.set_adapter(&settings.ai.adapter);
-        self.rebuild_providers(&settings, one_at_a_time);
+        let mut changed = Vec::new();
+        if before.github != settings.github {
+            changed.push(provider::ProviderId::Github);
+        }
+        if before.gitlab != settings.gitlab {
+            changed.push(provider::ProviderId::Gitlab);
+        }
+        self.rebuild_providers(&settings, &changed, one_at_a_time);
         Ok(settings)
     }
 
     /// Store the GitLab token for the configured instance in the OS keychain
-    /// (a blank token deletes it). Like a settings save, the providers are
-    /// rebuilt and a running poll loop restarts with them.
+    /// (a blank token deletes it). Like a settings save, the GitLab provider
+    /// is rebuilt and a running poll loop restarts with it.
     ///
     /// The Settings form saves the URL first and the token right after: the
     /// loop the URL save restarted has already refreshed (or is refreshing)
@@ -248,15 +286,34 @@ impl Core {
             ));
         }
         (self.write_gitlab_token)(&settings.gitlab.base_url, token)?;
-        self.rebuild_providers(&settings, one_at_a_time);
+        self.rebuild_providers(&settings, &[provider::ProviderId::Gitlab], one_at_a_time);
         Ok(())
     }
 
     /// Build the providers for `settings` and restart a running poll loop
-    /// with them. `one_at_a_time` is the held `settings_update` lock: it is
-    /// let go once the new loop is in place, before the old one's grace.
-    fn rebuild_providers(&self, settings: &Settings, one_at_a_time: MutexGuard<'_, ()>) {
-        *self.providers.lock().expect("providers lock poisoned") = (self.build_providers)(settings);
+    /// with them. Only the providers in `changed` (whose settings or token
+    /// changed) are new: the others keep their instance, with its
+    /// rate-limit pause, conditional cache and user, as a fresh one would
+    /// forget them. `one_at_a_time` is the held `settings_update` lock: it
+    /// is let go once the new loop is in place, before the old one's grace.
+    fn rebuild_providers(
+        &self,
+        settings: &Settings,
+        changed: &[provider::ProviderId],
+        one_at_a_time: MutexGuard<'_, ()>,
+    ) {
+        let old = self.providers();
+        let next = (self.build_providers)(settings)
+            .into_iter()
+            .map(|fresh| {
+                let id = fresh.id();
+                if changed.contains(&id) {
+                    return fresh;
+                }
+                old.iter().find(|p| p.id() == id).cloned().unwrap_or(fresh)
+            })
+            .collect();
+        *self.providers.lock().expect("providers lock poisoned") = next;
         let running = self.poller.lock().expect("poller lock poisoned").take();
         let Some((poller, callback)) = running else {
             return;
@@ -555,5 +612,32 @@ pub(crate) fn exact_base(
     if let Some(sha) = clone.merge_base(&diff.base_sha, &diff.head_sha) {
         diff.base_sha = sha;
         diff.base_approximate = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn the_plain_http_token_move_runs_once_ever() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(PLAIN_HTTP_TOKEN_MOVED);
+        let runs = Cell::new(0);
+        once(&marker, || runs.set(runs.get() + 1));
+        once(&marker, || runs.set(runs.get() + 1));
+        assert_eq!(runs.get(), 1);
+        assert!(marker.exists());
+        // Opening a core leaves the marker next to its settings: a later
+        // switch from https to http is never "moved" to plain http.
+        let other = tempfile::tempdir().unwrap();
+        Core::open(
+            &other.path().join("argus.db"),
+            &other.path().join("settings.json"),
+        )
+        .unwrap();
+        assert!(other.path().join(PLAIN_HTTP_TOKEN_MOVED).exists());
     }
 }

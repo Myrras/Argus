@@ -29,7 +29,11 @@ import {
   withClone,
   withoutClone,
 } from "../lib/clonePaths";
-import { INSECURE_NOTE, isInsecureUrl } from "../lib/providers";
+import {
+  HTTP_TOKEN_NOTE,
+  INSECURE_NOTE,
+  isInsecureUrl,
+} from "../lib/providers";
 import { NOT_READ_ONLY_NOTE, useReadOnlyGuaranteed } from "../state/aiStore";
 import {
   POLL_MINUTES_MAX,
@@ -400,6 +404,9 @@ function GithubTab() {
 function GitlabTab() {
   const settings = useBackendSettingsStore((s) => s.settings);
   const tokenPresent = useBackendSettingsStore((s) => s.tokenPresent);
+  const savedInsecure = useBackendSettingsStore(
+    (s) => !!s.status?.gitlab.insecure,
+  );
   const save = useBackendSettingsStore((s) => s.save);
   const storeToken = useBackendSettingsStore((s) => s.setGitlabToken);
   const [url, setUrl] = useState("");
@@ -517,6 +524,11 @@ function GitlabTab() {
               </button>
             )}
           </div>
+          {!tokenPresent && !urlChanged && savedInsecure && (
+            <p className={styles.warning} role="note">
+              {HTTP_TOKEN_NOTE}
+            </p>
+          )}
           <small className={styles.rowHelp}>Kept in the system keychain.</small>
         </div>
         {error && (

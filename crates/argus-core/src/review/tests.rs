@@ -307,6 +307,7 @@ fn untouched_threads_with_line_walks() {
         rerequested_at: None,
         threads: &all,
         me: ME,
+        seen_at: None,
     };
 
     // Watermark h1, head h3: the walk says thread 1's lines were left
@@ -463,4 +464,99 @@ fn a_reply_the_user_already_answered_is_not_new() {
     );
     let next = step(Some(&r), &d, &[mine], at(11, 9));
     assert_eq!(next.status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn a_system_note_of_mine_does_not_answer_a_reply() {
+    let (r, d) = reviewed();
+    // The user resolved their thread on the platform after the author's
+    // reply: that is no answer to it.
+    let mut resolve = note("3", ME, at(11, 8));
+    resolve.system = true;
+    let mine = thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(10, 11)),
+            note("2", AUTHOR, at(11, 7)),
+            resolve,
+        ],
+    );
+    let next = step(Some(&r), &d, &[mine], at(11, 9));
+    assert_eq!(next.round_reasons, [RoundReason::AuthorReplied]);
+}
+
+#[test]
+fn a_note_written_over_an_older_view_answers_only_what_that_view_showed() {
+    let (r, _) = reviewed();
+    // The user's view was fetched at 11:00; the author replied at 11:07,
+    // and the user's note at 11:08 was written over the 11:00 view.
+    let threads = [thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(10, 11)),
+            note("2", AUTHOR, at(11, 7)),
+            note("3", ME, at(11, 8)),
+        ],
+    )];
+    let input = |seen_at| RoundInput {
+        state: ReviewState::Open,
+        head_sha: "h1",
+        last_reviewed_sha: Some("h1"),
+        last_reviewed_at: r.last_reviewed_at,
+        approved_at: None,
+        rerequested_at: None,
+        threads: &threads,
+        me: ME,
+        seen_at,
+    };
+    let unseen = classify(&input(Some(at(11, 0))));
+    assert_eq!(unseen.reasons, [RoundReason::AuthorReplied]);
+    assert_eq!(unseen.untouched_threads, 0);
+    // A view from after the reply showed it: answered.
+    let seen = classify(&input(Some(at(11, 7) + chrono::Duration::seconds(30))));
+    assert_eq!(seen.status, ReviewStatus::WaitingOnAuthor);
+    // Unknown (a note posted on the platform): it answers what came before.
+    assert_eq!(classify(&input(None)).status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn a_reply_found_unanswered_stays_so_until_the_user_acts() {
+    let (r, d) = reviewed();
+    // Found unanswered (after a post over an older view, say) by the
+    // fetch at 11:09, which also stored the user's note.
+    let threads = vec![thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(10, 11)),
+            note("2", AUTHOR, at(11, 7)),
+            note("3", ME, at(11, 8)),
+        ],
+    )];
+    let mut flagged = step(Some(&r), &d, &threads, at(11, 9));
+    flagged.status = ReviewStatus::NeedsReReview;
+    flagged.round_reasons = vec![RoundReason::AuthorReplied];
+    flagged.round = 2;
+    // Later fetches would take the 11:08 note as the answer: nothing the
+    // user did since says so.
+    let later = step(Some(&flagged), &d, &threads, at(11, 12));
+    assert_eq!(later.status, ReviewStatus::NeedsReReview);
+    assert_eq!(later.round_reasons, [RoundReason::AuthorReplied]);
+    assert_eq!(later.round, 2);
+    // A new note of the user's does.
+    let mut answered = threads.clone();
+    answered[0].notes.push(note("4", ME, at(11, 13)));
+    let after = step(Some(&later), &d, &answered, at(11, 15));
+    assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+    // And so does marking it reviewed.
+    let done = mark_reviewed(&later, &threads, at(11, 14));
+    assert_eq!(
+        step(Some(&done), &d, &threads, at(11, 15)).status,
+        ReviewStatus::WaitingOnAuthor
+    );
 }

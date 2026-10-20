@@ -18,6 +18,14 @@ export const INSECURE_NOTE =
   "Plain http: your token travels unencrypted. Only use this on a trusted network, such as a VPN.";
 
 /**
+ * Shown when the saved GitLab URL is plain http off this machine and has no
+ * token: a token stored for https is never sent over http, so plain http
+ * asks for one of its own.
+ */
+export const HTTP_TOKEN_NOTE =
+  "Plain http needs its own token; enter it to send it unencrypted.";
+
+/**
  * Whether a typed GitLab URL is plain http to a host other than this
  * machine (mirrors the core's `is_insecure`; the core's status is the truth
  * once saved, this is for the URL while it is being typed).
