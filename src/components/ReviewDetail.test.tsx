@@ -642,6 +642,37 @@ describe("ReviewDetail", () => {
     expect(useCommentStore.getState().drafts[r.id]).toHaveLength(1);
   });
 
+  it("shows one footer, Cancel and Submitting…, while a submit is pending", async () => {
+    // Never answers: the dialog stays in its busy state.
+    backend({ submit_review: () => new Promise(() => {}) });
+    const dialog = await openSubmit();
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: /Request changes/ }),
+    );
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Summary" }), {
+      target: { value: "Please split this up." },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Request changes" }),
+    );
+    await within(dialog).findByRole("button", { name: "Submitting…" });
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    const footer = dialog.querySelector("footer");
+    expect(footer).not.toBeNull();
+    expect(document.querySelectorAll('[role="dialog"] footer')).toHaveLength(1);
+    const buttons = within(footer!).getAllByRole("button");
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0]).toHaveAccessibleName("Cancel");
+    expect(buttons[1]).toHaveAccessibleName("Submitting…");
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeDisabled();
+    // The primary keeps one width for all its labels; only the current one
+    // shows, so the footer never moves under the dimmed buttons.
+    const shown = buttons[1].querySelectorAll('[data-current="true"]');
+    expect([...shown].map((s) => s.textContent)).toEqual(["Submitting…"]);
+    expect(submitCalls()).toHaveLength(1);
+  });
+
   it("cancelling Submit review writes nothing", async () => {
     backend();
     const dialog = await openSubmit();

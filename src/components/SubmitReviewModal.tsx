@@ -31,6 +31,40 @@ import { Markdown } from "./Markdown";
 import { Modal } from "./Modal";
 import styles from "./SubmitReviewModal.module.css";
 
+const NO_VERDICT_LABEL = "Submit review";
+const POSTING_LABEL = "Posting comments…";
+const SUBMITTING_LABEL = "Submitting…";
+
+/**
+ * A button label as wide as the widest of `labels`: all of them share one
+ * grid cell, only `current` is visible and named. A footer is right-aligned,
+ * so a label that changes width would shift the buttons beside it, in the
+ * same render that dims them disabled; WKWebView can leave the old paint of
+ * a button that moves while it changes like that (a stale, enabled-looking
+ * "Cancel" beside the real one). Nothing moves, nothing is left behind.
+ */
+function StableLabel({
+  labels,
+  current,
+}: {
+  labels: readonly string[];
+  current: string;
+}) {
+  return (
+    <span className={styles.stableLabel}>
+      {[...new Set([...labels, current])].map((l) => (
+        <span
+          key={l}
+          data-current={l === current}
+          aria-hidden={l === current ? undefined : true}
+        >
+          {l}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export function SubmitReviewModal({
   review: r,
   open,
@@ -100,7 +134,21 @@ export function SubmitReviewModal({
   };
 
   const choices = verdictsFor(r.provider);
-  const label = verdict ? VERDICT_LABEL[verdict].button : "Submit review";
+  const label = posting
+    ? POSTING_LABEL
+    : submitting
+      ? SUBMITTING_LABEL
+      : verdict
+        ? VERDICT_LABEL[verdict].button
+        : NO_VERDICT_LABEL;
+  // Every label the primary can show: it keeps the widest one's width, so
+  // neither button moves when the verdict or the busy state changes it.
+  const labels = [
+    NO_VERDICT_LABEL,
+    ...choices.map((v) => VERDICT_LABEL[v].button),
+    POSTING_LABEL,
+    SUBMITTING_LABEL,
+  ];
   return (
     <Modal
       open={open}
@@ -125,7 +173,7 @@ export function SubmitReviewModal({
             }
             onClick={() => void confirm()}
           >
-            {posting ? "Posting comments…" : submitting ? "Submitting…" : label}
+            <StableLabel labels={labels} current={label} />
           </button>
         </>
       }

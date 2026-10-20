@@ -218,3 +218,18 @@
   margin: var(--sp-1) 0 0;
   padding-left: var(--sp-4);
 }
+
+/* The primary's labels in one grid cell: the button is as wide as the
+   widest, so the footer never shifts (see `StableLabel`). */
+.stableLabel {
+  display: inline-grid;
+}
+
+.stableLabel > span {
+  grid-area: 1 / 1;
+  text-align: center;
+}
+
+.stableLabel > [data-current="false"] {
+  visibility: hidden;
+}

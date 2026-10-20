@@ -59,13 +59,17 @@ button {
   align-items: center;
   justify-content: center;
   gap: var(--sp-1);
+  /* No `opacity` here: the disabled dim (below) switches at once. A fading
+     opacity gets the button its own compositing layer in WebKit, and when
+     the same render also moves it (a busy label resizes its neighbour in a
+     right-aligned footer), WKWebView leaves the old paint behind: a stale,
+     enabled-looking copy beside the dimmed one. */
   transition:
     background var(--dur-1) var(--ease-out),
     border-color var(--dur-1) var(--ease-out),
     color var(--dur-1) var(--ease-out),
     transform var(--dur-1) var(--ease-out),
-    box-shadow var(--dur-1) var(--ease-out),
-    opacity var(--dur-1) var(--ease-out);
+    box-shadow var(--dur-1) var(--ease-out);
   white-space: nowrap;
   /* Stay unselectable even inside a container that opts into `user-select:
      text` (chat log, comment threads, …) — a button's label is an action, not
