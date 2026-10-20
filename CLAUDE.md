@@ -122,7 +122,13 @@ sibling app Iris (`../Iris`).
     (permission) are `postRejected` with the platform's message. UI: a
     Resolve / Unresolve button in `ThreadBlock` (`threadStore.setResolved`:
     busy state, toast on failure, badge after the re-read; the header's
-    "N unresolved threads" with ⌃ ⌄ jumps), key `s`
+    "N unresolved threads" with ⌃ ⌄ jumps). Resolved threads fold, GitLab
+    style: by default everywhere (`historyStore.threadOpen` /
+    `thenNowOpen`: open only when mine and not resolved), and when a
+    re-read flips a thread's resolved state (`foldOnResolve` sets
+    `open` to `!resolved`; the user's own click holds until the next
+    flip); a click, Reply, then/now or `h` opens one; `n`/`p` focus the
+    header without unfolding. Key `s`
     (`resolveThread`), palette "Resolve thread" / "Unresolve thread"; no
     confirmation (reversible).
   - UI: `DiffEditor` takes `items` (blocks under lines besides threads) and

@@ -258,6 +258,10 @@ when it merges.
   threads resolved", with ⌃ ⌄ buttons beside it that jump between the
   unresolved threads. Resolving or reopening a thread moves it at once;
   `n`/`p` open the Resolved group when they step into it.
+- Resolved threads fold to one line (author, Resolved badge, the first
+  words), the way GitLab collapses them: when a review opens and as soon
+  as you resolve one; reopening a thread unfolds it again. Click it, reply
+  or open its then/now history to read it in full.
 
 ### Changed
 

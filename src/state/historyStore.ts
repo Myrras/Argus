@@ -14,8 +14,11 @@
  * Also the thread cards' UI state, here because a thread card inside a diff
  * may be rebuilt with its CodeMirror widget: which threads are unfolded
  * (`open`) and have then/now open (`expanded`; unset = the default, open for
- * the user's own threads), and the thread last clicked (`focused`, for the
- * `toggleThenNow` key).
+ * the user's own threads unless resolved), and the thread last clicked
+ * (`focused`, for the `toggleThenNow` key). A resolved thread folds the way
+ * GitLab collapses it: by default, and once a re-read shows it resolved
+ * (reopened, it unfolds); the user's own click holds until its resolved
+ * state changes again.
  */
 
 import { create } from "zustand";
@@ -56,7 +59,7 @@ interface HistoryStoreState {
   byReview: Record<ReviewId, ReviewHistories>;
   byThread: Record<ThreadId, HistoryEntry>;
   expanded: Record<ThreadId, boolean>;
-  /** Unfolded threads; unset = the default (open when mine). */
+  /** Unfolded threads; unset = the default (open when mine, not resolved). */
   open: Record<ThreadId, boolean>;
   focused: FocusedThread | null;
   /** On open: read unless already read for `headSha`. */
@@ -257,33 +260,72 @@ export const useHistoryStore = create<HistoryStoreState>((set, get) => {
     toggleFocused: (reviewId) => {
       const f = get().focused;
       if (!f || f.reviewId !== reviewId) return false;
-      const open = get().expanded[f.threadId] ?? f.mine;
+      const t = useThreadStore
+        .getState()
+        .byReview[reviewId]?.threads.find((x) => x.threadId === f.threadId);
+      const open = thenNowOpen(get().expanded, {
+        threadId: f.threadId,
+        mine: f.mine,
+        resolved: t?.resolved ?? false,
+      });
       get().setExpanded(f.threadId, !open);
       return true;
     },
   };
 });
 
-/** Whether a thread is unfolded (the toggle, else open when mine). */
+/**
+ * Whether a thread is unfolded: the toggle, else open when mine and not
+ * resolved (a resolved one starts folded, everywhere).
+ */
 export function threadOpen(
   open: Record<ThreadId, boolean>,
-  t: Pick<StoredThread, "threadId" | "mine">,
+  t: Pick<StoredThread, "threadId" | "mine" | "resolved">,
 ): boolean {
-  return open[t.threadId] ?? t.mine;
+  return open[t.threadId] ?? (t.mine && !t.resolved);
 }
 
-/** Whether a thread's then/now is open (the toggle, else open when mine). */
+/** Whether a thread's then/now is open: the toggle, else as `threadOpen`. */
 export function thenNowOpen(
   expanded: Record<ThreadId, boolean>,
-  t: Pick<StoredThread, "threadId" | "mine">,
+  t: Pick<StoredThread, "threadId" | "mine" | "resolved">,
 ): boolean {
-  return expanded[t.threadId] ?? t.mine;
+  return expanded[t.threadId] ?? (t.mine && !t.resolved);
+}
+
+/**
+ * A re-read that shows a thread resolved folds it, one that shows it
+ * reopened unfolds it (whoever did it, here or on the platform); this
+ * replaces the user's earlier open/fold choice for it.
+ */
+function foldOnResolve(
+  now: Record<ReviewId, { threads: StoredThread[] }>,
+  before: Record<ReviewId, { threads: StoredThread[] }>,
+) {
+  const flips: Record<ThreadId, boolean> = {};
+  let any = false;
+  for (const [id, entry] of Object.entries(now)) {
+    const old = before[id]?.threads;
+    if (!old || old === entry.threads) continue;
+    const was = new Map(old.map((t) => [t.threadId, t.resolved]));
+    for (const t of entry.threads) {
+      const prev = was.get(t.threadId);
+      if (prev !== undefined && prev !== t.resolved) {
+        flips[t.threadId] = !t.resolved;
+        any = true;
+      }
+    }
+  }
+  if (any) {
+    useHistoryStore.setState((s) => ({ open: { ...s.open, ...flips } }));
+  }
 }
 
 // A thread re-read whose content differs from what the histories were read
 // with (a reply, a resolve, a new thread) re-reads them: the timeline's
 // notes come from the stored threads.
 useThreadStore.subscribe((s, prev) => {
+  foldOnResolve(s.byReview, prev.byReview);
   const reviews = useHistoryStore.getState().byReview;
   for (const id of Object.keys(reviews)) {
     const now = s.byReview[id];
