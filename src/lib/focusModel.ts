@@ -8,8 +8,9 @@
  * other files"), then each shown file — its header, the threads listed at
  * the top of the card (outdated, then those without a usable line), then
  * the threads and AI findings under their lines, by line. That is the stop
- * order; `n`/`p` step through the threads and findings in it, `j`/`k` the
- * Conversation and the files (`codeViewStore.move`).
+ * order; `n`/`p` step through the threads and findings in it, ↑/↓ through
+ * the threads that are not resolved, `j`/`k` the Conversation and the files
+ * (`codeViewStore.move`).
  *
  * A focused diff line (a click in the code) is a position between stops:
  * `n` goes to the first item at or below it, `p` to the last one above.
@@ -242,25 +243,49 @@ function scanStarts(
 }
 
 /**
- * The next (+1) or previous (-1) thread or finding from `current`, or null
- * at the end of the page (no wrap-around).
+ * The next (+1) or previous (-1) thread or finding from `current` (or the
+ * next stop `accept` takes), or null at the end of the page (no
+ * wrap-around).
  */
 export function moveFocus(
   stops: readonly FocusItem[],
   current: FocusItem | null,
   delta: 1 | -1,
+  accept: (item: FocusItem) => boolean = isEntry,
 ): FocusItem | null {
   const start = scanStarts(stops, current);
   if (delta > 0) {
     for (let i = start.next; i < stops.length; i++) {
-      if (isEntry(stops[i])) return stops[i];
+      if (accept(stops[i])) return stops[i];
     }
   } else {
     for (let i = start.prev; i >= 0; i--) {
-      if (isEntry(stops[i])) return stops[i];
+      if (accept(stops[i])) return stops[i];
     }
   }
   return null;
+}
+
+/**
+ * ↑/↓: the next (+1) or previous (-1) thread that is not resolved, in page
+ * order (the user's and everyone else's, outdated ones included), or null
+ * at the end. `threads` says which are resolved.
+ */
+export function moveToOpenThread(
+  stops: readonly FocusItem[],
+  current: FocusItem | null,
+  delta: 1 | -1,
+  threads: readonly Pick<StoredThread, "threadId" | "resolved">[],
+): FocusItem | null {
+  const open = new Set(
+    threads.filter((t) => !t.resolved).map((t) => t.threadId),
+  );
+  return moveFocus(
+    stops,
+    current,
+    delta,
+    (i) => i.kind === "thread" && open.has(i.threadId),
+  );
 }
 
 /** What a screen reader hears for a thread besides its name. */

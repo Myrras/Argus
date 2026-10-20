@@ -8,9 +8,11 @@
  * Iris's `GoToField` pattern (the field keeps the focus, the active option
  * is its `aria-activedescendant`).
  *
- * Writing to a platform never runs from here: "Approve…" opens the same
- * `ApproveModal` as the header's button, and "Post all…" a confirmation
- * first (`PaletteConfirms`).
+ * Writing to a platform never runs from here unasked: "Approve…" opens the
+ * same `ApproveModal` as the header's button, and "Post all…" a
+ * confirmation first (`PaletteConfirms`). "Resolve thread" / "Unresolve
+ * thread" (the focused thread, when its platform can resolve it) is the
+ * thread button's own action, reversible, so it runs on Enter.
  */
 
 import {
@@ -45,6 +47,7 @@ import { useFocusStore } from "../state/focusStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
+import { useThreadStore } from "../state/threadStore";
 import { toastInfo } from "../state/toastStore";
 import { Modal } from "./Modal";
 import { ApproveModal } from "./ReviewDetail";
@@ -75,6 +78,17 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
     review ? !!s.posting[review.id] : false,
   );
   const ask = useOverlayStore((s) => s.ask);
+  const focusedId = useFocusStore((s) =>
+    review && s.reviewId === review.id && s.item?.kind === "thread"
+      ? s.item.threadId
+      : null,
+  );
+  const thread = useThreadStore((s) =>
+    review && focusedId
+      ? (s.byReview[review.id]?.threads.find((t) => t.threadId === focusedId) ??
+        null)
+      : null,
+  );
 
   return useMemo(() => {
     const out: PaletteItem[] = [];
@@ -115,6 +129,19 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
           label: "Approve…",
           detail: `Asks first; on ${PROVIDER_LABEL[review.provider]}`,
           run: () => ask({ kind: "approve", reviewId: id }),
+        });
+      }
+      if (thread?.resolvable) {
+        out.push({
+          id: "thread:resolve",
+          section: "Commands",
+          label: thread.resolved ? "Unresolve thread" : "Resolve thread",
+          detail: `${thread.author}'s thread; on ${PROVIDER_LABEL[review.provider]}`,
+          keys: keymap.resolveThread.map((b) => formatBinding(b)),
+          run: () =>
+            void useThreadStore
+              .getState()
+              .setResolved(thread, !thread.resolved),
         });
       }
       if (postable > 0 && !posting) {
@@ -193,7 +220,7 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
       }
     }
     return out;
-  }, [keymap, reviews, review, order, postable, posting, ask, setMode]);
+  }, [keymap, reviews, review, order, postable, posting, ask, setMode, thread]);
 }
 
 function Highlighted({ text, indices }: { text: string; indices: number[] }) {
