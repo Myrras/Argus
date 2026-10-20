@@ -137,8 +137,9 @@ when it merges.
   a high one is among them, where you can still read them, jump to the
   comment they repeat, or show one anyway; nothing is dropped. A new point
   on code someone already commented on is kept and tagged "related to
-  bob's comment", and a high-severity finding is never set aside only
-  because the AI called it related.
+  bob's comment", in the findings and in "Look here yourself" alike, and so
+  is a point close to a comment that Argus keeps; a high-severity finding is
+  never set aside only because the AI called it related.
   With the AI analysis off, none of this shows and everything else works
   as before.
 - Polling is lighter: Argus asks GitHub and GitLab only for what changed since

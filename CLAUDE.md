@@ -164,19 +164,27 @@ sibling app Iris (`../Iris`).
     conversation entries get no verdict). Each finding and checklist item
     carries `relatedThreadIds` (validated against the prompt's ids).
     `ai/dedupe.rs::classify` scores prose words only (code, fences, inline
-    code, identifiers and the words of the thread's hunk end and the
-    finding's line left out; stem, then EN/NL stop words; ≥ 2 shared
-    words; a note's share in the finding only for notes of ≥ 5 words whose
-    words the title shares too). A repeat: the agent marked the thread and
-    the score is ≥ 0.3 (never for a high-severity finding: it stays, with
-    `relatedTo`), or by the net: same path/side within ±2 lines (or the
-    line the thread's hunk maps to on the other side) ≥ 0.5; MR-level, or
-    a side where the thread has no place at all, ≥ 0.7. Kept findings carry
-    the agent's marks as `relatedTo` (UI tag "related to bob's comment").
-    Repeats are stored set aside (migration 9:
-    `findings.repeat_reason/_of_thread/_of_finding`, `shown_anyway`,
-    `posted_thread_id/_note_id`, `ai_runs.skipped_checklist`; migration 10:
-    the same four columns on `checklist`, `findings.related_to` JSON),
+    code, identifiers left out; the words of the thread's hunk end and the
+    finding's line count only when the texts also share a word of their
+    own that is no generic noun such as `input`; stem (doubled consonants
+    single), then EN/NL stop words (an agent noun like `gebruiker` is no
+    inflection of `gebruik`); ≥ 2 shared words; a title's share in a note
+    for titles of ≥ 2 words; a note's share in the finding only for notes
+    of ≥ 5 words whose words the title shares too). A repeat: the agent
+    marked the thread and the score without the title's share is ≥ 0.3
+    (a checklist item also needs ≥ 3 shared words; never for a
+    high-severity finding: it stays, with `relatedTo`), or by the net: same
+    path/side within ±2 lines (or the line the thread's hunk maps to on the
+    other side) ≥ 0.5; MR-level, or a side where the thread has no place at
+    all, ≥ 0.7. Kept findings and checklist items carry `relatedTo`: the
+    agent's marks, then threads the net finds close (near ≥ 0.3, elsewhere
+    ≥ 0.5; UI tag "related to bob's comment" in `FindingsList`,
+    `FindingBlock` and `Checklist`). Repeats are stored set aside
+    (migration 9: `findings.repeat_reason/_of_thread/_of_finding`,
+    `shown_anyway`, `posted_thread_id/_note_id`,
+    `ai_runs.skipped_checklist`; migration 10: the same four columns on
+    `checklist`, `findings.related_to` JSON; migration 11:
+    `checklist.related_to`),
     listed by `list_skipped_findings` / `list_skipped_checklist`, shown by
     `show_finding_anyway` / `show_checklist_item_anyway` (local; kept on a
     rerun of the round for the same path/line/side/title or item text),
