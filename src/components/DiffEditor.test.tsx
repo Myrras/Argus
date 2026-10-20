@@ -18,7 +18,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { StoredThread } from "../ipc/types";
 import type { Placement } from "../lib/diffThreads";
 
-import { EditorView } from "@codemirror/view";
+import { EditorView, type WidgetType } from "@codemirror/view";
 
 import { diffEditorFor, threadBlockKey } from "../lib/diffEditors";
 import { thread } from "../test/fixtures";
@@ -415,5 +415,145 @@ describe("DiffEditor: revealing a block", () => {
     await waitFor(() => expect(diffEditorFor("src/gone.rs")).not.toBeNull());
     unmount();
     expect(diffEditorFor("src/gone.rs")).toBeNull();
+  });
+});
+
+describe("DiffEditor: block heights across a re-placement", () => {
+  /** A ResizeObserver double: `fire` reports a height for an element. */
+  function fakeResizeObserver() {
+    const observers: { cb: ResizeObserverCallback; els: Set<Element> }[] = [];
+    class FakeRO {
+      private entry: { cb: ResizeObserverCallback; els: Set<Element> };
+      constructor(cb: ResizeObserverCallback) {
+        this.entry = { cb, els: new Set() };
+        observers.push(this.entry);
+      }
+      observe(el: Element) {
+        this.entry.els.add(el);
+      }
+      unobserve(el: Element) {
+        this.entry.els.delete(el);
+      }
+      disconnect() {
+        this.entry.els.clear();
+      }
+    }
+    vi.stubGlobal("ResizeObserver", FakeRO);
+    return {
+      fire(el: Element, height: number) {
+        for (const o of observers) {
+          if (!o.els.has(el)) continue;
+          o.cb(
+            [
+              {
+                target: el,
+                borderBoxSize: [{ blockSize: height, inlineSize: 600 }],
+                contentRect: { height } as DOMRectReadOnly,
+              } as unknown as ResizeObserverEntry,
+            ],
+            o as unknown as ResizeObserver,
+          );
+        }
+      },
+    };
+  }
+
+  /** The thread block widgets the editor decorates with, by line. */
+  function widgetsOf(container: HTMLElement): Map<number, WidgetType> {
+    const dom = container.querySelector<HTMLElement>(".cm-editor")!;
+    const view = EditorView.findFromDOM(dom)!;
+    const out = new Map<number, WidgetType>();
+    for (const source of view.state.facet(EditorView.decorations)) {
+      const set = typeof source === "function" ? source(view) : source;
+      set.between(0, view.state.doc.length, (from, _to, deco) => {
+        // Ours only, not the merge view's deleted-lines blocks.
+        if (
+          deco.spec.block &&
+          deco.spec.widget &&
+          "signature" in deco.spec.widget
+        ) {
+          out.set(view.state.doc.lineAt(from).number, deco.spec.widget);
+        }
+      });
+    }
+    return out;
+  }
+
+  it("estimates a rebuilt widget at the height it was measured at", async () => {
+    // Every new placement (a finding dismissed, threads re-read) rebuilds the
+    // widgets; one above the viewport is not measured again, so a default
+    // estimate (one line) would make the page jump.
+    const ro = fakeResizeObserver();
+    const t = thread({ author: "rev-fixture" });
+    const other = thread({ author: "bob-fixture" });
+    const props = {
+      path: "src/heights.rs",
+      original,
+      modified,
+      layout: "unified" as const,
+      renderThread: (th: StoredThread) => <p>thread {th.author}</p>,
+    };
+    const { container, rerender } = render(
+      <DiffEditor
+        {...props}
+        placements={[{ thread: t, side: "b", line: 2 }]}
+      />,
+    );
+    await screen.findByText("thread rev-fixture");
+    ro.fire(container.querySelector(".cm-argusThreads")!, 137);
+    rerender(
+      <DiffEditor
+        {...props}
+        placements={[
+          { thread: t, side: "b", line: 2 },
+          { thread: other, side: "b", line: 3 },
+        ]}
+      />,
+    );
+    const widgets = widgetsOf(container);
+    expect(widgets.get(2)?.estimatedHeight).toBe(137);
+    // A block never measured keeps CodeMirror's default.
+    expect(widgets.get(3)?.estimatedHeight).toBe(-1);
+    vi.unstubAllGlobals();
+  });
+});
+
+describe("DiffEditor: switching the layout", () => {
+  it("keeps the line under the page's top edge in place", async () => {
+    // The page column (the scroller) with its toolbar; the head's line 3
+    // sits 140px under the column's top, under the toolbar and header.
+    const column = document.createElement("div");
+    column.dataset.slot = "diff";
+    const bar = document.createElement("div");
+    Object.defineProperty(bar, "offsetHeight", { value: 38 });
+    column.appendChild(bar);
+    document.body.appendChild(column);
+    column.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 800, height: 800 }) as DOMRect;
+    vi.spyOn(EditorView.prototype, "documentTop", "get").mockReturnValue(-60);
+    vi.spyOn(EditorView.prototype, "contentHeight", "get").mockReturnValue(
+      2000,
+    );
+    vi.spyOn(EditorView.prototype, "lineBlockAtHeight").mockImplementation(
+      function (this: EditorView) {
+        return { from: this.state.doc.line(3).from, top: 200 } as never;
+      },
+    );
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    const props = {
+      path: "src/layout.rs",
+      original,
+      modified,
+      placements: [],
+      renderThread: () => null,
+    };
+    const { rerender } = render(<DiffEditor {...props} layout="unified" />, {
+      container: column.appendChild(document.createElement("div")),
+    });
+    expect(scroll).not.toHaveBeenCalled();
+    rerender(<DiffEditor {...props} layout="split" />);
+    // Line 3 of the head ("fn c() {}") starts at 21 in `modified`.
+    expect(scroll).toHaveBeenCalledWith(21, { y: "start", yMargin: 140 });
+    column.remove();
   });
 });

@@ -184,7 +184,9 @@ when it merges.
 - Review a merge request without the mouse: `n`/`p` move through threads and
   AI findings in page order, `j`/`k` still move between files. The page
   scrolls to the thread or finding itself, also far down a long file, and
-  the focused item gets a focus ring. `Enter` or `t` opens or folds the focused thread,
+  the focused item gets a focus ring. Only moving scrolls the page:
+  resolving, dismissing, replying, marking a file viewed, a refresh, the AI
+  panel or the layout switch keep what you are reading where it is. `Enter` or `t` opens or folds the focused thread,
   `r` replies, `h` shows then/now, `c` comments on its line; on a finding `x`
   selects it, `e` edits it and `d` dismisses it; `s` resolves or reopens
   the focused thread. The ⌃ and ⌄ beside the header's unresolved count jump

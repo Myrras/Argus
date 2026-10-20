@@ -271,7 +271,12 @@ sibling app Iris (`../Iris`).
   `lib/diffEditors` to scroll the block's line into view, as CodeMirror
   renders only lines near the viewport; waits for the block, then puts its
   top under the sticky headers; the card only if none can show); the item
-  shows a focus ring (`data-focused`). Actions in `lib/keyboardFlow` (nothing there
+  shows a focus ring (`data-focused`). Only navigation scrolls: the column
+  anchors itself (`lib/scrollAnchor`, `overflow-anchor: none`; WKWebView
+  has no CSS anchoring) and navigation pauses it (`pauseScrollAnchor`);
+  rebuilt block widgets estimate their last measured height
+  (`diffEditors.blockHeight`); a layout switch puts the reading line back,
+  a viewed fold keeps its header. Actions in `lib/keyboardFlow` (nothing there
   posts: a reply or comment only opens a composer; `s` resolves, the
   thread's own reversible write). `CommandPalette` (fuzzy
   `lib/fuzzy`, rows `lib/palette`: every action, review actions, Go to

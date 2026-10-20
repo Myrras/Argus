@@ -21,6 +21,7 @@
  */
 
 import { prefersReducedMotion } from "./motion";
+import { pauseScrollAnchor } from "./scrollAnchor";
 import {
   diffEditorFor,
   findingBlockKey,
@@ -177,9 +178,15 @@ export function pageRevealEnv(
     editor: () => diffEditorFor(card),
     load: () => opts.load(card),
     card: () => cardElement(card),
-    place: placeAtTop,
-    scrollCard: (c, behavior) =>
-      c.scrollIntoView?.({ block: "start", behavior }),
+    // Navigation: the page's scroll anchoring stands aside meanwhile.
+    place: (el, behavior) => {
+      pauseScrollAnchor();
+      placeAtTop(el, behavior);
+    },
+    scrollCard: (c, behavior) => {
+      pauseScrollAnchor();
+      c.scrollIntoView?.({ block: "start", behavior });
+    },
     next: (fn) => {
       if (typeof requestAnimationFrame === "function") {
         const id = requestAnimationFrame(fn);

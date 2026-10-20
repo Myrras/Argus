@@ -29,6 +29,7 @@ import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { useLocalFileMenu } from "../lib/useLocalFileMenu";
 import { usePageFocus } from "../lib/usePageFocus";
+import { anchorColumn, pauseScrollAnchor } from "../lib/scrollAnchor";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
@@ -148,8 +149,18 @@ export function ReviewView({
   useEffect(() => {
     if (!selected || selected === lastScrolled.current) return;
     lastScrolled.current = selected;
-    cards.current.get(selected)?.scrollIntoView?.({ block: "start" });
+    const card = cards.current.get(selected);
+    if (card) pauseScrollAnchor();
+    card?.scrollIntoView?.({ block: "start" });
   }, [selected]);
+  // What the user reads stays put while content above it changes height
+  // (an item action, a re-read): only navigation scrolls the page.
+  const column = useRef<HTMLDivElement>(null);
+  const stack = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!column.current || !stack.current) return;
+    return anchorColumn(column.current, stack.current);
+  }, []);
   const pick = (path: string) => {
     lastScrolled.current = null;
     select(r.id, path);
@@ -268,6 +279,7 @@ export function ReviewView({
         )}
       </aside>
       <div
+        ref={column}
         className={styles.diff}
         data-slot="diff"
         aria-label={`Changes in ${reviewRef(r)}`}
@@ -331,7 +343,7 @@ export function ReviewView({
             for the rest.
           </p>
         )}
-        <div className={styles.stack}>
+        <div ref={stack} className={styles.stack}>
           <ConversationCard
             conversation={talk.conversation}
             elsewhere={talk.elsewhere}

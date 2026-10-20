@@ -30,6 +30,7 @@ import {
   memo,
   Suspense,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -67,6 +68,7 @@ import {
   type CommentTarget,
 } from "../state/commentStore";
 import { findingPlacement } from "../lib/findings";
+import { keepFoldedCardInPlace, readingInside } from "../lib/scrollAnchor";
 import { useAiStore, useFindings } from "../state/aiStore";
 import { useRevealCard } from "../state/focusStore";
 import { DraftBlock, InlineComposer } from "./CommentBlocks";
@@ -140,12 +142,22 @@ export const FileDiffCard = memo(function FileDiffCard({
   const [attempt, setAttempt] = useState(0);
   const root = useRef<HTMLElement | null>(null);
 
-  // A viewed file folds away; un-viewing opens it again.
+  // A viewed file folds away; un-viewing opens it again. Folding the file
+  // being read keeps its header where it was (an action never scrolls).
   const viewedRef = useRef(f.viewed);
+  const keepHeader = useRef(false);
   useEffect(() => {
-    if (viewedRef.current !== f.viewed) setCollapsed(f.viewed);
+    if (viewedRef.current !== f.viewed) {
+      keepHeader.current = f.viewed && readingInside(root.current);
+      setCollapsed(f.viewed);
+    }
     viewedRef.current = f.viewed;
   }, [f.viewed]);
+  useLayoutEffect(() => {
+    if (!collapsed || !keepHeader.current) return;
+    keepHeader.current = false;
+    keepFoldedCardInPlace(root.current);
+  }, [collapsed]);
 
   // Revealing one of its AI findings opens a folded card.
   const revealSeq = useAiStore((s) =>

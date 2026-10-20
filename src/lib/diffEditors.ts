@@ -43,3 +43,37 @@ export function registerDiffEditor(
 export function diffEditorFor(path: string): DiffRevealer | null {
   return editors.get(path) ?? null;
 }
+
+// -- Block heights ----------------------------------------------------------
+
+/**
+ * The last measured height of each line's blocks, by their keys. Every new
+ * placement (a finding dismissed, threads re-read, a draft saved) rebuilds
+ * the editor's block widgets; CodeMirror keeps measured heights only for
+ * the ones it draws, and estimates the others (above the viewport) at one
+ * line. That shrinks the page above what the user reads, so it jumps.
+ * A rebuilt widget estimates itself at this height instead.
+ */
+const heights = new Map<string, number>();
+/** Enough for every block of a few large reviews; oldest dropped first. */
+const MAX_HEIGHTS = 2000;
+
+/** One line's blocks as a cache key. */
+export function blockSignature(keys: readonly string[]): string {
+  return keys.join("\n");
+}
+
+export function rememberBlockHeight(signature: string, height: number): void {
+  if (!(height > 0)) return;
+  heights.delete(signature);
+  heights.set(signature, height);
+  if (heights.size > MAX_HEIGHTS) {
+    const oldest = heights.keys().next().value;
+    if (oldest !== undefined) heights.delete(oldest);
+  }
+}
+
+/** The measured height of these blocks, or -1 (CodeMirror's "unknown"). */
+export function blockHeight(signature: string): number {
+  return heights.get(signature) ?? -1;
+}

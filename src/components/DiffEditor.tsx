@@ -61,7 +61,14 @@ import {
   type DiffSide,
   type Placement,
 } from "../lib/diffThreads";
-import { registerDiffEditor, threadBlockKey } from "../lib/diffEditors";
+import {
+  blockHeight,
+  blockSignature,
+  registerDiffEditor,
+  rememberBlockHeight,
+  threadBlockKey,
+} from "../lib/diffEditors";
+import { readingEdge } from "../lib/scrollAnchor";
 import type { DiffLayout } from "../state/layoutStore";
 import { useThemeStore } from "../state/themeStore";
 
@@ -88,16 +95,38 @@ interface Block {
 }
 
 /**
- * Each widget DOM's React root and the block keys it shows. Keyed by the
- * DOM, not the widget: CodeMirror hands a kept DOM to a new widget instance
+ * Each widget DOM's React root, the block keys it shows (and their
+ * signature) and the observer that records its height. Keyed by the DOM,
+ * not the widget: CodeMirror hands a kept DOM to a new widget instance
  * (`updateDOM`) and destroys whichever instance holds it last.
  */
-const roots = new WeakMap<HTMLElement, { root: Root; keys: Set<string> }>();
+const roots = new WeakMap<
+  HTMLElement,
+  {
+    root: Root;
+    keys: Set<string>;
+    signature: string;
+    sizes: ResizeObserver | null;
+  }
+>();
 
 /** The blocks under one line. */
 class BlocksWidget extends WidgetType {
+  readonly signature: string;
+
   constructor(readonly blocks: readonly Block[]) {
     super();
+    this.signature = blockSignature(blocks.map((b) => b.key));
+  }
+
+  /**
+   * The height these blocks had when last drawn: every placement rebuilds
+   * the widgets, and one above the viewport is not drawn again, so the
+   * default (one line) would shrink the page above the reader
+   * (`lib/diffEditors`).
+   */
+  get estimatedHeight(): number {
+    return blockHeight(this.signature);
   }
 
   /**
@@ -112,7 +141,22 @@ class BlocksWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const dom = document.createElement("div");
     dom.className = "cm-argusThreads";
-    roots.set(dom, { root: createRoot(dom), keys: new Set() });
+    const entry = {
+      root: createRoot(dom),
+      keys: new Set<string>(),
+      signature: this.signature,
+      sizes: null as ResizeObserver | null,
+    };
+    if (typeof ResizeObserver !== "undefined") {
+      entry.sizes = new ResizeObserver((entries) => {
+        for (const e of entries) {
+          const h = e.borderBoxSize?.[0]?.blockSize ?? e.contentRect.height;
+          rememberBlockHeight(entry.signature, h);
+        }
+      });
+      entry.sizes.observe(dom);
+    }
+    roots.set(dom, entry);
     this.show(dom, view);
     return dom;
   }
@@ -131,6 +175,7 @@ class BlocksWidget extends WidgetType {
   private show(dom: HTMLElement, view: EditorView) {
     const r = roots.get(dom)!;
     r.keys = new Set(this.blocks.map((b) => b.key));
+    r.signature = this.signature;
     const resize = () => view.requestMeasure();
     r.root.render(
       <>
@@ -145,6 +190,7 @@ class BlocksWidget extends WidgetType {
     const r = roots.get(dom);
     if (!r) return;
     roots.delete(dom);
+    r.sizes?.disconnect();
     // Not during CodeMirror's own update (React warns on a sync unmount
     // inside another render).
     queueMicrotask(() => r.root.unmount());
@@ -519,6 +565,35 @@ function group(
   return out;
 }
 
+/** Where the reader is in a diff: a head line and its offset in the column. */
+interface ReadingLine {
+  line: number;
+  /** From the page column's top to the line's top. */
+  offset: number;
+}
+
+/**
+ * The head line under the page column's reading edge, when that edge is
+ * inside this diff; null otherwise. The head is the last view (unified:
+ * the only one; split: `b`), so the line numbers carry across layouts.
+ */
+function readingLine(views: readonly EditorView[]): ReadingLine | null {
+  const view = views[views.length - 1];
+  const column = view?.dom.closest<HTMLElement>('[data-slot="diff"]');
+  if (!view || !column) return null;
+  const edge = readingEdge(column);
+  const top = view.documentTop;
+  if (edge < top || edge > top + view.contentHeight) return null;
+  const block = view.lineBlockAtHeight(edge - top);
+  return {
+    line: view.state.doc.lineAt(block.from).number,
+    offset: Math.max(
+      0,
+      Math.round(top + block.top - column.getBoundingClientRect().top),
+    ),
+  };
+}
+
 /** Each block key's editor index and line. */
 function locate(
   perView: readonly LineBlocks[],
@@ -587,6 +662,9 @@ export function DiffEditor({
   const views = useRef<EditorView[]>([]);
   // Where each block sits (editor index, line), for `reveal`.
   const where = useRef(new Map<string, { view: number; line: number }>());
+  // The line being read when the editor was last torn down (a layout
+  // switch): the rebuilt one puts it back at the same height.
+  const reading = useRef<ReadingLine | null>(null);
   const theme = useRef(new Compartment());
   const language = useRef(new Compartment());
   // The latest props for the (re)build effect without rebuilding on each.
@@ -656,6 +734,7 @@ export function DiffEditor({
 
     return () => {
       cancelled = true;
+      reading.current = readingLine(views.current);
       for (const off of unlisten) off();
       merge?.destroy();
       unified?.destroy();
@@ -694,6 +773,23 @@ export function DiffEditor({
       uncollapseAt(view, "b", [...lines.keys()]);
       view.dispatch({ effects: setBlocks.of(lines) });
       where.current = locate([lines]);
+    }
+    // After a rebuild (a layout switch), back to the line being read once
+    // its blocks are placed: every height in the page changed, so only the
+    // line itself says where the reader was.
+    const keep = reading.current;
+    reading.current = null;
+    if (keep) {
+      const head = vs[vs.length - 1];
+      const doc = head.state.doc;
+      const at = doc.line(Math.min(keep.line, doc.lines)).from;
+      uncollapseAt(head, "b", [keep.line]);
+      head.dispatch({
+        effects: EditorView.scrollIntoView(at, {
+          y: "start",
+          yMargin: keep.offset,
+        }),
+      });
     }
   }, [placements, items, original, modified, layout]);
 
