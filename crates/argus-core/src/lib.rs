@@ -98,10 +98,19 @@ const LEGACY_TOKEN_MOVED_MARKER: &str = "gitlab-http-token-moved";
 /// keychain prompt, say) is logged and tried again on the next start. A
 /// record that cannot be written is logged too: the step runs again next
 /// start, which only matters if the GitLab URL went from https to http in
-/// between.
+/// between. A `settings.json` that exists but cannot be read or parsed
+/// neither runs nor records the step (and is never overwritten): whether it
+/// ran is unknown, so it is tried again once the file reads.
 fn run_once(settings_path: &Path, name: &str, f: impl FnOnce() -> CoreResult<()>) {
-    if settings::migration_done(settings_path, name) {
-        return;
+    match settings::migration_status(settings_path, name) {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(_) => {
+            tracing::warn!(
+                "settings.json cannot be read; the one-time GitLab token move waits for next start"
+            );
+            return;
+        }
     }
     if f().is_err() {
         tracing::warn!("the one-time GitLab token move failed; it is tried again next start");
@@ -650,6 +659,36 @@ mod tests {
         run_once(&path, settings::GITLAB_HTTP_TOKEN, ok);
         run_once(&path, settings::GITLAB_HTTP_TOKEN, ok);
         assert_eq!(runs.get(), 3);
+        assert!(settings::migration_done(&path, settings::GITLAB_HTTP_TOKEN));
+    }
+
+    #[test]
+    fn a_corrupt_settings_file_is_neither_overwritten_nor_marked_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A hand edit gone wrong: a trailing comma.
+        let broken = "{\n  \"pollIntervalSecs\": 60,\n}\n";
+        std::fs::write(&path, broken).unwrap();
+        let runs = Cell::new(0);
+        let ok = || {
+            runs.set(runs.get() + 1);
+            Ok(())
+        };
+        // Neither run nor recorded: retried once the file reads again.
+        run_once(&path, settings::GITLAB_HTTP_TOKEN, ok);
+        assert_eq!(runs.get(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        // Opening a core over it leaves the file alone too.
+        Core::open(&dir.path().join("argus.db"), &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        assert!(!settings::migration_done(
+            &path,
+            settings::GITLAB_HTTP_TOKEN
+        ));
+        // Fixed by hand: the step runs and is recorded.
+        std::fs::write(&path, "{\"pollIntervalSecs\": 60}").unwrap();
+        run_once(&path, settings::GITLAB_HTTP_TOKEN, ok);
+        assert_eq!(runs.get(), 1);
         assert!(settings::migration_done(&path, settings::GITLAB_HTTP_TOKEN));
     }
 

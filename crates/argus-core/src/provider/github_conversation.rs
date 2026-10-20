@@ -30,10 +30,12 @@
 //!    user's thread getting a reply, which round detection counts as "the
 //!    author replied" (as a reply in a GitLab MR-level discussion of the
 //!    user's is). Only the very next one, wherever it is filed: after an
-//!    answer by quote elsewhere, a later "Rebased." answers nothing. Chat
-//!    commands (`/retest`) and remarks to someone else (`@dependabot
-//!    rebase`, "PTAL @carol") are not answers and do not count; what is in
-//!    code (`` `@param` ``, a fenced `@Nullable`) is neither.
+//!    answer by quote or marker elsewhere (whatever it mentions: the quote
+//!    files it), a later "Rebased." answers nothing. Chat commands
+//!    (`/retest`, also under a quote) and plain remarks to someone else
+//!    (`@dependabot rebase`, "PTAL @carol") are not answers and do not
+//!    count; what is in code (`` `@param` ``, a fenced `@Nullable`) is
+//!    neither.
 //! 3. Anything else (the user's own plain comments, other reviewers', bots')
 //!    is a thread of its own, as a GitLab comment outside a thread is.
 //!
@@ -180,9 +182,8 @@ pub(super) fn threads(mut entries: Vec<Entry>, me: &str, pr_author: &str) -> Vec
         let author_answering = same_user(&e.author, pr_author)
             && !same_user(&e.author, me)
             && answers_the_user(&e.body, me);
-        let target = by_marker
-            .or_else(by_quote)
-            .or(if author_answering { awaiting } else { None });
+        let filed_by_reference = by_marker.or_else(by_quote);
+        let target = filed_by_reference.or(if author_answering { awaiting } else { None });
         let note = Note {
             id: e.id.key(),
             author: e.author.clone(),
@@ -209,10 +210,17 @@ pub(super) fn threads(mut entries: Vec<Entry>, me: &str, pr_author: &str) -> Vec
             }
         };
         // The author's next answer, wherever it went, is the one: a later
-        // plain comment no longer answers the user.
+        // plain comment no longer answers the user. An entry the author
+        // filed under a thread by quote or marker is an answer there, even
+        // when it mentions someone else (the quote is what files it);
+        // chat commands alone are never one.
+        let author_entry = same_user(&e.author, pr_author) && !same_user(&e.author, me);
         if same_user(&e.author, me) {
             awaiting = Some(index);
-        } else if author_answering || (same_user(&e.author, pr_author) && awaiting == Some(index)) {
+        } else if author_answering
+            || (author_entry && filed_by_reference.is_some() && !commands_only(&e.body))
+            || (author_entry && awaiting == Some(index))
+        {
             awaiting = None;
         }
         let (own, quoted) = split_lines(&e.body);
@@ -334,16 +342,24 @@ fn quote_files_a_reply(quote: &[String]) -> bool {
 /// Code is neither (`@Nullable`, `` `@types/node` ``): only the prose
 /// around it is read, and code alone is an answer.
 fn answers_the_user(body: &str, me: &str) -> bool {
+    if commands_only(body) {
+        return false;
+    }
     let (prose, has_code) = without_code(body);
     let (own, _) = split_lines(&prose);
     if own.is_empty() {
         return has_code;
     }
-    if own.iter().all(|l| l.starts_with('/')) {
-        return false;
-    }
     let mentions: Vec<&str> = own.iter().flat_map(|l| mentions(l)).collect();
     mentions.is_empty() || mentions.iter().any(|m| same_user(m, me))
+}
+
+/// Whether the prose of `body` is chat commands only (`/retest`): at
+/// least one line, each starting with `/`. Code alone is not commands.
+fn commands_only(body: &str) -> bool {
+    let (prose, _) = without_code(body);
+    let (own, _) = split_lines(&prose);
+    !own.is_empty() && own.iter().all(|l| l.starts_with('/'))
 }
 
 /// `body` without its fenced code blocks (```` ``` ```` or `~~~`, up to
@@ -960,6 +976,72 @@ mod tests {
                 ("issuecomment-2".into(), ids(&["issuecomment-2"])),
                 ("issuecomment-4".into(), ids(&["issuecomment-4"])),
             ]
+        );
+    }
+
+    #[test]
+    fn the_authors_quote_answer_to_someone_else_ends_the_wait_even_with_a_mention() {
+        // The quote files the author's entry under carol's thread, and it
+        // is the author's next entry after the user: whatever it mentions,
+        // the wait is over, so a later "Rebased on main." stands alone.
+        let t = threads(
+            vec![
+                comment(
+                    1,
+                    "carol-fixture",
+                    0,
+                    "CI fails on the lint job, please check.",
+                ),
+                comment(2, ME, 1, "Why a constant?"),
+                comment(
+                    3,
+                    AUTHOR,
+                    2,
+                    "> CI fails on the lint job, please check.\n\n@carol-fixture fixed.",
+                ),
+                comment(4, AUTHOR, 3, "Rebased on main."),
+            ],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(
+            shape(&t),
+            [
+                (
+                    "issuecomment-1".into(),
+                    ids(&["issuecomment-1", "issuecomment-3"])
+                ),
+                ("issuecomment-2".into(), ids(&["issuecomment-2"])),
+                ("issuecomment-4".into(), ids(&["issuecomment-4"])),
+            ]
+        );
+        // Chat commands under a quote answer nobody: the wait goes on.
+        let t = threads(
+            vec![
+                comment(
+                    1,
+                    "carol-fixture",
+                    0,
+                    "CI fails on the lint job, please check.",
+                ),
+                comment(2, ME, 1, "Why a constant?"),
+                comment(
+                    3,
+                    AUTHOR,
+                    2,
+                    "> CI fails on the lint job, please check.\n\n/retest",
+                ),
+                comment(4, AUTHOR, 3, "Moved it to settings."),
+            ],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(
+            shape(&t)[1],
+            (
+                "issuecomment-2".into(),
+                ids(&["issuecomment-2", "issuecomment-4"])
+            )
         );
     }
 
