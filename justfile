@@ -37,30 +37,61 @@ sweep:
 # "Argus Dev" (Keychain Access → Certificate Assistant → Create a Certificate);
 # to use a different name, edit src-tauri/tauri.dev-signed.conf.json.
 dev-signed: _signed-conf
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="$(just _target-dir)"
     pnpm tauri build --debug --bundles app --config src-tauri/tauri.dev-signed.conf.json
-    @just sweep
-    open "${CARGO_TARGET_DIR:-target}/debug/bundle/macos/Argus.app"
+    just sweep
+    open "$CARGO_TARGET_DIR/debug/bundle/macos/Argus.app"
 
-# Build a SIGNED release .app for personal install (macOS).
-# Reuses the stable signing identity in tauri.dev-signed.conf.json (that file
-# only sets bundle.macOS.signingIdentity, so it's equally valid for release).
-# A stable identity means macOS keychain "Always Allow" persists and the app
-# launches with no Gatekeeper prompt on this machine. Output:
-# target/release/bundle/macos/Argus.app. Install: drag it into /Applications,
-# or run `just install-signed`.
-# Only the .app is built (--bundles app): the .dmg step isn't needed for a
-# personal install.
-build-signed: _signed-conf
+# Build a SIGNED release .app for personal install (macOS), and show it in
+# Finder. Reuses the stable signing identity in tauri.dev-signed.conf.json
+# (that file only sets bundle.macOS.signingIdentity, so it's equally valid for
+# release). A stable identity means macOS keychain "Always Allow" persists and
+# the app launches with no Gatekeeper prompt on this machine. Output:
+# <target dir>/release/bundle/macos/Argus.app. Install: drag it into
+# /Applications, or run `just install-signed`.
+build-signed: _build-signed
+    open "$(just _target-dir)/release/bundle/macos"
+
+# Build the signed release and put it in /Applications (no Finder window).
+# Copied next to it first and swapped in with mv, so a failed copy never
+# leaves /Applications without the app.
+install-signed: _build-signed
+    #!/usr/bin/env bash
+    set -euo pipefail
+    app="$(just _target-dir)/release/bundle/macos/Argus.app"
+    dest="/Applications/Argus.app"
+    tmp="/Applications/.Argus.app.tmp"
+    old="/Applications/.Argus.app.old"
+    rm -rf "$tmp" "$old"
+    ditto "$app" "$tmp"
+    if [ -e "$dest" ]; then mv "$dest" "$old"; fi
+    if ! mv "$tmp" "$dest"; then
+        if [ -e "$old" ]; then mv "$old" "$dest"; fi
+        echo "error: could not install $dest" >&2
+        exit 1
+    fi
+    rm -rf "$old"
+    echo "Installed → $dest"
+
+# The signed release build behind build-signed and install-signed. Only the
+# .app is built (--bundles app): the .dmg step isn't needed for a personal
+# install. The target dir is made absolute first (see _target-dir).
+_build-signed: _signed-conf
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export CARGO_TARGET_DIR="$(just _target-dir)"
     pnpm install
     pnpm tauri build --bundles app --config src-tauri/tauri.dev-signed.conf.json
-    @just sweep
-    open "${CARGO_TARGET_DIR:-target}/release/bundle/macos"
+    just sweep
 
-# Build the signed release and copy it straight into /Applications.
-install-signed: build-signed
-    rm -rf "/Applications/Argus.app"
-    cp -R "${CARGO_TARGET_DIR:-target}/release/bundle/macos/Argus.app" "/Applications/Argus.app"
-    @echo "Installed → /Applications/Argus.app"
+# The cargo target directory as an absolute path, resolved from the repo root.
+# tauri runs cargo from src-tauri/, where a relative CARGO_TARGET_DIR would
+# point elsewhere than the recipes look: the signed recipes export this to the
+# build so both agree.
+_target-dir:
+    @cargo metadata --format-version 1 --no-deps | node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => console.log(JSON.parse(s).target_directory))'
 
 # Guard for the signed recipes. The config is gitignored (it names *your*
 # machine's signing identity), so a fresh clone or git worktree does not have it
