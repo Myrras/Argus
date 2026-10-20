@@ -132,10 +132,13 @@ when it merges.
   open or resolved, in English or Dutch: it reads every thread (yours,
   other reviewers', the author's, on code or on the review as a whole) and
   every finding you posted, and names the threads each point overlaps.
-  Findings that repeat an existing comment are set aside under "Skipped as
-  already raised", where you can still view them, jump to the comment they
-  repeat, or show one anyway; checklist items that repeat one are left out
-  and counted.
+  Findings and checklist items that repeat an existing comment are set
+  aside under "Skipped as already raised (N, k high)", open by itself when
+  a high one is among them, where you can still read them, jump to the
+  comment they repeat, or show one anyway; nothing is dropped. A new point
+  on code someone already commented on is kept and tagged "related to
+  bob's comment", and a high-severity finding is never set aside only
+  because the AI called it related.
   With the AI analysis off, none of this shows and everything else works
   as before.
 - Polling is lighter: Argus asks GitHub and GitLab only for what changed since
