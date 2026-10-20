@@ -107,9 +107,8 @@ sibling app Iris (`../Iris`).
   - Resolving: `resolve_thread(reviewId, threadId, resolved)` →
     `Core::resolve_thread` → `ReviewProvider::set_thread_resolved` (one
     write; then the review is refreshed through the poll path, watermark
-    untouched). Only for `Thread::resolvable` (migration 12; 11 is
-    reserved for the AI pass): GitHub review threads (GraphQL
-    `resolveReviewThread` / `unresolveReviewThread` with the node id read
+    untouched). Only for `Thread::resolvable` (migration 12):
+    GitHub review threads (GraphQL `resolveReviewThread` / `unresolveReviewThread` with the node id read
     from `reviewThreads` right before; the PR conversation cannot be
     resolved), GitLab discussions with resolvable notes, not single
     comments (`PUT …/discussions/:id` with `resolved`). Refusals
