@@ -641,6 +641,32 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     // Still listed: nothing was approved.
     await waitFor(() => expect(useReviewStore.getState().approving).toBeNull());
     expect(within(sidebar()).getByText("Fixture A")).toBeInTheDocument();
+    // The failed submit keeps the review open in the middle.
+    expect(useReviewStore.getState().selectedId).not.toBeNull();
+    expect(within(detail()).getByText("Needs review")).toBeInTheDocument();
+  });
+
+  it("leaves the review for the welcome screen after submitting it", async () => {
+    makeBackend({ ai: false });
+    render(<App />);
+    await openReview("Fixture A");
+    expect(within(detail()).getByText("Needs review")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() =>
+      expect(useReviewStore.getState().selectedId).toBeNull(),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(within(detail()).queryByText("Needs review")).toBeNull();
+    expect(
+      screen.queryByRole("region", { name: "Diff of src/cache.rs" }),
+    ).toBeNull();
+    // The list still shows "Approved ✓" for its moment.
+    expect(
+      await within(sidebar()).findByText("Approved ✓"),
+    ).toBeInTheDocument();
   });
 
   it("dismisses a toast and lets it expire", async () => {

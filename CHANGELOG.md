@@ -83,7 +83,8 @@ when it merges.
   dialog lists why. If the review got new commits since you looked, the
   submit is refused so nothing unseen gets judged. Approving also marks
   every file viewed. An approved review shows "Approved ✓" for a few
-  seconds, then leaves the lists. GitLab needs 17.2 or later to request
+  seconds, then leaves the lists. After a submit the review also leaves the
+  middle column (the welcome screen shows). GitLab needs 17.2 or later to request
   changes; an older one says so before anything is sent. Argus never
   merges.
 - Comments render as markdown: headings, lists, task lists, tables, quotes,

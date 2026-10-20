@@ -305,7 +305,8 @@ sibling app Iris (`../Iris`).
   `mark_reviewed` stays core-only (no IPC). UI: `SubmitReviewModal`
   (verdict radios per `lib/reviews.verdictsFor`, summary Write/Preview,
   "Post N pending comments with it" via `commentStore.postAll`, aborting
-  and listing refused drafts), `reviewStore.submit` + `justApproved`
+  and listing refused drafts), `reviewStore.submit` (success clears
+  `selectedId`: the work column shows `WelcomeScreen`) + `justApproved`
   (`APPROVED_LINGER_MS` "Approved ✓" in its old tab, kept across list
   reloads), overlay confirm `{ kind: "submit", verdict? }`, key
   `submitReview` (⇧S, scope `files`).

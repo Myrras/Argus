@@ -233,6 +233,9 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
       if (verdict === "approve" && before && before.status !== "approved") {
         lingerApproved(id, before.status);
       }
+      // Done with it: the middle column leaves the review (the list's
+      // cursor stays on it while "Approved ✓" lingers).
+      if (get().selectedId === id) set({ selectedId: null });
       await get().reloadList();
       return null;
     } catch (e) {
