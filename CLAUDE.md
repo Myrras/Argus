@@ -102,8 +102,22 @@ sibling app Iris (`../Iris`).
   cached per review + stored head). `PostError { kind, message }` → `IpcError`
   by `kind.as_str()`; new kinds `postRejected`, `lineNotInDiff`,
   `headMoved`. Shell `commands/post.rs` emits `review:changed` after every
-  successful write. Only these four commands write, each from a button or
-  shortcut handler; nothing auto-posts.
+  successful write. Only these commands (and `post_findings`, M5) write,
+  each from a button or shortcut handler; nothing auto-posts.
+  - Resolving: `resolve_thread(reviewId, threadId, resolved)` →
+    `Core::resolve_thread` → `ReviewProvider::set_thread_resolved` (one
+    write; then the review is refreshed through the poll path, watermark
+    untouched). Only for `Thread::resolvable` (migration 12; 11 is
+    reserved for the AI pass): GitHub review threads (GraphQL
+    `resolveReviewThread` / `unresolveReviewThread` with the node id read
+    from `reviewThreads` right before; the PR conversation cannot be
+    resolved), GitLab discussions with resolvable notes, not single
+    comments (`PUT …/discussions/:id` with `resolved`). Refusals
+    (permission) are `postRejected` with the platform's message. UI: a
+    Resolve / Unresolve button in `ThreadBlock` (`threadStore.setResolved`:
+    busy state, toast on failure, badge after the re-read), key `s`
+    (`resolveThread`), palette "Resolve thread" / "Unresolve thread"; no
+    confirmation (reversible).
   - UI: `DiffEditor` takes `items` (blocks under lines besides threads) and
     `comment` (`CommentGutter`: "+" on commentable lines per side, click /
     shift-click / drag, selection + focused-line decorations); the unified
@@ -214,7 +228,8 @@ sibling app Iris (`../Iris`).
   `historyStore.focused`, `aiStore.focused` and `commentStore.focus` in
   step). `usePageFocus` moves the DOM focus and scrolls; the item shows a
   focus ring (`data-focused`). Actions in `lib/keyboardFlow` (nothing there
-  posts: a reply or comment only opens a composer). `CommandPalette` (fuzzy
+  posts: a reply or comment only opens a composer; `s` resolves, the
+  thread's own reversible write). `CommandPalette` (fuzzy
   `lib/fuzzy`, rows `lib/palette`: every action, review actions, Go to
   review…, Go to file…; Approve… and Post all… confirm first) and
   `ShortcutHelp`, one at a time via `overlayStore`. `Modal` takes
@@ -222,10 +237,15 @@ sibling app Iris (`../Iris`).
   - Keys (all rebindable): list `↑`/`↓`, `Enter`, `1`–`4`, refresh
     `Shift+R` / `Mod+R` (was bare `r`; a saved override still wins),
     `Mod+K` palette, `?` help; app `Mod+,` settings; files `j`/`k` files,
-    `n`/`p` threads and findings, `Enter`/`t` open or fold the thread, `r`
-    reply, `h` then/now, `c` comment, `v` viewed, `a` AI panel, `x` select,
-    `e` edit, `d` dismiss finding; composer `Mod+Enter` submit, `Esc`
-    (fixed) cancel.
+    `n`/`p` threads and findings, `↓`/`↑` next/previous open (unresolved)
+    thread (`nextOpenThread`/`prevOpenThread`, shared with the list's
+    `↑`/`↓` via `keymap.SHARED_BY_CONTEXT`; `keyboardFlow.onReviewPage`
+    decides: the sidebar keeps the list cursor, a diff's `.cm-content` its
+    line picking; no wrap, "No more open threads" at an end), `Enter`/`t`
+    open or fold the thread, `r` reply, `s` resolve or reopen, `h`
+    then/now, `c` comment, `v` viewed, `a` AI panel, `x` select, `e` edit,
+    `d` dismiss finding; composer `Mod+Enter` submit, `Esc` (fixed)
+    cancel.
 
 ## Architecture
 
@@ -254,7 +274,7 @@ src/                 # React (presentation only)
 conditional-GET cache, rate limits), `git/` (read-only local clone access),
 `review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
 code view's file list + viewed marks), `post/` (comments, replies,
-approvals; the only writes, explicit only), `history/` (then/now thread
+approvals, resolving threads; the only writes, explicit only), `history/` (then/now thread
 history, line walk, timeline, cache), `ai/` (the AI pass: adapters,
 prompt, output validation, runs, findings/checklist/verdicts).
 
@@ -275,7 +295,7 @@ After every refresh (poll or `refresh_reviews`) the shell emits
 `review:changed { reviewId }` per changed review, then one
 `reviews:refreshed` with the `RefreshReport` (time + per-provider errors).
 `last_refresh` returns the latest report for a webview that subscribed late.
-After a successful post, reply or approval (or a posted AI finding) the
+After a successful post, reply, approval or resolve (or a posted AI finding) the
 shell emits `review:changed` for that review too, and after a history call
 that moved the review's untouched count.
 
@@ -348,7 +368,7 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
   `gh` of `github_provider.rs`, `fixture_routes` in `gitlab_provider.rs`),
   assert on the normalised model, never on raw JSON.
 - **Spec guarantees** (`tests/guarantees.rs`, `src/ai/guarantees.rs`): no
-  platform write without an explicit post/reply/approve/post_findings
+  platform write without an explicit post/reply/approve/resolve/post_findings
   (refresh, code view, history, polling, settings, AI runs); a review
   leaves the active list exactly when approved; waiting-on-me + reasons
   per status; outdated threads fully readable; re-review to posted comment;

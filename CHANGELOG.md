@@ -63,6 +63,11 @@ when it merges.
   posted until you press a button.
 - Replying: every thread has a Reply button with the same comment box. If
   the platform refuses, the reason shows and your text stays.
+- Resolve and unresolve threads from Argus (GitLab discussions and GitHub
+  review threads): a Resolve / Unresolve button on every thread the platform
+  can resolve, also in the command palette. If the platform refuses (some
+  GitLab setups only let the author or a maintainer resolve), its reason
+  shows and the thread stays as it was.
 - Approving: an Approve button in the review header, separate from posting,
   asks first and names the commit you are approving. If the review got new
   commits since you looked, the approval is refused so nothing unseen gets
@@ -155,7 +160,10 @@ when it merges.
   AI findings in page order, `j`/`k` still move between files. The focused
   item gets a focus ring. `Enter` or `t` opens or folds the focused thread,
   `r` replies, `h` shows then/now, `c` comments on its line; on a finding `x`
-  selects it, `e` edits it and `d` dismisses it.
+  selects it, `e` edits it and `d` dismisses it. `↓`/`↑` jump to the next or
+  previous open (unresolved) thread and open it, stopping at the last one
+  (in the review list they still move the cursor, in the code they still
+  pick a line); `s` resolves or reopens the focused thread.
 - Command palette (⌘K / Ctrl+K): every action with its shortcut, plus Go to
   review… and Go to file…. Approve… and Post all… still ask before anything
   is sent.
