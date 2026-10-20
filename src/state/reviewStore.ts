@@ -241,13 +241,19 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
   },
 }));
 
+/**
+ * The later of two reports by time. Compared as instants, not strings: the
+ * core leaves out a zero fraction, so `…:01Z` would sort after the later
+ * `…:01.2Z`. A tie (or an unreadable time) goes to `b`, the one that came in
+ * last.
+ */
 function newer(
   a: RefreshReport | null,
   b: RefreshReport | null,
 ): RefreshReport | null {
   if (!a) return b;
   if (!b) return a;
-  return b.refreshedAt >= a.refreshedAt ? b : a;
+  return Date.parse(a.refreshedAt) > Date.parse(b.refreshedAt) ? a : b;
 }
 
 /** Follow the backend's refresh events; resolves to an unsubscribe. */

@@ -110,6 +110,20 @@ describe("reviewStore", () => {
     expect(useToastStore.getState().toasts).toEqual([]);
   });
 
+  it("keeps the newest report by time, not by spelling", async () => {
+    // The core leaves out a zero fraction: as strings, "…01Z" sorts after
+    // "…01.200Z", which is later.
+    mockInvoke.mockImplementation(() => Promise.resolve([a]));
+    useReviewStore.setState({ lastRefresh: report("2026-10-16T10:00:01Z") });
+    const later = report("2026-10-16T10:00:01.200Z");
+    await useReviewStore.getState().applyRefreshed(later);
+    expect(useReviewStore.getState().lastRefresh).toEqual(later);
+    await useReviewStore
+      .getState()
+      .applyRefreshed(report("2026-10-16T10:00:01Z"));
+    expect(useReviewStore.getState().lastRefresh).toEqual(later);
+  });
+
   it("toasts a failed refresh and keeps the list", async () => {
     mockInvoke.mockRejectedValue({ kind: "io", message: "disk full" });
     await useReviewStore.getState().refresh();
