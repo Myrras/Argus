@@ -128,11 +128,13 @@ when it merges.
   untouched, with its reasoning; you can set your own call or clear it. The
   label stays in Argus and never changes the thread on GitHub or GitLab.
   The AI never repeats a point already raised in the review, by anyone,
-  open or resolved: it reads every thread (yours, other reviewers', the
-  author's, on code or on the review as a whole) and every finding you
-  posted, and Argus also leaves out any finding that still says the same
-  as a thread on the same lines; the panel and the header's tooltip show
-  how many were skipped as already raised.
+  open or resolved, in English or Dutch: it reads every thread (yours,
+  other reviewers', the author's, on code or on the review as a whole) and
+  every finding you posted, and names the threads each point overlaps.
+  Findings that repeat an existing comment are set aside under "Skipped as
+  already raised", where you can still view them, jump to the comment they
+  repeat, or show one anyway; checklist items that repeat one are left out
+  and counted.
   With the AI analysis off, none of this shows and everything else works
   as before.
 - Polling is lighter: Argus asks GitHub and GitLab only for what changed since
