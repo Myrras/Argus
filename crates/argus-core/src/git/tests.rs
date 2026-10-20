@@ -319,6 +319,19 @@ fn only_a_repository_is_a_clone() {
     assert!(clone.file_at(&c3, "latin1.txt").is_none());
 }
 
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_checked_out_commit_is_read_from_head() {
+    let Some(fx) = Fixture::new() else {
+        return;
+    };
+    // An unborn branch has no head.
+    assert_eq!(LocalClone::open(&fx.path).unwrap().head(), None);
+    fx.commit("a.txt", "a\n", "c1");
+    let c2 = fx.commit("a.txt", "b\n", "c2");
+    assert_eq!(LocalClone::open(&fx.path).unwrap().head(), Some(c2));
+}
+
 /// A provider serving a "platform" repository, counting what the history
 /// and the code view fetch from it.
 struct Platform {

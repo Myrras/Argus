@@ -23,6 +23,7 @@ import type {
   FindingPostResult,
   LineChange,
   LineStatus,
+  LocalFile,
   NewComment,
   PostedNote,
   PostErrorKind,
@@ -234,6 +235,8 @@ const settings: Settings = {
   pollIntervalSecs: 180,
   ai: { enabled: true, adapter: "claude", args: [], binary: "/bin/claude" },
   clonePaths: {},
+  editorOverrides: {},
+  defaultEditor: null,
 };
 
 const status: ProviderStatus = {
@@ -388,6 +391,14 @@ const findingFailed: FindingPostResult = {
   message: "GitHub: refused",
 };
 
+const localFile: LocalFile = {
+  path: "src/cache.rs",
+  absolutePath: "/Users/fixture/widgets/src/cache.rs",
+  exists: true,
+  cloneHead: "c".repeat(40),
+  matchesReviewHead: false,
+};
+
 const structs: Record<string, unknown> = {
   ReviewRecord: record,
   StoredThread: thread,
@@ -409,6 +420,7 @@ const structs: Record<string, unknown> = {
   Verdict: verdict,
   "FindingPostResult:posted": findingPosted,
   "FindingPostResult:failed": findingFailed,
+  LocalFile: localFile,
 };
 
 const providerIds = [

@@ -303,6 +303,13 @@ export interface Settings {
   ai: AiSettings;
   /** Local clone per repository, keyed `host/repo`. */
   clonePaths: Record<string, string>;
+  /**
+   * Per-extension editor (`md` → app path), Iris's `editorOverrides`. Always
+   * sent by the core; optional so a settings object without it still saves.
+   */
+  editorOverrides?: Record<string, string>;
+  /** The app for every other file; `null` is the OS default. */
+  defaultEditor?: string | null;
 }
 
 /** `poll::RefreshError`: one failure during a refresh. */
@@ -626,4 +633,19 @@ export interface IpcError {
   message: string;
   /** Stable machine-readable category, e.g. `"invalidInput"`. */
   kind: string;
+}
+
+// --- Open in editor ---
+
+/** `open::LocalFile`: a review's file in its local clone. */
+export interface LocalFile {
+  /** The repository path, as asked. */
+  path: string;
+  absolutePath: string;
+  /** A regular file is in the working tree now. */
+  exists: boolean;
+  /** The clone's checked-out commit; `null` when git could not tell. */
+  cloneHead: string | null;
+  /** The clone is on the review's head commit. */
+  matchesReviewHead: boolean;
 }

@@ -30,8 +30,8 @@ use argus_core::provider::{
     ProviderStatus, ReviewRef, ReviewState, Side, Thread,
 };
 use argus_core::{
-    RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewStatus, RoundReason, Settings,
-    StoredThread, ThreadId,
+    LocalFile, RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewStatus, RoundReason,
+    Settings, StoredThread, ThreadId,
 };
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -546,6 +546,17 @@ fn current() -> Value {
         val(FindingPostResult {
             finding_id,
             outcome: FindingPostOutcome::Failed(post_error),
+        }),
+    );
+    // --- Open in editor ---
+    add(
+        "LocalFile",
+        val(LocalFile {
+            path: "src/cache.rs".into(),
+            absolute_path: "/Users/fixture/widgets/src/cache.rs".into(),
+            exists: true,
+            clone_head: Some("c".repeat(40)),
+            matches_review_head: false,
         }),
     );
 

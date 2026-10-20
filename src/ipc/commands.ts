@@ -18,6 +18,7 @@ import type {
   FindingPost,
   FindingPostResult,
   IpcError,
+  LocalFile,
   NewComment,
   PostedNote,
   PostResult,
@@ -297,4 +298,37 @@ export function postFindings(
   posts: FindingPost[],
 ): Promise<FindingPostResult[]> {
   return invoke("post_findings", { reviewId, posts });
+}
+
+// --- Open in editor ---
+
+/**
+ * The review's `paths` in its local clone; `null` when no clone is set for
+ * its repository. Paths the clone cannot hold are left out.
+ */
+export function localFiles(
+  reviewId: ReviewId,
+  paths: string[],
+): Promise<LocalFile[] | null> {
+  return invoke("local_files", { reviewId, paths });
+}
+
+/**
+ * Open the review's file from its clone in the editor set for it
+ * (Settings → Editors), or with `useDefault` in the OS default app.
+ */
+export function openInEditor(
+  reviewId: ReviewId,
+  path: string,
+  useDefault = false,
+): Promise<void> {
+  return invoke("open_in_editor", { reviewId, path, useDefault });
+}
+
+/** Show the review's file from its clone in Finder / Explorer. */
+export function revealLocalFile(
+  reviewId: ReviewId,
+  path: string,
+): Promise<void> {
+  return invoke("reveal_local_file", { reviewId, path });
 }

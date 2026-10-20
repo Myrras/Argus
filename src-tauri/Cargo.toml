@@ -23,7 +23,8 @@ tauri-plugin-log = "2"
 # Persist and restore window size/position across runs.
 tauri-plugin-window-state = "2"
 # Opens review links in the OS default browser instead of navigating the
-# webview (a bare target="_blank" does nothing in WKWebView/WebView2).
+# webview (a bare target="_blank" does nothing in WKWebView/WebView2), and,
+# from Rust only (`opener.rs`), a clone's file in the user's editor.
 tauri-plugin-opener = "2"
 # Native folder picker for a repository's local clone (Settings → AI), and
 # the startup error dialog.

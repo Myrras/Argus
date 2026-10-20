@@ -4,6 +4,7 @@
 pub mod ai;
 pub mod files;
 pub mod history;
+pub mod open;
 pub mod post;
 pub mod provider;
 pub mod review;
