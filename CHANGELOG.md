@@ -84,8 +84,10 @@ when it merges.
   submit is refused so nothing unseen gets judged. Approving also marks
   every file viewed. An approved review shows "Approved ✓" for a few
   seconds, then leaves the lists. After a submit the review also leaves the
-  middle column (the welcome screen shows). GitLab needs 17.2 or later to request
-  changes; an older one says so before anything is sent. Argus never
+  middle column (the welcome screen shows). GitLab needs 17.2 or later to
+  request changes; an older one says so before anything is sent. On GitLab
+  only a reviewer can request changes: if you aren't one yet, Argus adds you
+  as a reviewer (keeping the others) as part of the same submit. Argus never
   merges.
 - Comments render as markdown: headings, lists, task lists, tables, quotes,
   links (they open in your browser, relative ones such as GitLab

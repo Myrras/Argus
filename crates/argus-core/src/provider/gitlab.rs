@@ -381,6 +381,9 @@ pub struct GitlabProvider {
     /// reads failed since: what the list shows while a read fails (see
     /// `list_reviews`). Memory only.
     commented: Mutex<HashMap<(u64, u64), (ReviewRef, u32)>>,
+    /// The waits before each `/reviewers` read after adding the user as a
+    /// reviewer ([`REVIEWER_RECHECK`]).
+    reviewer_recheck: Vec<Duration>,
 }
 
 impl GitlabProvider {
@@ -399,6 +402,7 @@ impl GitlabProvider {
             done: Mutex::new(HashMap::new()),
             final_recheck: FINAL_RECHECK,
             commented: Mutex::new(HashMap::new()),
+            reviewer_recheck: REVIEWER_RECHECK.to_vec(),
         })
     }
 
@@ -406,6 +410,13 @@ impl GitlabProvider {
     /// instead of [`FINAL_RECHECK`] (tests).
     pub fn with_final_recheck(mut self, after: chrono::Duration) -> Self {
         self.final_recheck = after;
+        self
+    }
+
+    /// Wait `delays` before the `/reviewers` reads after adding the user as
+    /// a reviewer instead of [`REVIEWER_RECHECK`] (tests: no sleeps).
+    pub fn with_reviewer_recheck(mut self, delays: &[Duration]) -> Self {
+        self.reviewer_recheck = delays.to_vec();
         self
     }
 
@@ -1599,6 +1610,16 @@ enum GlWrite {
     Reply,
     Approve,
     Resolve,
+    /// Adding the user as a reviewer (GraphQL).
+    Reviewer,
+}
+
+/// Which API a write goes to: REST takes the token as `PRIVATE-TOKEN`,
+/// GraphQL as a bearer token (the header GitLab's GraphQL docs give).
+#[derive(Clone, Copy)]
+enum GlApi {
+    Rest,
+    Graphql,
 }
 
 impl GitlabProvider {
@@ -1622,16 +1643,50 @@ impl GitlabProvider {
         body: Option<&serde_json::Value>,
         what: GlWrite,
     ) -> PostResultOf<T> {
-        let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
         let url = format!("{}/api/v4{path}", self.base);
+        self.write_to(method, &url, GlApi::Rest, body, what)
+    }
+
+    /// One GraphQL mutation (`query` with `variables`) at `/api/graphql`:
+    /// sent like any other write, GitLab's answer parsed as `T` (its
+    /// `errors` are the caller's to read: GraphQL fails with a 200).
+    fn graphql<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: serde_json::Value,
+        what: GlWrite,
+    ) -> PostResultOf<GqlReply<T>> {
+        let url = format!("{}/api/graphql", self.base);
+        let body = serde_json::json!({ "query": query, "variables": variables });
+        self.write_to(
+            reqwest::Method::POST,
+            &url,
+            GlApi::Graphql,
+            Some(&body),
+            what,
+        )
+    }
+
+    /// The write itself: `body` (JSON) sent to `url`, retried only when the
+    /// connection could not be made.
+    fn write_to<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        api: GlApi,
+        body: Option<&serde_json::Value>,
+        what: GlWrite,
+    ) -> PostResultOf<T> {
+        let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
         let payload = body.map(|b| b.to_string()).unwrap_or_default();
         let mut response = None;
         for delay_ms in [0, 500, 1500] {
             std::thread::sleep(Duration::from_millis(delay_ms));
-            let mut req = self
-                .client
-                .request(method.clone(), &url)
-                .header("PRIVATE-TOKEN", &token);
+            let req = self.client.request(method.clone(), url);
+            let mut req = match api {
+                GlApi::Rest => req.header("PRIVATE-TOKEN", &token),
+                GlApi::Graphql => req.bearer_auth(&token),
+            };
             if body.is_some() {
                 req = req
                     .header("Content-Type", "application/json")
@@ -1851,6 +1906,16 @@ fn my_review_state(entry: Option<&str>, listed: bool, approved: bool) -> MyRevie
 /// command as a plain comment, so Argus refuses before writing.
 const REQUEST_CHANGES_SINCE: (u32, u32) = (17, 2);
 
+/// The waits before each `/reviewers` read after adding the user as a
+/// reviewer: GitLab updates the reviewers in the mutation itself, so the
+/// first read normally lists them; the rest cover a replica that lags.
+const REVIEWER_RECHECK: [Duration; 4] = [
+    Duration::ZERO,
+    Duration::from_millis(250),
+    Duration::from_millis(750),
+    Duration::from_millis(1500),
+];
+
 /// What Argus says when an instance cannot request changes by API.
 const NO_REQUEST_CHANGES: &str = "Your GitLab doesn't support requesting changes via the API (it needs GitLab 17.2 or later). Request changes in GitLab itself.";
 
@@ -1878,15 +1943,85 @@ struct GlCommandsOnly {
     summary: Vec<String>,
 }
 
+/// Appends the users named to an MR's reviewers and returns the reviewers
+/// after it (and whether the MR takes more than one).
+const SET_REVIEWERS_APPEND: &str = "mutation($projectPath: ID!, $iid: String!, $usernames: [String!]!) { mergeRequestSetReviewers(input: { projectPath: $projectPath, iid: $iid, reviewerUsernames: $usernames, operationMode: APPEND }) { errors mergeRequest { allowsMultipleReviewers reviewers { nodes { username } } } } }";
+
+/// What adding the user as a reviewer needs.
+const NEEDS_EDIT: &str =
+    "You need permission to edit this merge request's reviewers (the Developer role or higher).";
+
+/// The user could not be added as a reviewer, so no change request went
+/// out; `why` ends in a full stop.
+fn not_added(why: &str) -> PostError {
+    PostError::new(
+        PostErrorKind::PostRejected,
+        format!(
+            "Argus couldn't add you as a reviewer, which GitLab requires before you can request changes: {why}"
+        ),
+    )
+}
+
+/// A GraphQL answer: `data`, and `errors` for a refused operation (GitLab
+/// answers those with a 200).
+#[derive(Deserialize)]
+struct GqlReply<T> {
+    data: Option<T>,
+    #[serde(default)]
+    errors: Vec<GqlError>,
+}
+
+#[derive(Deserialize)]
+struct GqlError {
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GlSetReviewersData {
+    merge_request_set_reviewers: Option<GlSetReviewersPayload>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GlSetReviewersPayload {
+    #[serde(default)]
+    errors: Vec<String>,
+    merge_request: Option<GlGqlMr>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GlGqlMr {
+    allows_multiple_reviewers: Option<bool>,
+    reviewers: Option<GlGqlNodes>,
+}
+
+#[derive(Deserialize)]
+struct GlGqlNodes {
+    #[serde(default)]
+    nodes: Vec<Option<GlGqlUser>>,
+}
+
+#[derive(Deserialize)]
+struct GlGqlUser {
+    username: String,
+}
+
 impl GitlabProvider {
     /// Set the user's reviewer state to "requested changes" with the
     /// `/request_changes` quick action: the one way GitLab's API offers
     /// before 19.x (`draft_notes/bulk_publish` with `reviewer_state` came
     /// later, and the GraphQL `mergeRequestRequestChanges` later still).
-    /// Checked first (reads only): the instance is 17.2 or later and the
-    /// user is a reviewer of the MR (the quick action exists only for one);
-    /// checked after: GitLab ran it as a command (no note saved) and the
-    /// user's state is now `requested_changes`.
+    /// Checked first (reads only): the instance is 17.2 or later, and
+    /// whether the user is a reviewer of the MR (the quick action exists
+    /// only for one). If not, the user is added
+    /// ([`add_me_as_reviewer`](Self::add_me_as_reviewer), the one extra
+    /// write) and `/reviewers` read again until it lists them, a bounded
+    /// number of times ([`REVIEWER_RECHECK`]). Checked after: GitLab ran it
+    /// as a command (no note saved) and the user's state is now
+    /// `requested_changes`.
     fn request_changes(&self, r: &ReviewRef) -> PostResultOf<()> {
         let p = Self::mr_path(r);
         let version: GlVersionInfo = self.get_json("/version")?;
@@ -1905,10 +2040,23 @@ impl GitlabProvider {
         };
         let reviewers: Vec<GlReviewer> = self.get_all(&format!("{p}/reviewers"))?;
         if mine(&reviewers).is_none() {
-            return Err(PostError::new(
-                PostErrorKind::PostRejected,
-                "GitLab only takes a change request from a reviewer of the merge request; ask to be added as one.",
-            ));
+            // The quick action exists only for a reviewer: add the user
+            // first, then wait until `/reviewers` lists them.
+            self.add_me_as_reviewer(r, &me)?;
+            let mut listed = false;
+            for delay in &self.reviewer_recheck {
+                std::thread::sleep(*delay);
+                let now: Vec<GlReviewer> = self.get_all(&format!("{p}/reviewers"))?;
+                if mine(&now).is_some() {
+                    listed = true;
+                    break;
+                }
+            }
+            if !listed {
+                return Err(not_added(&format!(
+                    "GitLab did not list you as one afterwards. {NEEDS_EDIT}"
+                )));
+            }
         }
         let answer: GlCommandsOnly = self.post_json(
             &format!("{p}/notes"),
@@ -1935,6 +2083,72 @@ impl GitlabProvider {
                     format!("GitLab did not record the change request: {said}")
                 },
             ));
+        }
+        Ok(())
+    }
+
+    /// Add the user (`me`) to the MR's reviewers, keeping the others:
+    /// GraphQL `mergeRequestSetReviewers` with `operationMode: APPEND`
+    /// (GitLab merges the lists server-side, so a reviewer added meanwhile
+    /// is not lost the way a REST `PUT reviewer_ids` read-modify-write would
+    /// lose them; in GitLab 17.2 already, `APPEND` included). Not the
+    /// `/assign_reviewer me` quick action: without the permission GitLab
+    /// drops it silently (a 202 without a reason), where the mutation says
+    /// why. On Free (one reviewer per MR) GitLab keeps the existing one and
+    /// does not add the user; that is reported, never forced.
+    fn add_me_as_reviewer(&self, r: &ReviewRef, me: &str) -> PostResultOf<()> {
+        let token = self.tokens.token().unwrap_or_default();
+        let said = |messages: &[String]| sanitize(&messages.join("; "), &[&token]);
+        let reply: GqlReply<GlSetReviewersData> = self
+            .graphql(
+                SET_REVIEWERS_APPEND,
+                serde_json::json!({
+                    "projectPath": r.repo,
+                    "iid": r.number.to_string(),
+                    "usernames": [me],
+                }),
+                GlWrite::Reviewer,
+            )
+            .map_err(|e| match e.kind {
+                // GitLab's refusal, with its reason ("GitLab: …").
+                PostErrorKind::PostRejected | PostErrorKind::NotFound => not_added(&format!(
+                    "{}. {NEEDS_EDIT}",
+                    e.message.trim_end_matches('.')
+                )),
+                _ => e,
+            })?;
+        if !reply.errors.is_empty() {
+            let messages: Vec<String> = reply.errors.into_iter().map(|e| e.message).collect();
+            return Err(not_added(&format!(
+                "GitLab: {}. {NEEDS_EDIT}",
+                said(&messages)
+            )));
+        }
+        let Some(payload) = reply.data.and_then(|d| d.merge_request_set_reviewers) else {
+            return Err(not_added("GitLab did not answer the change."));
+        };
+        if !payload.errors.is_empty() {
+            return Err(not_added(&format!(
+                "GitLab: {}. {NEEDS_EDIT}",
+                said(&payload.errors)
+            )));
+        }
+        // GitLab returns the MR as it now is: without the user in it, the
+        // add did not happen (Free's one reviewer, or no permission).
+        if let Some(mr) = payload.merge_request {
+            let listed = mr.reviewers.is_none_or(|list| {
+                list.nodes
+                    .iter()
+                    .flatten()
+                    .any(|u| same_user(&u.username, me))
+            });
+            if !listed {
+                return Err(not_added(&if mr.allows_multiple_reviewers == Some(false) {
+                    "this GitLab allows only one reviewer per merge request and it already has one, whom Argus won't replace.".to_string()
+                } else {
+                    format!("GitLab left the reviewers unchanged. {NEEDS_EDIT}")
+                }));
+            }
         }
         Ok(())
     }
