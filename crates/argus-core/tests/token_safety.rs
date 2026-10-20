@@ -10,6 +10,7 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use argus_core::post::{DiffLine, LineKind, PlacedComment};
@@ -453,12 +454,16 @@ fn gitlab_errors_never_carry_the_token() {
 }
 
 /// Submit review's own GitLab path past its reads: the instance and the
-/// reviewer check answer, then the quick action, its check and the summary
-/// note fail with the token in the body (or GitLab's 202 summary echoes it).
+/// reviewer check answer, then the reviewer add (when the user is not one
+/// yet), the quick action, its check and the summary note fail with the
+/// token in the body (or GitLab's 202 summary, or a GraphQL error, echoes
+/// it).
 #[test]
 fn gitlab_submit_errors_never_carry_the_token() {
     let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
     let fail = route.clone();
+    let reviewer = Arc::new(AtomicBool::new(true));
+    let listed = reviewer.clone();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -484,8 +489,12 @@ fn gitlab_submit_errors_never_carry_the_token() {
             } else if path.contains("/reviewers") {
                 (
                     "200 OK".to_string(),
-                    r#"[{"user":{"id":42,"username":"rev-fixture"},"state":"unreviewed"}]"#
-                        .to_string(),
+                    if listed.load(Ordering::SeqCst) {
+                        r#"[{"user":{"id":42,"username":"rev-fixture"},"state":"unreviewed"}]"#
+                    } else {
+                        "[]"
+                    }
+                    .to_string(),
                 )
             } else {
                 fail.lock().unwrap().clone()
@@ -497,7 +506,9 @@ fn gitlab_submit_errors_never_carry_the_token() {
             let _ = sock.write_all(out.as_bytes());
         }
     });
-    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into()))
+        .unwrap()
+        .with_reviewer_recheck(&[std::time::Duration::ZERO]);
     let mut checked = 0;
     let mut cases: Vec<(String, String)> = Vec::new();
     for body in bodies() {
@@ -515,7 +526,7 @@ fn gitlab_submit_errors_never_carry_the_token() {
         "202 Accepted".into(),
         format!(r#"{{"commands_changes":{{}},"summary":["Could not: {GL_TOKEN}"]}}"#),
     ));
-    for (status, body) in cases {
+    for (status, body) in &cases {
         *route.lock().unwrap() = (status.clone(), body.clone());
         for verdict in [ReviewVerdict::Approve, ReviewVerdict::RequestChanges] {
             let err = gl
@@ -525,7 +536,42 @@ fn gitlab_submit_errors_never_carry_the_token() {
             checked += 1;
         }
     }
-    assert!(checked > 100);
+
+    // Not a reviewer: the add (GraphQL) fails the same ways, or answers
+    // 200 with the token in a GraphQL error or the mutation's own errors.
+    reviewer.store(false, Ordering::SeqCst);
+    for body in bodies() {
+        cases.push((
+            "200 OK".into(),
+            format!(
+                r#"{{"data":{{"mergeRequestSetReviewers":null}},"errors":[{{"message":{}}}]}}"#,
+                serde_json::Value::String(body.replace("{T}", GL_TOKEN))
+            ),
+        ));
+        cases.push((
+            "200 OK".into(),
+            format!(
+                r#"{{"data":{{"mergeRequestSetReviewers":{{"errors":[{}],"mergeRequest":null}}}}}}"#,
+                serde_json::Value::String(body.replace("{T}", GL_TOKEN))
+            ),
+        ));
+    }
+    for (status, body) in cases {
+        *route.lock().unwrap() = (status, body);
+        let err = gl
+            .submit_review(
+                &gitlab_mr(&base),
+                ReviewVerdict::RequestChanges,
+                HEAD,
+                Some("Summary"),
+            )
+            .unwrap_err();
+        assert_clean(GL_TOKEN, "submit_review add", &format!("{err} / {err:?}"));
+        checked += 1;
+    }
+    // Both verdicts as a reviewer, then each case once more as none.
+    let n = bodies().len();
+    assert_eq!(checked, (n * 4 + 1) * 2 + (n * 4 + 1) + n * 2);
 }
 
 #[test]

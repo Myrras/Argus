@@ -615,6 +615,57 @@ fn a_submit_is_one_review_state_write() {
     assert!(active(&core).is_empty());
 }
 
+/// GitLab takes a change request only from a reviewer: as a non-reviewer
+/// the submit adds the user first. That add is the one extra write, it
+/// happens only on the submit, and a reviewer gets none.
+#[test]
+fn a_gitlab_change_request_adds_the_user_only_on_submit() {
+    use std::sync::Arc;
+
+    use argus_core::store::Store;
+    use argus_core::Core;
+    use support::gitlab as gl;
+
+    let paths =
+        |log: &gl::Log| -> Vec<String> { gl::writes(log).iter().map(|w| w.path.clone()).collect() };
+    for reviewer in [false, true] {
+        let (base, log) = gl::submitting(gl::Submit {
+            reviewer,
+            ..gl::SUBMIT
+        });
+        let core = Core::with_providers(
+            Store::in_memory().unwrap(),
+            vec![Arc::new(gl::provider(&base))],
+        );
+        // Refreshing and reading the review write nothing, the add included.
+        assert!(core.refresh().errors.is_empty());
+        let id = core.reviews().unwrap()[0].id;
+        core.list_files(id, false).unwrap();
+        core.refresh();
+        assert!(gl::writes(&log).is_empty(), "reviewer: {reviewer}");
+
+        let after = core
+            .submit_review(
+                id,
+                ReviewVerdict::RequestChanges,
+                gl::HEAD_SHA,
+                Some("Not yet."),
+            )
+            .unwrap();
+        assert_eq!(after.my_review_state, MyReviewState::RequestedChanges);
+        let notes = format!("{}/notes", gl::MR21);
+        let mut expected = vec![notes.clone(), notes];
+        if !reviewer {
+            expected.insert(0, gl::GRAPHQL.to_string());
+        }
+        assert_eq!(paths(&log), expected, "reviewer: {reviewer}");
+
+        // Refreshing after it writes nothing more.
+        core.refresh();
+        assert_eq!(paths(&log), expected, "reviewer: {reviewer}");
+    }
+}
+
 /// "Pressing approve should also mark all files as viewed": every file of
 /// the review's diff at the approved head, locally; nothing on a failed or
 /// refused approval; a later push unmarks what changed (content keys).

@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod gitlab;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

@@ -146,9 +146,11 @@ pub trait ReviewProvider: Send + Sync {
     /// GitHub: one `POST pulls/{n}/reviews` with `event` (`APPROVE`,
     /// `REQUEST_CHANGES`, `COMMENT`), `commit_id` and the summary as
     /// `body`. GitLab: approve is [`approve`](Self::approve); request
-    /// changes is the `/request_changes` quick action (GitLab 17.2+, the
-    /// user a reviewer of the MR; [`PostErrorKind::Unsupported`] before
-    /// anything is written otherwise); then the summary as an MR note.
+    /// changes is the `/request_changes` quick action (GitLab 17.2+, else
+    /// [`PostErrorKind::Unsupported`] before anything is written), which
+    /// GitLab takes only from a reviewer: a user who is not one is added
+    /// first (GraphQL `mergeRequestSetReviewers`, `APPEND`); then the
+    /// summary as an MR note.
     ///
     /// The default approves through [`approve`](Self::approve) when there
     /// is no summary and refuses everything else.

@@ -1,211 +1,19 @@
-//! GitLab writes against a local HTTP double (a plain `TcpListener`) that
-//! records each request's method, path, token header and body, and answers
+//! GitLab writes against the local HTTP double of `support::gitlab`, which
+//! records each request's method, path, token headers and body, and answers
 //! reads from `tests/fixtures/gitlab/`. No network, no real token.
 
-use std::io::{Read, Write};
-use std::net::TcpListener;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
+mod support;
+
+use std::sync::Arc;
+use std::time::Duration;
 
 use argus_core::post::{DiffLine, LineKind, PlacedComment, PostErrorKind};
-use argus_core::provider::{
-    GitlabProvider, MyReviewState, ProviderId, ReviewProvider, ReviewRef, ReviewVerdict, Side,
-    StaticToken,
-};
+use argus_core::provider::{MyReviewState, ReviewProvider, ReviewVerdict, Side};
 use argus_core::store::Store;
 use argus_core::{Core, NewComment, PostResult, ReviewStatus};
 use serde_json::{json, Value};
 
-const TOKEN: &str = "glpat-fixture-not-a-real-token";
-const BASE_SHA: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
-const HEAD_SHA: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
-const MR21: &str = "/api/v4/projects/grp%2Fapp/merge_requests/21";
-
-fn fixture(name: &str) -> String {
-    std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/gitlab")
-            .join(name),
-    )
-    .unwrap()
-}
-
-/// One request as the double saw it.
-#[derive(Debug, Clone)]
-struct Request {
-    method: String,
-    /// Path and query.
-    path: String,
-    token: bool,
-    content_type: Option<String>,
-    body: String,
-}
-
-impl Request {
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.body).unwrap()
-    }
-}
-
-struct Reply {
-    status: &'static str,
-    headers: String,
-    body: String,
-}
-
-fn reply(status: &'static str, body: impl Into<String>) -> Reply {
-    Reply {
-        status,
-        headers: String::new(),
-        body: body.into(),
-    }
-}
-
-type Log = Arc<Mutex<Vec<Request>>>;
-
-/// A local server answering every request through `route`; returns the base
-/// URL and the log of requests.
-fn serve(route: impl Fn(&Request) -> Reply + Send + 'static) -> (String, Log) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let log: Log = Arc::new(Mutex::new(Vec::new()));
-    let seen = log.clone();
-    std::thread::spawn(move || {
-        for sock in listener.incoming() {
-            let Ok(mut sock) = sock else { continue };
-            let mut raw = Vec::new();
-            let mut buf = [0u8; 4096];
-            let head_end = loop {
-                if let Some(i) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
-                    break i + 4;
-                }
-                match sock.read(&mut buf) {
-                    Ok(0) | Err(_) => break raw.len(),
-                    Ok(n) => raw.extend_from_slice(&buf[..n]),
-                }
-            };
-            let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
-            let header = |name: &str| {
-                head.lines().find_map(|l| {
-                    let (k, v) = l.split_once(':')?;
-                    k.trim()
-                        .eq_ignore_ascii_case(name)
-                        .then(|| v.trim().to_string())
-                })
-            };
-            let length: usize = header("content-length")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            while raw.len() < head_end + length {
-                match sock.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => raw.extend_from_slice(&buf[..n]),
-                }
-            }
-            let mut words = head.split_whitespace();
-            let req = Request {
-                method: words.next().unwrap_or("").to_string(),
-                path: words.next().unwrap_or("").to_string(),
-                token: header("private-token").as_deref() == Some(TOKEN),
-                content_type: header("content-type"),
-                body: String::from_utf8_lossy(&raw[head_end..]).into_owned(),
-            };
-            seen.lock().unwrap().push(req.clone());
-            let r = route(&req);
-            let out = format!(
-                "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                r.status,
-                r.headers,
-                r.body.len(),
-                r.body
-            );
-            let _ = sock.write_all(out.as_bytes());
-        }
-    });
-    (base, log)
-}
-
-/// Reads from the fixtures; writes answered as GitLab does on success.
-fn instance(req: &Request) -> Reply {
-    let (route, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
-    let ok = |name: &str| reply("200 OK", fixture(name));
-    match (req.method.as_str(), route) {
-        ("GET", "/api/v4/user") => ok("user.json"),
-        ("GET", "/api/v4/merge_requests") => {
-            reply("200 OK", format!("[{}]", fixture("mr_21.json")))
-        }
-        ("GET", "/api/v4/events") => reply("200 OK", "[]"),
-        ("GET", r) if r == MR21 => ok("mr_21.json"),
-        ("GET", r) if r == format!("{MR21}/commits") => ok("mr_21_commits.json"),
-        ("GET", r) if r == format!("{MR21}/versions") => ok("mr_21_versions.json"),
-        ("GET", r) if r == format!("{MR21}/reviewers") => ok("mr_21_reviewers.json"),
-        ("GET", r) if r == format!("{MR21}/approvals") => ok("mr_21_approvals.json"),
-        ("GET", r) if r == format!("{MR21}/diffs") => {
-            let page2 = query.contains("page=2");
-            Reply {
-                headers: if page2 {
-                    "X-Next-Page: \r\n"
-                } else {
-                    "X-Next-Page: 2\r\n"
-                }
-                .into(),
-                ..ok(if page2 {
-                    "mr_21_diffs_page2.json"
-                } else {
-                    "mr_21_diffs_page1.json"
-                })
-            }
-        }
-        ("GET", r) if r == format!("{MR21}/discussions") => {
-            let page2 = query.contains("page=2");
-            Reply {
-                headers: if page2 {
-                    "X-Next-Page: \r\n"
-                } else {
-                    "X-Next-Page: 2\r\n"
-                }
-                .into(),
-                ..ok(if page2 {
-                    "mr_21_discussions_page2.json"
-                } else {
-                    "mr_21_discussions_page1.json"
-                })
-            }
-        }
-        ("POST", r) if r == format!("{MR21}/discussions") => reply(
-            "201 Created",
-            r#"{"id":"d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9d9","individual_note":false,"notes":[{"id":9001,"body":"x","system":false}]}"#,
-        ),
-        ("POST", r) if r.starts_with(&format!("{MR21}/discussions/")) && r.ends_with("/notes") => {
-            reply("201 Created", r#"{"id":9002,"body":"x"}"#)
-        }
-        ("PUT", r) if r.starts_with(&format!("{MR21}/discussions/")) => reply(
-            "200 OK",
-            r#"{"id":"d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","individual_note":false,"notes":[]}"#,
-        ),
-        ("POST", r) if r == format!("{MR21}/approve") => {
-            reply("201 Created", r#"{"id":5,"iid":21,"approved_by":[]}"#)
-        }
-        _ => reply("404 Not Found", r#"{"message":"404 Not found"}"#),
-    }
-}
-
-fn provider(base: &str) -> GitlabProvider {
-    GitlabProvider::new(base, StaticToken(TOKEN.into())).unwrap()
-}
-
-fn mr(base: &str) -> ReviewRef {
-    ReviewRef {
-        provider: ProviderId::Gitlab,
-        host: base.trim_start_matches("http://").into(),
-        repo: "grp/app".into(),
-        number: 21,
-        url: "https://gitlab.example.test/grp/app/-/merge_requests/21".into(),
-        title: String::new(),
-        author: String::new(),
-        updated_at: None,
-    }
-}
+use support::gitlab::*;
 
 fn row(kind: LineKind, old_pos: u32, new_pos: u32) -> DiffLine {
     DiffLine {
@@ -226,16 +34,6 @@ fn placed(path: &str, side: Side, line: DiffLine, start: Option<DiffLine>) -> Pl
         base_sha: BASE_SHA.into(),
         body: "Why three?".into(),
     }
-}
-
-/// The POSTs the double saw.
-fn posts(log: &Log) -> Vec<Request> {
-    log.lock()
-        .unwrap()
-        .iter()
-        .filter(|r| r.method == "POST")
-        .cloned()
-        .collect()
 }
 
 /// sha1("src/importer.rs") (from `shasum -a 1`), which GitLab's line codes
@@ -665,16 +463,6 @@ fn a_failing_reviewers_call_does_not_block_approving() {
 
 const D1: &str = "d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-/// Every request but a GET: the writes.
-fn writes(log: &Log) -> Vec<Request> {
-    log.lock()
-        .unwrap()
-        .iter()
-        .filter(|r| r.method != "GET")
-        .cloned()
-        .collect()
-}
-
 #[test]
 fn resolves_and_reopens_a_discussion_with_a_put() {
     let (base, log) = serve(instance);
@@ -815,81 +603,6 @@ fn resolving_through_the_core_writes_once_and_refreshes() {
 // Submit review: approve / request changes, with a summary note.
 // ---------------------------------------------------------------------------
 
-/// How the double answers a submit: the instance's version, whether the
-/// user is a reviewer, and how `/request_changes` goes.
-#[derive(Clone, Copy)]
-struct Submit {
-    version: &'static str,
-    reviewer: bool,
-    /// GitLab runs the quick action (202) rather than saving it as a note.
-    recognised: bool,
-    /// The quick action sets the user's reviewer state.
-    takes: bool,
-    /// What a plain note (the summary) gets.
-    note_status: &'static str,
-}
-
-const SUBMIT: Submit = Submit {
-    version: "17.5.1-ee",
-    reviewer: true,
-    recognised: true,
-    takes: true,
-    note_status: "201 Created",
-};
-
-/// The fixture instance with the submit routes on top.
-fn submitting(how: Submit) -> (String, Log) {
-    let changed = Arc::new(Mutex::new(false));
-    serve(move |req: &Request| {
-        let route = req
-            .path
-            .split_once('?')
-            .map_or(req.path.as_str(), |(r, _)| r);
-        let me_state = if *changed.lock().unwrap() {
-            "requested_changes"
-        } else {
-            "unreviewed"
-        };
-        match (req.method.as_str(), route) {
-            ("GET", "/api/v4/version") => reply(
-                "200 OK",
-                format!(r#"{{"version":"{}","revision":"fixture"}}"#, how.version),
-            ),
-            ("GET", r) if r == format!("{MR21}/reviewers") => {
-                let mut list = vec![json!({
-                    "user": { "id": 45, "username": "dana-fixture" }, "state": "approved"
-                })];
-                if how.reviewer {
-                    list.push(json!({
-                        "user": { "id": 42, "username": "rev-fixture" }, "state": me_state
-                    }));
-                }
-                reply("200 OK", Value::Array(list).to_string())
-            }
-            ("POST", r) if r == format!("{MR21}/notes") => {
-                if req.json()["body"] == "/request_changes" {
-                    if !how.recognised {
-                        return reply("201 Created", r#"{"id":9010,"body":"/request_changes"}"#);
-                    }
-                    if how.takes {
-                        *changed.lock().unwrap() = true;
-                    }
-                    return reply(
-                        "202 Accepted",
-                        r#"{"commands_changes":{},"summary":["Changes requested to the current merge request."]}"#,
-                    );
-                }
-                if how.note_status.starts_with('2') {
-                    reply(how.note_status, r#"{"id":9011,"body":"x"}"#)
-                } else {
-                    reply(how.note_status, r#"{"message":"403 Forbidden"}"#)
-                }
-            }
-            _ => instance(req),
-        }
-    })
-}
-
 #[test]
 fn requests_changes_with_the_quick_action_then_posts_the_summary() {
     let (base, log) = submitting(SUBMIT);
@@ -942,20 +655,179 @@ fn a_gitlab_without_request_changes_is_refused_before_any_write() {
         .message
         .contains("Your GitLab doesn't support requesting changes via the API"));
     assert!(posts(&log).is_empty());
-}
 
-#[test]
-fn only_a_reviewer_can_request_changes() {
+    // Not a reviewer either: still refused before the add.
     let (base, log) = submitting(Submit {
+        version: "17.1.4-ee",
         reviewer: false,
         ..SUBMIT
     });
     let err = provider(&base)
         .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
         .unwrap_err();
-    assert_eq!(err.kind, PostErrorKind::PostRejected);
-    assert!(err.message.contains("reviewer"));
+    assert_eq!(err.kind, PostErrorKind::Unsupported);
     assert!(posts(&log).is_empty());
+}
+
+/// The user is not a reviewer yet: Argus adds them (GraphQL
+/// `mergeRequestSetReviewers`, `APPEND`), reads `/reviewers` until they are
+/// listed, then requests changes as for a reviewer.
+#[test]
+fn a_non_reviewer_is_added_then_requests_changes() {
+    let (base, log) = submitting(Submit {
+        reviewer: false,
+        ..SUBMIT
+    });
+    provider(&base)
+        .submit_review(
+            &mr(&base),
+            ReviewVerdict::RequestChanges,
+            HEAD_SHA,
+            Some("Please add the retry test."),
+        )
+        .unwrap();
+    assert_eq!(
+        sequence(&log),
+        [
+            "GET /api/v4/version".to_string(),
+            "GET /api/v4/user".into(),
+            format!("GET {MR21}/reviewers"),
+            format!("POST {GRAPHQL}"),
+            format!("GET {MR21}/reviewers"),
+            format!("POST {MR21}/notes"),
+            format!("GET {MR21}/reviewers"),
+            format!("POST {MR21}/notes"),
+        ]
+    );
+    let posts = posts(&log);
+    // The add: the token as a bearer (GraphQL), the user appended by name.
+    let add = &posts[0];
+    assert!(add.bearer && !add.token);
+    assert_eq!(add.content_type.as_deref(), Some("application/json"));
+    let body = add.json();
+    let query = body["query"].as_str().unwrap();
+    assert!(query.contains("mergeRequestSetReviewers("));
+    assert!(query.contains("operationMode: APPEND"));
+    assert_eq!(
+        body["variables"],
+        json!({ "projectPath": "grp/app", "iid": "21", "usernames": ["rev-fixture"] })
+    );
+    assert!(!add.body.contains(TOKEN));
+    // Then the change request and the summary, as for a reviewer.
+    let notes: Vec<Value> = posts[1..].iter().map(Request::json).collect();
+    assert_eq!(
+        notes,
+        [
+            json!({ "body": "/request_changes" }),
+            json!({ "body": "Please add the retry test." }),
+        ]
+    );
+    assert!(posts[1..].iter().all(|p| p.token));
+}
+
+#[test]
+fn an_existing_reviewer_is_not_added_again() {
+    let (base, log) = submitting(SUBMIT);
+    provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap();
+    assert_eq!(
+        sequence(&log),
+        [
+            "GET /api/v4/version".to_string(),
+            "GET /api/v4/user".into(),
+            format!("GET {MR21}/reviewers"),
+            format!("POST {MR21}/notes"),
+            format!("GET {MR21}/reviewers"),
+        ]
+    );
+}
+
+/// GitLab lists the new reviewer a read or two later: Argus reads again,
+/// a bounded number of times.
+#[test]
+fn the_add_is_read_back_until_gitlab_lists_the_user() {
+    let (base, log) = submitting(Submit {
+        reviewer: false,
+        lag: 2,
+        ..SUBMIT
+    });
+    provider(&base)
+        .with_reviewer_recheck(&[Duration::ZERO; 4])
+        .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap();
+    let seq = sequence(&log);
+    let add = seq
+        .iter()
+        .position(|r| r == &format!("POST {GRAPHQL}"))
+        .unwrap();
+    let note = seq
+        .iter()
+        .position(|r| r == &format!("POST {MR21}/notes"))
+        .unwrap();
+    assert_eq!(seq[add + 1..note], vec![format!("GET {MR21}/reviewers"); 3]);
+
+    // Never listed: an error after the last read, and no change request.
+    let (base, log) = submitting(Submit {
+        reviewer: false,
+        lag: 10,
+        ..SUBMIT
+    });
+    let err = provider(&base)
+        .with_reviewer_recheck(&[Duration::ZERO; 3])
+        .submit_review(&mr(&base), ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert!(
+        err.message.contains("couldn't add you as a reviewer"),
+        "{}",
+        err.message
+    );
+    let seq = sequence(&log);
+    let reads = seq
+        .iter()
+        .filter(|r| *r == &format!("GET {MR21}/reviewers"))
+        .count();
+    assert_eq!(reads, 1 + 3);
+    assert_eq!(writes(&log).len(), 1);
+}
+
+/// An add GitLab refuses says why and what to do; nothing else is written.
+#[test]
+fn an_add_gitlab_refuses_is_a_clear_error() {
+    for (add, says) in [
+        (Add::Refused, "you don't have permission"),
+        (Add::Fails, "Reviewers not able to be set: rev-fixture"),
+        (Add::OneReviewer, "only one reviewer"),
+        (Add::Ignored, "left the reviewers unchanged"),
+    ] {
+        let (base, log) = submitting(Submit {
+            reviewer: false,
+            add,
+            ..SUBMIT
+        });
+        let err = provider(&base)
+            .with_reviewer_recheck(&[Duration::ZERO])
+            .submit_review(
+                &mr(&base),
+                ReviewVerdict::RequestChanges,
+                HEAD_SHA,
+                Some("Summary"),
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, PostErrorKind::PostRejected, "{add:?}");
+        assert!(
+            err.message
+                .starts_with("Argus couldn't add you as a reviewer"),
+            "{add:?}: {}",
+            err.message
+        );
+        assert!(err.message.contains(says), "{add:?}: {}", err.message);
+        assert!(!err.message.contains("ask to be added"));
+        // Only the add was sent: no change request, no summary.
+        let sent: Vec<String> = writes(&log).iter().map(|w| w.path.clone()).collect();
+        assert_eq!(sent, [GRAPHQL], "{add:?}");
+    }
 }
 
 #[test]
@@ -1009,6 +881,17 @@ fn approves_with_a_summary_note_and_refuses_a_comment_review() {
         ]
     );
 
+    // Approving needs no reviewer status: nobody is added.
+    let (base, log) = submitting(Submit {
+        reviewer: false,
+        ..SUBMIT
+    });
+    provider(&base)
+        .submit_review(&mr(&base), ReviewVerdict::Approve, HEAD_SHA, None)
+        .unwrap();
+    let sent: Vec<String> = writes(&log).iter().map(|w| w.path.clone()).collect();
+    assert_eq!(sent, [format!("{MR21}/approve")]);
+
     let (base, log) = submitting(SUBMIT);
     let err = provider(&base)
         .submit_review(&mr(&base), ReviewVerdict::Comment, HEAD_SHA, Some("x"))
@@ -1048,4 +931,28 @@ fn requesting_changes_through_the_core_waits_on_the_author() {
     assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
     assert_eq!(after.last_reviewed_sha.as_deref(), Some(HEAD_SHA));
     assert_eq!(posts(&log).len(), 1);
+}
+
+#[test]
+fn a_non_reviewer_requesting_changes_through_the_core_waits_on_the_author() {
+    let (base, log) = submitting(Submit {
+        reviewer: false,
+        ..SUBMIT
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let id = core.reviews().unwrap()[0].id;
+    assert_eq!(
+        core.review(id).unwrap().my_review_state,
+        MyReviewState::NotReviewer
+    );
+    assert!(writes(&log).is_empty());
+
+    let after = core
+        .submit_review(id, ReviewVerdict::RequestChanges, HEAD_SHA, None)
+        .unwrap();
+    assert_eq!(after.my_review_state, MyReviewState::RequestedChanges);
+    assert_eq!(after.status, ReviewStatus::WaitingOnAuthor);
+    let sent: Vec<String> = writes(&log).iter().map(|w| w.path.clone()).collect();
+    assert_eq!(sent, [GRAPHQL.to_string(), format!("{MR21}/notes")]);
 }

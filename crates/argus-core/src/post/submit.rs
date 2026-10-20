@@ -1,7 +1,8 @@
 //! Submit review: the user's verdict (approve, request changes, or on
 //! GitHub a comment review) set on the platform, with an optional summary.
 //! One explicit user action, one review-state write (plus, on GitLab, the
-//! summary note); the pending comments go out before it through
+//! summary note, and adding the user as a reviewer when requesting changes
+//! as a non-reviewer); the pending comments go out before it through
 //! [`Core::post_comments`], from the UI.
 //!
 //! Blocking (network, `gh`): call it from `spawn_blocking`.

@@ -300,7 +300,16 @@ sibling app Iris (`../Iris`).
   quick action note after `GET /version` ≥ 17.2 and a reviewer check,
   verified by the 202 and `/reviewers`, else `unsupported` — REST
   `bulk_publish reviewer_state` is 19.2+ only — then the summary as a
-  note); an approval marks every file of the diff at that head viewed
+  note; a user who is not a reviewer is added first, the one extra write:
+  GraphQL `mergeRequestSetReviewers` `operationMode: APPEND` (bearer
+  token; server-side merge, no REST `reviewer_ids` race; not
+  `/assign_reviewer me`, which GitLab drops silently without the
+  permission), then `/reviewers` read until it lists them
+  (`REVIEWER_RECHECK`, `with_reviewer_recheck` in tests); a refusal, Free's
+  one-reviewer limit or no listing is `postRejected` "Argus couldn't add
+  you as a reviewer…" with GitLab's reason. Test double:
+  `tests/support/gitlab.rs` (`submitting`, `Add`), shared by
+  `post_gitlab.rs` and `guarantees.rs`); an approval marks every file of the diff at that head viewed
   (`Store::set_viewed_all`). `approve_review` delegates to it. The local
   `mark_reviewed` stays core-only (no IPC). UI: `SubmitReviewModal`
   (verdict radios per `lib/reviews.verdictsFor`, summary Write/Preview,
