@@ -54,6 +54,9 @@
 
 .headRow {
   display: flex;
+  /* In a narrow column (a side of the split view) the buttons wrap under
+     the author instead of squeezing it out. */
+  flex-wrap: wrap;
   align-items: center;
   min-width: 0;
   background: var(--surface-2);
@@ -64,7 +67,7 @@
 }
 
 .head {
-  flex: 1;
+  flex: 1 1 12em;
   min-width: 0;
   overflow: hidden;
   justify-content: flex-start;
@@ -111,6 +114,11 @@
 }
 
 .author {
+  flex-shrink: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
   color: var(--text);
 }
@@ -120,7 +128,11 @@
 }
 
 .count {
-  flex-shrink: 0;
+  /* Gives way (with an ellipsis) before the author does in a narrow column. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-faint);
 }
 

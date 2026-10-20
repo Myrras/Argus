@@ -58,6 +58,19 @@ const heights = new Map<string, number>();
 /** Enough for every block of a few large reviews; oldest dropped first. */
 const MAX_HEIGHTS = 2000;
 
+/** The air kept right of the blocks, inside the editor's visible part. */
+const BLOCK_RIGHT_GAP = 8;
+
+/**
+ * How wide the blocks under a line are: the editor's visible width less its
+ * gutter and a gap. No floor: a side of a split view can be narrower than
+ * any minimum, and a block wider than its column is clipped by it (the
+ * block's own content wraps or scrolls inside it).
+ */
+export function blockWidth(visibleWidth: number, gutterWidth: number): number {
+  return Math.max(0, visibleWidth - gutterWidth - BLOCK_RIGHT_GAP);
+}
+
 /** One line's blocks as a cache key. */
 export function blockSignature(keys: readonly string[]): string {
   return keys.join("\n");

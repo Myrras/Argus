@@ -11,7 +11,8 @@
  * its blocks change (`updateDOM`), so a thread keeps its React state (an
  * open reply, the focus) while notes arrive or blocks join its line; the
  * root is unmounted with the widget's DOM. The blocks sit beside the gutter
- * as wide as the visible part, from CSS variables the editor keeps current
+ * as wide as the visible part of their own editor (a side of the split view
+ * included, however narrow), from CSS variables the editor keeps current
  * (`blockGeometry`).
  *
  * Commenting (`comment`): the gutter's "+" shows on the commentable lines
@@ -64,6 +65,7 @@ import {
 import {
   blockHeight,
   blockSignature,
+  blockWidth,
   registerDiffEditor,
   rememberBlockHeight,
   threadBlockKey,
@@ -231,7 +233,7 @@ const blockGeometry = ViewPlugin.fromClass(
           const left = gutters?.offsetWidth ?? 0;
           return {
             left,
-            width: Math.max(240, v.scrollDOM.clientWidth - left - 8),
+            width: blockWidth(v.scrollDOM.clientWidth, left),
           };
         },
         write: ({ left, width }, v) => {
