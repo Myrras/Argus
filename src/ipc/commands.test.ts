@@ -18,6 +18,7 @@ import {
   dismissFinding,
   listChecklist,
   listFindings,
+  listReviewSkills,
   listVerdicts,
   postFindings,
   reviewHistories,
@@ -117,6 +118,12 @@ describe("AI pass wrappers", () => {
         ],
       },
     ],
+    [
+      "list_review_skills",
+      () => listReviewSkills("github.com/acme-fixture/widgets"),
+      { repo: "github.com/acme-fixture/widgets" },
+    ],
+    ["list_review_skills", () => listReviewSkills(null), { repo: null }],
   ] as const)("calls %s with camelCase args", async (cmd, call, args) => {
     await call();
     expect(mockInvoke).toHaveBeenCalledTimes(1);
@@ -142,6 +149,7 @@ describe("AI pass wrappers", () => {
       droppedDuplicates: 0,
       skippedChecklist: 0,
       readOnlyGuaranteed: true,
+      context: null,
     };
     events.emit("ai:state", state);
     expect(seen).toEqual([state]);

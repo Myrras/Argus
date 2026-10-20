@@ -16,7 +16,7 @@ use rusqlite::{params, OptionalExtension, Row};
 use super::dedupe::RaisedRef;
 use super::model::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, RelatedRef, RepeatOf,
-    RepeatReason, Severity, Verdict, VerdictLabel,
+    RepeatReason, RunContext, Severity, Verdict, VerdictLabel,
 };
 use super::output::RunOutput;
 use crate::error::{CoreError, CoreResult};
@@ -99,6 +99,13 @@ pub(crate) const MIGRATION_11: &str = r#"
     ALTER TABLE checklist ADD COLUMN related_to TEXT;
 "#;
 
+/// Migration 14: what the latest successful run was given besides the diff
+/// (`context`, a JSON [`RunContext`]: rules files, review skill, worktree,
+/// notes). Rows from before have none.
+pub(crate) const MIGRATION_14: &str = r#"
+    ALTER TABLE ai_runs ADD COLUMN context TEXT;
+"#;
+
 /// Error text of a run that was running when Argus stopped.
 pub(crate) const INTERRUPTED: &str = "interrupted";
 
@@ -119,6 +126,8 @@ pub(crate) struct RunRow {
     pub dropped_verdicts: u32,
     pub dropped_duplicates: u32,
     pub skipped_checklist: u32,
+    /// What the latest successful run was given (migration 14).
+    pub context: Option<RunContext>,
 }
 
 impl RunRow {
@@ -139,6 +148,7 @@ impl RunRow {
             dropped_duplicates: self.dropped_duplicates,
             skipped_checklist: self.skipped_checklist,
             read_only_guaranteed: true,
+            context: self.context.clone(),
         }
     }
 }
@@ -153,7 +163,7 @@ fn bad(what: &str) -> rusqlite::Error {
 
 const RUN_COLUMNS: &str = "review_id, status, round, adapter, error, interrupted, started_at,
     finished_at, last_done_round, dropped_findings, dropped_verdicts, dropped_duplicates,
-    skipped_checklist";
+    skipped_checklist, context";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
     let id: String = r.get(0)?;
@@ -172,6 +182,10 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
         dropped_verdicts: r.get(10)?,
         dropped_duplicates: r.get(11)?,
         skipped_checklist: r.get(12)?,
+        // Unreadable (written by a newer Argus): shown as none.
+        context: r
+            .get::<_, Option<String>>(13)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
     })
 }
 
@@ -391,10 +405,12 @@ pub(crate) fn save_done(
         params![rid, round],
     )?;
 
+    let context = serde_json::to_string(&out.context)
+        .map_err(|e| CoreError::InvalidInput(format!("could not encode the run context: {e}")))?;
     let n = tx.execute(
         "UPDATE ai_runs SET status = 'done', error = NULL, interrupted = 0, round = ?2,
             finished_at = ?3, last_done_round = ?2, dropped_findings = ?4, dropped_verdicts = ?5,
-            dropped_duplicates = ?6, skipped_checklist = ?7
+            dropped_duplicates = ?6, skipped_checklist = ?7, context = ?8
          WHERE review_id = ?1",
         params![
             rid,
@@ -403,7 +419,8 @@ pub(crate) fn save_done(
             out.dropped_findings,
             out.dropped_verdicts,
             out.dropped_duplicates,
-            out.skipped_checklist
+            out.skipped_checklist,
+            context
         ],
     )?;
     if n == 0 {

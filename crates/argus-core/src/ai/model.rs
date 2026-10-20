@@ -9,7 +9,12 @@
 //!   error: string | null; startedAt: string | null; finishedAt: string | null;
 //!   lastDoneRound: number | null; droppedFindings: number; droppedVerdicts: number;
 //!   droppedDuplicates: number; skippedChecklist: number; readOnlyGuaranteed: boolean;
+//!   context: RunContext | null;
 //! }
+//! interface RunContext {
+//!   rulesFiles: string[]; skill: UsedSkill | null; worktree: boolean; notes: string[];
+//! }
+//! interface UsedSkill { name: string; source: "user" | "plugin" | "project" }
 //! type Severity = "high" | "medium" | "low";
 //! interface Finding {
 //!   id: string; reviewId: string; round: number; path: string; line: number;
@@ -165,6 +170,36 @@ pub struct AiRunState {
     /// for `auggie`: its user-configured MCP tools cannot be turned off, so
     /// the UI warns.
     pub read_only_guaranteed: bool,
+    /// What the latest successful run was given besides the diff: the
+    /// repository's rules, its review skill, the worktree. `None` before
+    /// one (or for a run stored before Argus kept it).
+    pub context: Option<RunContext>,
+}
+
+/// What a run was given besides the diff and threads (persisted with the
+/// run, shown in the AI chip's tooltip).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunContext {
+    /// The rules files the prompt carried, by repository path, read at the
+    /// target branch (`CLAUDE.md`, `src/api/CLAUDE.md`, …).
+    pub rules_files: Vec<String>,
+    /// The review skill whose criteria it applied.
+    pub skill: Option<UsedSkill>,
+    /// The agent read a worktree checked out at the review's head (else
+    /// the diff, and the clone as it is checked out, if one is set).
+    pub worktree: bool,
+    /// What did not go as set up, in Argus' own words: no worktree (and
+    /// why), a chosen skill that is gone, rules the merge request changes.
+    pub notes: Vec<String>,
+}
+
+/// A review skill a run used.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsedSkill {
+    pub name: String,
+    pub source: crate::settings::SkillSource,
 }
 
 impl AiRunState {
@@ -185,6 +220,7 @@ impl AiRunState {
             dropped_duplicates: 0,
             skipped_checklist: 0,
             read_only_guaranteed: true,
+            context: None,
         }
     }
 }

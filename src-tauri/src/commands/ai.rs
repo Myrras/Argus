@@ -1,6 +1,6 @@
 //! AI pass commands (M5): a review's run state, findings, checklist and
-//! verdicts, starting and stopping a run, the user's marks, and posting
-//! findings.
+//! verdicts, starting and stopping a run, the user's marks, posting
+//! findings, and the review skills a repository can follow.
 //!
 //! A run happens on the core's own threads and reports through `ai:state`
 //! (see [`crate::events`]); these commands only queue, cancel and read.
@@ -11,7 +11,7 @@ use tauri::{AppHandle, State};
 
 use argus_core::{
     AiRunState, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost, FindingPostOutcome,
-    FindingPostResult, PostErrorKind, Verdict, VerdictLabel,
+    FindingPostResult, PostErrorKind, ReviewSkillList, Verdict, VerdictLabel,
 };
 
 use super::{blocking, blocking_post, parse_id, parse_review_id, parse_thread_id};
@@ -27,6 +27,18 @@ pub async fn ai_state(
 ) -> Result<AiRunState, IpcError> {
     let id = parse_review_id(&review_id)?;
     blocking(state, move |core| core.ai_state(id)).await
+}
+
+/// The review skills the Settings picker offers for `repo` (`host/repo`):
+/// the user's and installed plugins' whose name says "review", and the
+/// repository's own from its clone. Read-only (files and `git` object
+/// reads).
+#[tauri::command]
+pub async fn list_review_skills(
+    state: State<'_, AppState>,
+    repo: Option<String>,
+) -> Result<ReviewSkillList, IpcError> {
+    blocking(state, move |core| core.list_review_skills(repo.as_deref())).await
 }
 
 /// The review's findings, every round: high severity first.

@@ -28,6 +28,7 @@ import type {
   ReviewId,
   ReviewRecord,
   ReviewRefresh,
+  ReviewSkillList,
   ReviewVerdict,
   Settings,
   StoredThread,
@@ -331,6 +332,17 @@ export function postFindings(
   posts: FindingPost[],
 ): Promise<FindingPostResult[]> {
   return invoke("post_findings", { reviewId, posts });
+}
+
+/**
+ * The review skills the Settings picker offers for `repo` (`host/repo`): the
+ * user's and installed plugins' whose name says "review", and the
+ * repository's own from its clone. Read-only.
+ */
+export function listReviewSkills(
+  repo: string | null,
+): Promise<ReviewSkillList> {
+  return invoke("list_review_skills", { repo });
 }
 
 // --- Open in editor ---

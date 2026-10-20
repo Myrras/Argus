@@ -32,6 +32,8 @@ import type {
   ProviderStatus,
   RefreshReport,
   ReviewRefresh,
+  ReviewSkillChoice,
+  ReviewSkillList,
   RepeatReason,
   ReviewFiles,
   ReviewRecord,
@@ -43,6 +45,7 @@ import type {
   Settings,
   Severity,
   Side,
+  SkillSource,
   SnapshotSource,
   StoredThread,
   ThreadHistory,
@@ -244,6 +247,7 @@ const settings: Settings = {
   clonePaths: {},
   editorOverrides: {},
   defaultEditor: null,
+  reviewSkills: {},
 };
 
 const status: ProviderStatus = {
@@ -345,7 +349,31 @@ const aiState: AiRunState = {
   droppedDuplicates: 0,
   skippedChecklist: 0,
   readOnlyGuaranteed: true,
+  context: {
+    rulesFiles: ["CLAUDE.md"],
+    skill: { name: "code-review", source: "project" },
+    worktree: true,
+    notes: ["Couldn't create a review worktree: …"],
+  },
 };
+
+const reviewSkillList: ReviewSkillList = {
+  skills: [
+    {
+      name: "fixture-tools:code-review",
+      description: "Reviews code.",
+      source: "plugin",
+    },
+  ],
+  autoPick: "code-review",
+  projectListed: true,
+};
+
+const reviewSkillChoices: ReviewSkillChoice[] = [
+  { kind: "auto" },
+  { kind: "none" },
+  { kind: "skill", source: "user", name: "code-review" },
+];
 
 const finding: Finding = {
   id: FINDING,
@@ -431,6 +459,10 @@ const structs: Record<string, unknown> = {
   "FindingPostResult:posted": findingPosted,
   "FindingPostResult:failed": findingFailed,
   LocalFile: localFile,
+  ReviewSkillList: reviewSkillList,
+  ...Object.fromEntries(
+    reviewSkillChoices.map((c) => [`ReviewSkillChoice:${c.kind}`, c]),
+  ),
 };
 
 const providerIds = [
@@ -491,6 +523,16 @@ const reviewVerdicts = [
   "requestChanges",
   "comment",
 ] as const satisfies readonly ReviewVerdict[];
+const skillSources = [
+  "user",
+  "plugin",
+  "project",
+] as const satisfies readonly SkillSource[];
+const reviewSkillKinds = [
+  "auto",
+  "none",
+  "skill",
+] as const satisfies readonly ReviewSkillChoice["kind"][];
 const lineStatusKinds = [
   "located",
   "deleted",
@@ -562,6 +604,8 @@ const covered: true[] = [
   true satisfies Covers<RepeatReason, typeof repeatReasons>,
   true satisfies Covers<MyReviewState, typeof myReviewStates>,
   true satisfies Covers<ReviewVerdict, typeof reviewVerdicts>,
+  true satisfies Covers<SkillSource, typeof skillSources>,
+  true satisfies Covers<ReviewSkillChoice["kind"], typeof reviewSkillKinds>,
 ];
 
 const enums: Record<string, readonly string[]> = {
@@ -584,6 +628,8 @@ const enums: Record<string, readonly string[]> = {
   RepeatReason: repeatReasons,
   MyReviewState: myReviewStates,
   ReviewVerdict: reviewVerdicts,
+  SkillSource: skillSources,
+  "ReviewSkillChoice.kind": reviewSkillKinds,
 };
 
 describe("wire shapes (types.ts vs the Rust snapshot)", () => {

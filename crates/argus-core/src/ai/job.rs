@@ -1,6 +1,8 @@
 //! One AI run, end to end: read the diff and threads, prepare the working
-//! directory, build the prompt, run the agent (once more with a repair
-//! instruction when its answer is invalid), validate and filter.
+//! directory (and, with a local clone, a worktree at the review's head),
+//! read the repository's rules and review skill at the target branch, build
+//! the prompt, run the agent (once more with a repair instruction when its
+//! answer is invalid), validate and filter.
 //!
 //! Nothing is stored here: the runtime saves the [`RunOutput`] in one
 //! transaction, so a failed run leaves the store as it was.
@@ -12,18 +14,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::adapter::{self, Adapter, ChildSlot, Invocation, PromptDelivery, RunDirs};
+use super::context::{self, BaseFiles};
 use super::dedupe;
-use super::model::Finding;
+use super::model::{Finding, RunContext, UsedSkill};
 use super::output::{self, RunOutput};
-use super::prompt::{self, DiffScope, ExistingThread, PromptInput, Workspace};
+use super::prompt::{self, DiffScope, ExistingThread, Guidance, PromptInput, Workspace};
+use super::skills;
 use super::store::PostedIds;
 use crate::files::{review_range, since_range};
+use crate::git::worktree::{ReviewWorktree, WorktreeError};
+use crate::git::LocalClone;
 use crate::provider::{FileDiff, ReviewProvider};
 use crate::settings::Settings;
 use crate::store::{ReviewRecord, Store, StoredThread};
-
-/// Files read from a local clone's root as repository conventions.
-pub(crate) const CONVENTION_FILES: &[&str] = &["CLAUDE.md", "AGENTS.md"];
 
 /// What a queued run needs besides the store, captured when it is queued.
 #[derive(Clone)]
@@ -35,6 +38,9 @@ pub(crate) struct JobContext {
     /// The agent process while one runs; the runtime gives each started run
     /// a fresh one and kills what is in it on shutdown.
     pub child: ChildSlot,
+    /// Claude Code's config directory (`~/.claude`): where the user's and
+    /// plugins' review skills are. `None`: none are looked for.
+    pub claude_dir: Option<PathBuf>,
 }
 
 /// Prefix of a run's temp dir under the system temp dir.
@@ -171,15 +177,81 @@ pub(crate) fn known_secrets(settings: &Settings) -> Vec<String> {
         .collect()
 }
 
-/// `CLAUDE.md` / `AGENTS.md` at the clone's root, those that exist.
-pub(crate) fn conventions(clone: &Path) -> Vec<(String, String)> {
-    CONVENTION_FILES
+/// The run-state note of a run reviewed without a worktree.
+pub(crate) fn no_worktree(why: &str) -> String {
+    format!("Couldn't create a review worktree: {why}; reviewed without it")
+}
+
+/// The commit the rules and project skills are read at: the review's base
+/// (a target-branch commit: GitHub's base commit, GitLab's merge base),
+/// else, for a run over the whole diff, that diff's left side (the merge
+/// base). Never the head or the last-reviewed commit, which the merge
+/// request's author controls. `None` without one.
+fn rules_base(record: &ReviewRecord, full: bool, diff: &FileDiff) -> Option<String> {
+    let sha = if !record.base_sha.trim().is_empty() {
+        record.base_sha.trim()
+    } else if full && !diff.base_approximate {
+        diff.base_sha.trim()
+    } else {
+        ""
+    };
+    (!sha.is_empty()).then(|| sha.to_string())
+}
+
+/// Every path the review changes (for "this merge request changes the
+/// rules"): the run's diff when it is the whole review, else the clone's
+/// diff from the merge base to the head, else the run's diff.
+fn review_paths(
+    full: bool,
+    diff: &FileDiff,
+    clone: Option<&LocalClone>,
+    record: &ReviewRecord,
+) -> Vec<String> {
+    let own: Vec<String> = diff
+        .files
         .iter()
-        .filter_map(|name| {
-            let text = std::fs::read_to_string(clone.join(name)).ok()?;
-            (!text.trim().is_empty()).then(|| (name.to_string(), text))
+        .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+        .collect();
+    if full {
+        return own;
+    }
+    clone
+        .and_then(|c| {
+            let base = c.merge_base(&record.base_sha, &diff.head_sha)?;
+            c.changed_paths(&base, &diff.head_sha)
         })
-        .collect()
+        .unwrap_or(own)
+}
+
+/// The review worktree of a run, or why there is none (a note for the run
+/// state). Cancelled: the run stops.
+fn worktree_for(
+    clone_dir: Option<&Path>,
+    clone: Option<&LocalClone>,
+    record: &ReviewRecord,
+    head: &str,
+    cancel: &AtomicBool,
+) -> Result<(Option<ReviewWorktree>, Option<String>), String> {
+    let Some(dir) = clone_dir else {
+        return Ok((None, None));
+    };
+    let Some(clone) = clone else {
+        tracing::debug!("AI run: {} is no git clone Argus can use", dir.display());
+        return Ok((
+            None,
+            Some(no_worktree(
+                "the clone is not a git repository Argus can use",
+            )),
+        ));
+    };
+    match clone.review_worktree(&record.review, head, cancel) {
+        Ok(wt) => Ok((Some(wt), None)),
+        Err(WorktreeError::Cancelled) => Err(super::CANCELLED.into()),
+        Err(e) => {
+            tracing::debug!("AI run: no review worktree: {e}");
+            Ok((None, Some(no_worktree(&e.to_string()))))
+        }
+    }
 }
 
 /// Compute (and cache) the histories of the threads a later round asks about at the review's
@@ -322,27 +394,106 @@ pub(crate) fn execute(
         .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
         .collect();
 
-    let clone = ctx
+    let clone_dir = ctx
         .settings
         .clone_path(&record.review)
         .filter(|p| p.is_dir())
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    let local = clone_dir.as_deref().and_then(LocalClone::open);
+    let mut notes: Vec<String> = Vec::new();
+    // With a clone, the agent reads a worktree at the review's head (fetched
+    // when missing), removed when `worktree` drops however the run ends.
+    // Without one it reads the clone as it is, as before.
+    let (worktree, why_not) = worktree_for(
+        clone_dir.as_deref(),
+        local.as_ref(),
+        record,
+        &diff.head_sha,
+        cancel,
+    )?;
+    notes.extend(why_not);
+    if let Some(wt) = worktree.as_ref().filter(|w| w.fetched()) {
+        tracing::debug!(
+            "AI run: fetched the review's head {} into the clone",
+            wt.head()
+        );
+    }
+    check(cancel)?;
+    // The rules and the review skill, from the target branch.
+    let full = matches!(scope, DiffScope::Full(_));
+    let base = rules_base(record, full, &diff)
+        .map(|sha| BaseFiles::new(sha, local.as_ref(), Some((provider, &record.review))));
+    let diff_paths: Vec<String> = diff.files.iter().map(|f| f.path.clone()).collect();
+    let rules = base
+        .as_ref()
+        .map(|b| context::rules(b, &diff_paths))
+        .unwrap_or_default();
+    let (skill, skill_note) = skills::resolve(
+        &ctx.settings.review_skill(&record.review),
+        ctx.claude_dir.as_deref(),
+        base.as_ref(),
+    );
+    notes.extend(skill_note);
+    let changed_rules = context::rules_changed(&review_paths(full, &diff, local.as_ref(), record));
+    if !changed_rules.is_empty() {
+        notes.push(format!(
+            "This merge request changes review rules or skills ({}); the target branch's versions were used",
+            context::listed(&changed_rules)
+        ));
+    }
+    check(cancel)?;
+    // What the agent may read besides its temp dir: the worktree, else the
+    // clone as it is. The deny rules close everything around it and its
+    // secret files (`.git`, `.env`, keys).
+    let read_dir: Option<PathBuf> = worktree
+        .as_ref()
+        .map(|w| w.path().to_path_buf())
+        .or_else(|| clone_dir.clone());
     // The working directory is always the run's own temp dir: an agent
     // started in the clone would load the checkout's own agent settings
     // (hooks, env, an API key helper), which a PR branch can change.
     let temp = TempDir::new().map_err(|_| "could not create a temp dir for the run".to_string())?;
     write_snapshot(temp.path(), &diff, &threads)
         .map_err(|_| "could not write the review snapshot".to_string())?;
-    let (workspace, conventions) = match &clone {
-        Some(c) => (Workspace::Clone(c), conventions(c)),
-        None => (Workspace::Snapshot, Vec::new()),
+    let workspace = match (&worktree, &clone_dir) {
+        (Some(wt), _) => Workspace::Worktree {
+            path: wt.path(),
+            head: wt.head(),
+        },
+        (None, Some(c)) => Workspace::Clone(c),
+        (None, None) => Workspace::Snapshot,
+    };
+    let conventions: Vec<(String, String)> = rules
+        .files
+        .iter()
+        .map(|f| (f.path.clone(), f.text.clone()))
+        .collect();
+    let guidance = Guidance {
+        skill: skill.as_ref(),
+        truncated: rules
+            .files
+            .iter()
+            .filter(|f| f.truncated)
+            .map(|f| f.path.clone())
+            .collect(),
+        left_out: rules.left_out.clone(),
+        changed: changed_rules,
+    };
+    let run_context = RunContext {
+        rules_files: rules.files.iter().map(|f| f.path.clone()).collect(),
+        skill: skill.as_ref().map(|s| UsedSkill {
+            name: s.name.clone(),
+            source: s.source,
+        }),
+        worktree: worktree.is_some(),
+        notes,
     };
     let settings_file = match adapter.id {
         "claude" => {
             let mut allowed = vec![temp.path().to_path_buf()];
-            allowed.extend(clone.clone());
+            allowed.extend(read_dir.clone());
             let file = temp.path().join("claude-settings.json");
-            let json = adapter::claude_settings(&allowed, clone.as_deref()).to_string();
+            let json = adapter::claude_settings(&allowed, read_dir.as_deref()).to_string();
             std::fs::write(&file, json)
                 .map_err(|_| "could not write the agent's settings".to_string())?;
             Some(file)
@@ -385,7 +536,7 @@ pub(crate) fn execute(
     };
     let dirs = RunDirs {
         temp: temp.path(),
-        clone: clone.as_deref(),
+        clone: read_dir.as_deref(),
         settings: settings_file.as_deref(),
         listed_tools: &listed_tools,
     };
@@ -398,6 +549,7 @@ pub(crate) fn execute(
         existing,
         posted: unfetched,
         conventions,
+        guidance,
         workspace,
         nonce: &nonce,
     });
@@ -418,12 +570,15 @@ pub(crate) fn execute(
     };
     let mut run = output::filter(parsed, &paths, &known, &related);
     dedupe::classify(&mut run, &raised, &diff);
+    // The worktree goes now (it would on any early return too).
+    drop(worktree);
     Ok(RunOutput {
         // The shas of the diff actually returned (the provider's contract),
         // which for a run since the last review has the watermark as its
         // left side.
         head_sha: Some(diff.head_sha.clone()),
         base_sha: Some(diff.base_sha.clone()),
+        context: run_context,
         ..run
     })
 }

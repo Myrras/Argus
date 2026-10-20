@@ -225,6 +225,7 @@ pub fn run() {
             commands::ai::set_checklist_checked,
             commands::ai::set_verdict_override,
             commands::ai::post_findings,
+            commands::ai::list_review_skills,
             commands::open::local_files,
             commands::open::open_in_editor,
             commands::open::reveal_local_file,

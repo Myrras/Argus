@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use argus_core::ai::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPostOutcome,
-    FindingPostResult, RelatedRef, RepeatOf, RepeatReason, Severity, Verdict, VerdictLabel,
+    FindingPostResult, RelatedRef, RepeatOf, RepeatReason, ReviewSkill, ReviewSkillList,
+    RunContext, Severity, UsedSkill, Verdict, VerdictLabel,
 };
 use argus_core::files::{FileEntry, ReviewFiles};
 use argus_core::history::{
@@ -31,7 +32,8 @@ use argus_core::provider::{
 };
 use argus_core::{
     LocalFile, MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord, ReviewRefresh,
-    ReviewStatus, ReviewVerdict, RoundReason, Settings, StoredThread, ThreadId,
+    ReviewSkillChoice, ReviewStatus, ReviewVerdict, RoundReason, Settings, SkillSource,
+    StoredThread, ThreadId,
 };
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -240,6 +242,17 @@ fn timeline_entries() -> Vec<TimelineEntry> {
     all
 }
 
+fn review_skill_choices() -> Vec<ReviewSkillChoice> {
+    vec![
+        ReviewSkillChoice::Auto,
+        ReviewSkillChoice::None,
+        ReviewSkillChoice::Skill {
+            source: SkillSource::User,
+            name: "code-review".into(),
+        },
+    ]
+}
+
 /// The snapshot as the Rust types serialise today.
 fn current() -> Value {
     let t = Utc.with_ymd_and_hms(2026, 10, 10, 9, 0, 0).unwrap();
@@ -442,6 +455,15 @@ fn current() -> Value {
         dropped_duplicates: 0,
         skipped_checklist: 0,
         read_only_guaranteed: true,
+        context: Some(RunContext {
+            rules_files: vec!["CLAUDE.md".into()],
+            skill: Some(UsedSkill {
+                name: "code-review".into(),
+                source: SkillSource::Project,
+            }),
+            worktree: true,
+            notes: vec!["Couldn't create a review worktree: …".into()],
+        }),
     };
     let finding_id = FindingId::new();
     let finding = Finding {
@@ -560,6 +582,26 @@ fn current() -> Value {
             outcome: FindingPostOutcome::Failed(post_error),
         }),
     );
+    // --- Review skills ---
+    add(
+        "ReviewSkillList",
+        val(ReviewSkillList {
+            skills: vec![ReviewSkill {
+                name: "fixture-tools:code-review".into(),
+                description: Some("Reviews code.".into()),
+                source: SkillSource::Plugin,
+            }],
+            auto_pick: Some("code-review".into()),
+            project_listed: true,
+        }),
+    );
+    for choice in review_skill_choices() {
+        let v = val(&choice);
+        add(
+            &format!("ReviewSkillChoice:{}", v["kind"].as_str().unwrap()),
+            v.clone(),
+        );
+    }
     // --- Open in editor ---
     add(
         "LocalFile",
@@ -614,6 +656,11 @@ fn current() -> Value {
             ]),
         ),
         ("PostErrorKind", values(&post_error_kinds())),
+        (
+            "SkillSource",
+            values(&[SkillSource::User, SkillSource::Plugin, SkillSource::Project]),
+        ),
+        ("ReviewSkillChoice.kind", values(&review_skill_choices())),
         ("LineStatus.kind", values(&line_statuses())),
         ("LineChange.kind", values(&line_changes())),
         (

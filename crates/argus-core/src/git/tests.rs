@@ -995,6 +995,7 @@ fn a_removed_line_posts_against_the_left_side_the_clone_found() {
             provider: p.clone(),
             timeout: Duration::from_secs(20),
             child: Default::default(),
+            claude_dir: None,
         };
         let record = core.review(id).unwrap();
         let out = crate::ai::job::execute(
