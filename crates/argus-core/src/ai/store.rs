@@ -4,7 +4,8 @@
 //! findings left out as repeats of the review (migration 7,
 //! [`MIGRATION_7`]) and, since migration 9 ([`MIGRATION_9`]), those
 //! findings themselves with what they repeat, plus the platform ids of a
-//! posted finding.
+//! posted finding; since migration 10 ([`MIGRATION_10`]) the checklist
+//! items that repeat the review too, and what a finding relates to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -12,7 +13,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension, Row};
 
 use super::model::{
-    AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, RepeatOf,
+    AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, RelatedRef, RepeatOf,
     RepeatReason, Severity, Verdict, VerdictLabel,
 };
 use super::output::RunOutput;
@@ -74,6 +75,19 @@ pub(crate) const MIGRATION_9: &str = r#"
     ALTER TABLE findings ADD COLUMN posted_thread_id TEXT;
     ALTER TABLE findings ADD COLUMN posted_note_id TEXT;
     ALTER TABLE ai_runs ADD COLUMN skipped_checklist INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Migration 10: a checklist item that repeats the review is kept, set
+/// aside, like a finding (migration 9 only counted it); and a finding keeps
+/// the points the agent said it relates to (`related_to`, a JSON array of
+/// [`RelatedRef`]; NULL: none). Rows from before are no repeats and
+/// relate to nothing.
+pub(crate) const MIGRATION_10: &str = r#"
+    ALTER TABLE checklist ADD COLUMN repeat_reason TEXT;
+    ALTER TABLE checklist ADD COLUMN repeat_of_thread TEXT;
+    ALTER TABLE checklist ADD COLUMN repeat_of_finding TEXT;
+    ALTER TABLE checklist ADD COLUMN shown_anyway INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE findings ADD COLUMN related_to TEXT;
 "#;
 
 /// Error text of a run that was running when Argus stopped.
@@ -219,7 +233,9 @@ pub(crate) fn interrupt_running(store: &Store, now: DateTime<Utc>) -> CoreResult
 /// Store a successful run's output for `round` and mark the run done, in
 /// one transaction. A rerun of the same round replaces that round's
 /// unposted findings (repeats of the review included) and its checklist
-/// (keeping dismissed, shown-anyway and checked marks on identical items)
+/// (repeats included; keeping dismissed and shown-anyway marks on a finding
+/// with the same path, line, side and title, and checked and shown-anyway
+/// marks on an item with the same text)
 /// and the AI half of its verdicts (keeping overrides; a thread the rerun
 /// says nothing about loses its stale AI half). A finding identical to one
 /// of the round already posted is not stored again, so it cannot be posted
@@ -236,36 +252,21 @@ pub(crate) fn save_done(
     let tx = conn.transaction()?;
     let rid = review.to_string();
 
-    let dismissed: HashSet<(String, u32, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT path, line, title FROM findings
-             WHERE review_id = ?1 AND round = ?2 AND dismissed = 1",
-        )?;
-        let rows = stmt.query_map(params![rid, round], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?;
-        rows.collect::<Result<_, _>>()?
-    };
-    let shown_anyway: HashSet<(String, u32, String)> = {
-        let mut stmt = tx.prepare(
-            "SELECT path, line, title FROM findings
-             WHERE review_id = ?1 AND round = ?2 AND shown_anyway = 1",
-        )?;
-        let rows = stmt.query_map(params![rid, round], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })?;
-        rows.collect::<Result<_, _>>()?
-    };
-    let posted: HashSet<(String, u32, String, String)> = {
-        let mut stmt = tx.prepare(
+    // A finding of this round with `mark` set, by path, line, side and
+    // title (one on the other side of the same line is another finding).
+    let marked = |mark: &str| -> CoreResult<HashSet<(String, u32, String, String)>> {
+        let mut stmt = tx.prepare(&format!(
             "SELECT path, line, side, title FROM findings
-             WHERE review_id = ?1 AND round = ?2 AND posted_at IS NOT NULL",
-        )?;
+             WHERE review_id = ?1 AND round = ?2 AND {mark}"
+        ))?;
         let rows = stmt.query_map(params![rid, round], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
-        rows.collect::<Result<_, _>>()?
+        Ok(rows.collect::<Result<_, _>>()?)
     };
+    let dismissed = marked("dismissed = 1")?;
+    let shown_anyway = marked("shown_anyway = 1")?;
+    let posted = marked("posted_at IS NOT NULL")?;
     tx.execute(
         "DELETE FROM findings WHERE review_id = ?1 AND round = ?2 AND posted_at IS NULL",
         params![rid, round],
@@ -276,14 +277,19 @@ pub(crate) fn save_done(
         if posted.contains(&key) {
             continue;
         }
-        let key = (f.path.clone(), f.line, f.title.clone());
         let was_dismissed = dismissed.contains(&key);
         let repeat = f.repeat.map(|r| r.repeat_of());
+        let related: Vec<RelatedRef> = f.related_to.iter().map(|r| r.related_ref()).collect();
+        let related = if related.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&related).map_err(|e| CoreError::Store(e.to_string()))?)
+        };
         tx.execute(
             "INSERT INTO findings (id, review_id, round, path, line, side, severity, title, body,
                 dismissed, head_sha, base_sha, repeat_reason, repeat_of_thread,
-                repeat_of_finding, shown_anyway)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                repeat_of_finding, shown_anyway, related_to)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 FindingId::new().to_string(),
                 rid,
@@ -307,31 +313,47 @@ pub(crate) fn save_done(
                     .and_then(|r| r.finding_id)
                     .map(|f| f.to_string()),
                 repeat.is_some() && shown_anyway.contains(&key),
+                related,
             ],
         )?;
     }
 
-    let checked: HashSet<String> = {
-        let mut stmt = tx.prepare(
-            "SELECT text FROM checklist WHERE review_id = ?1 AND round = ?2 AND checked = 1",
-        )?;
+    // An item of this round with `mark` set, by text.
+    let items = |mark: &str| -> CoreResult<HashSet<String>> {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT text FROM checklist WHERE review_id = ?1 AND round = ?2 AND {mark}"
+        ))?;
         let rows = stmt.query_map(params![rid, round], |r| r.get(0))?;
-        rows.collect::<Result<_, _>>()?
+        Ok(rows.collect::<Result<_, _>>()?)
     };
+    let checked = items("checked = 1")?;
+    let shown_items = items("shown_anyway = 1")?;
     tx.execute(
         "DELETE FROM checklist WHERE review_id = ?1 AND round = ?2",
         params![rid, round],
     )?;
-    for text in out.checklist.iter().map(|c| &c.text) {
+    for c in &out.checklist {
+        let repeat = c.repeat.map(|r| r.repeat_of());
         tx.execute(
-            "INSERT INTO checklist (id, review_id, round, text, checked)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO checklist (id, review_id, round, text, checked, repeat_reason,
+                repeat_of_thread, repeat_of_finding, shown_anyway)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 ChecklistId::new().to_string(),
                 rid,
                 round,
-                text,
-                checked.contains(text)
+                c.text,
+                checked.contains(&c.text),
+                repeat.as_ref().map(|r| r.reason.as_str()),
+                repeat
+                    .as_ref()
+                    .and_then(|r| r.thread_id)
+                    .map(|t| t.to_string()),
+                repeat
+                    .as_ref()
+                    .and_then(|r| r.finding_id)
+                    .map(|f| f.to_string()),
+                repeat.is_some() && shown_items.contains(&c.text),
             ],
         )?;
     }
@@ -394,10 +416,31 @@ fn side_str(side: Side) -> &'static str {
 }
 
 const FINDING_COLUMNS: &str = "id, review_id, round, path, line, side, severity, title, body,
-    dismissed, posted_at, posted_url, repeat_reason, repeat_of_thread, repeat_of_finding";
+    dismissed, posted_at, posted_url, repeat_reason, repeat_of_thread, repeat_of_finding,
+    related_to";
 
-/// A finding set aside as a repeat of the review, not shown anyway.
+/// A finding or checklist item set aside as a repeat of the review, not
+/// shown anyway.
 const SKIPPED: &str = "repeat_reason IS NOT NULL AND shown_anyway = 0";
+
+/// The repeat mark in columns `at` (reason), `at + 1` (thread) and `at + 2`
+/// (posted finding).
+fn repeat_at(r: &Row<'_>, at: usize) -> rusqlite::Result<Option<RepeatOf>> {
+    let Some(reason) = r.get::<_, Option<String>>(at)? else {
+        return Ok(None);
+    };
+    Ok(Some(RepeatOf {
+        reason: RepeatReason::parse(&reason).ok_or_else(|| bad("repeat reason"))?,
+        thread_id: r
+            .get::<_, Option<String>>(at + 1)?
+            .map(|t| t.parse().map_err(|_| bad("thread id")))
+            .transpose()?,
+        finding_id: r
+            .get::<_, Option<String>>(at + 2)?
+            .map(|f| f.parse().map_err(|_| bad("finding id")))
+            .transpose()?,
+    }))
+}
 
 fn finding_row(r: &Row<'_>) -> rusqlite::Result<Finding> {
     let id: String = r.get(0)?;
@@ -420,19 +463,10 @@ fn finding_row(r: &Row<'_>) -> rusqlite::Result<Finding> {
         dismissed: r.get(9)?,
         posted_at: r.get(10)?,
         posted_url: r.get(11)?,
-        repeat_of: match r.get::<_, Option<String>>(12)? {
-            None => None,
-            Some(reason) => Some(RepeatOf {
-                reason: RepeatReason::parse(&reason).ok_or_else(|| bad("repeat reason"))?,
-                thread_id: r
-                    .get::<_, Option<String>>(13)?
-                    .map(|t| t.parse().map_err(|_| bad("thread id")))
-                    .transpose()?,
-                finding_id: r
-                    .get::<_, Option<String>>(14)?
-                    .map(|f| f.parse().map_err(|_| bad("finding id")))
-                    .transpose()?,
-            }),
+        repeat_of: repeat_at(r, 12)?,
+        related_to: match r.get::<_, Option<String>>(15)? {
+            None => Vec::new(),
+            Some(json) => serde_json::from_str(&json).map_err(|_| bad("related points"))?,
         },
     })
 }
@@ -585,6 +619,9 @@ pub(crate) fn mark_posted(
     Ok(())
 }
 
+const CHECKLIST_COLUMNS: &str =
+    "id, review_id, round, text, checked, repeat_reason, repeat_of_thread, repeat_of_finding";
+
 fn checklist_row(r: &Row<'_>) -> rusqlite::Result<ChecklistItem> {
     let id: String = r.get(0)?;
     let review: String = r.get(1)?;
@@ -594,19 +631,57 @@ fn checklist_row(r: &Row<'_>) -> rusqlite::Result<ChecklistItem> {
         round: r.get(2)?,
         text: r.get(3)?,
         checked: r.get(4)?,
+        repeat_of: repeat_at(r, 5)?,
     })
 }
 
-/// Every checklist item of `review`: newest round first, in the order the
-/// agent gave them.
+/// Every checklist item of `review` shown as one: newest round first, in
+/// the order the agent gave them. Repeats of the review are left out unless
+/// shown anyway ([`skipped_checklist`]).
 pub(crate) fn checklist(store: &Store, review: ReviewId) -> CoreResult<Vec<ChecklistItem>> {
+    checklist_where(store, review, &format!("NOT ({SKIPPED})"))
+}
+
+/// The checklist items of `review` set aside as repeats of the review, in
+/// the same order.
+pub(crate) fn skipped_checklist(store: &Store, review: ReviewId) -> CoreResult<Vec<ChecklistItem>> {
+    checklist_where(store, review, SKIPPED)
+}
+
+fn checklist_where(
+    store: &Store,
+    review: ReviewId,
+    filter: &str,
+) -> CoreResult<Vec<ChecklistItem>> {
     let conn = store.conn();
-    let mut stmt = conn.prepare(
-        "SELECT id, review_id, round, text, checked FROM checklist WHERE review_id = ?1
-         ORDER BY round DESC, rowid",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHECKLIST_COLUMNS} FROM checklist WHERE review_id = ?1 AND {filter}
+         ORDER BY round DESC, rowid"
+    ))?;
     let rows = stmt.query_map([review.to_string()], checklist_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn checklist_item(conn: &rusqlite::Connection, id: ChecklistId) -> CoreResult<ChecklistItem> {
+    Ok(conn.query_row(
+        &format!("SELECT {CHECKLIST_COLUMNS} FROM checklist WHERE id = ?1"),
+        [id.to_string()],
+        checklist_row,
+    )?)
+}
+
+/// Show a checklist item set aside as a repeat anyway: it becomes a normal
+/// item (keeping what it repeats). Local only.
+pub(crate) fn show_item_anyway(store: &Store, id: ChecklistId) -> CoreResult<ChecklistItem> {
+    let conn = store.conn();
+    let n = conn.execute(
+        "UPDATE checklist SET shown_anyway = 1 WHERE id = ?1",
+        params![id.to_string()],
+    )?;
+    if n == 0 {
+        return Err(CoreError::NotFound);
+    }
+    checklist_item(&conn, id)
 }
 
 pub(crate) fn set_checked(
@@ -622,11 +697,7 @@ pub(crate) fn set_checked(
     if n == 0 {
         return Err(CoreError::NotFound);
     }
-    Ok(conn.query_row(
-        "SELECT id, review_id, round, text, checked FROM checklist WHERE id = ?1",
-        [id.to_string()],
-        checklist_row,
-    )?)
+    checklist_item(&conn, id)
 }
 
 fn label(s: Option<String>) -> rusqlite::Result<Option<VerdictLabel>> {

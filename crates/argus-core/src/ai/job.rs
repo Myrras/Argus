@@ -546,6 +546,7 @@ mod tests {
                 "https://github.example.test/acme-fixture/widgets/pull/12#discussion_r501".into(),
             ),
             repeat_of: None,
+            related_to: Vec::new(),
         };
         // The user rewrote the text before posting: the comment id finds it.
         let mut mine = stored(ME, "Rewritten: the loop stops one early.");

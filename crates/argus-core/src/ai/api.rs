@@ -57,14 +57,32 @@ impl Core {
         ai_store::show_anyway(&self.store, id)
     }
 
-    /// The review's "look here yourself" items, newest round first. Empty
-    /// when the AI pass is off.
+    /// The review's "look here yourself" items, newest round first. Items
+    /// set aside as repeats of the review are left out unless shown anyway.
+    /// Empty when the AI pass is off.
     pub fn checklist(&self, id: ReviewId) -> CoreResult<Vec<ChecklistItem>> {
         self.review(id)?;
         if !self.ai.enabled() {
             return Ok(Vec::new());
         }
         ai_store::checklist(&self.store, id)
+    }
+
+    /// The review's checklist items set aside as repeats of the review, with
+    /// what each repeats; same order as [`checklist`](Core::checklist).
+    /// Empty when the AI pass is off.
+    pub fn skipped_checklist(&self, id: ReviewId) -> CoreResult<Vec<ChecklistItem>> {
+        self.review(id)?;
+        if !self.ai.enabled() {
+            return Ok(Vec::new());
+        }
+        ai_store::skipped_checklist(&self.store, id)
+    }
+
+    /// Show a checklist item set aside as a repeat anyway: from now on it is
+    /// one of [`checklist`](Core::checklist). Local only.
+    pub fn show_checklist_item_anyway(&self, id: ChecklistId) -> CoreResult<ChecklistItem> {
+        ai_store::show_item_anyway(&self.store, id)
     }
 
     /// The current verdict per thread of the review (its latest round's).

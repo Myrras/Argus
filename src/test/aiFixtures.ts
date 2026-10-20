@@ -43,6 +43,7 @@ export function finding(overrides: Partial<Finding> = {}): Finding {
     postedAt: null,
     postedUrl: null,
     repeatOf: null,
+    relatedTo: [],
     ...overrides,
   };
 }
@@ -57,6 +58,7 @@ export function checklistItem(
     round: 1,
     text: `Check fixture thing ${seq}`,
     checked: false,
+    repeatOf: null,
     ...overrides,
   };
 }

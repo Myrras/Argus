@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::adapter::{self, AgentError, Invocation, OutputKind};
+use super::dedupe::RaisedRef;
 use super::job::{self, JobContext};
 use super::model::{AiRunStatus, RepeatOf, RepeatReason, Severity, VerdictLabel};
 use super::output::{RawFinding, RunOutput};
@@ -117,6 +118,7 @@ fn finding(path: &str, line: u32, severity: Severity, title: &str) -> RawFinding
         body: "why".into(),
         related: Vec::new(),
         repeat: None,
+        related_to: Vec::new(),
     }
 }
 
@@ -407,6 +409,57 @@ fn an_override_survives_a_newer_round() {
     assert_eq!(vs[0].ai_label, Some(VerdictLabel::Partly));
     assert_eq!(vs[0].user_override, Some(VerdictLabel::Addressed));
     assert_eq!(vs[0].label, Some(VerdictLabel::Addressed));
+}
+
+/// "Show anyway" survives a rerun of the round on the same finding only:
+/// the same path, line, side and title (the other side of the line is
+/// another finding), and on a checklist item with the same text.
+#[test]
+fn a_rerun_keeps_shown_anyway_on_the_same_side_and_text_only() {
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let t = ThreadId::from_key(r.id, "t");
+    let repeat = Some(super::dedupe::Repeat {
+        reason: RepeatReason::Similar,
+        of: RaisedRef::Thread(t),
+    });
+    let mut old = finding("src/a.rs", 3, Severity::Medium, "Off by one");
+    old.side = Side::Old;
+    old.repeat = repeat;
+    let new = RawFinding {
+        side: Side::New,
+        ..old.clone()
+    };
+    let mut item = super::output::RawCheck::from("Is the TTL intended?");
+    item.repeat = repeat;
+    let out = RunOutput {
+        findings: vec![old, new],
+        checklist: vec![item.clone(), item],
+        ..RunOutput::default()
+    };
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 1)).unwrap();
+    ai_store::save_done(&store, r.id, 1, &out, at(10, 2)).unwrap();
+    let skipped = ai_store::skipped_findings(&store, r.id).unwrap();
+    assert_eq!(skipped.len(), 2);
+    let on_new = skipped.iter().find(|f| f.side == Side::New).unwrap();
+    ai_store::show_anyway(&store, on_new.id).unwrap();
+    let items = ai_store::skipped_checklist(&store, r.id).unwrap();
+    assert_eq!(items.len(), 2);
+    ai_store::show_item_anyway(&store, items[0].id).unwrap();
+
+    ai_store::save_done(&store, r.id, 1, &out, at(10, 3)).unwrap();
+    let shown = ai_store::findings(&store, r.id).unwrap();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0].side, Side::New);
+    let still = ai_store::skipped_findings(&store, r.id).unwrap();
+    assert_eq!(still.len(), 1);
+    assert_eq!(still[0].side, Side::Old);
+    // Items are keyed by text: both identical ones come back shown.
+    assert_eq!(ai_store::checklist(&store, r.id).unwrap().len(), 2);
+    assert!(ai_store::skipped_checklist(&store, r.id)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1623,6 +1676,7 @@ fn a_later_round_does_not_repeat_a_finding_the_user_posted() {
             body: "Every lookup misses.".into(),
             related: Vec::new(),
             repeat: None,
+            related_to: Vec::new(),
         }],
         ..RunOutput::default()
     };
@@ -1677,7 +1731,7 @@ fn a_later_round_does_not_repeat_a_finding_the_user_posted() {
 
 #[test]
 #[cfg_attr(windows, ignore)]
-fn the_agents_related_threads_catch_paraphrases_and_dutch_comments() {
+fn the_agents_related_threads_set_aside_what_shares_their_words_and_tag_the_rest() {
     let bin = tempfile::tempdir().unwrap();
     let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
     let store = Store::in_memory().unwrap();
@@ -1720,7 +1774,11 @@ fn the_agents_related_threads_catch_paraphrases_and_dutch_comments() {
             {"path": "src/a.rs", "line": 2, "side": "new", "severity": "low",
              "title": "The widget map is never cleared on logout",
              "body": "Entries of a logged-out user stay in memory for good; clear them in `logout`.",
-             "relatedThreadIds": [bob, "00000000-0000-4000-8000-000000000000"]}
+             "relatedThreadIds": [bob, "00000000-0000-4000-8000-000000000000"]},
+            {"path": "src/a.rs", "line": 40, "side": "new", "severity": "medium",
+             "title": "Lookups by widget id are linear",
+             "body": "Every lookup scans the widgets; a HashMap keyed by id avoids the scan.",
+             "relatedThreadIds": [bob]}
         ],
         "checklist": [
             {"text": "Do old cache entries need a migration on upgrade?", "relatedThreadIds": [dave]},
@@ -1751,18 +1809,41 @@ fn the_agents_related_threads_catch_paraphrases_and_dutch_comments() {
             finding_id: None,
         })
     };
+    // A paraphrase sharing two words, a high finding in another language
+    // and a new part are kept, naming the thread; the closer wording far
+    // from the thread is set aside on the agent's mark.
     assert_eq!(
         marks,
         vec![
-            ("Finding a widget walks the whole Vec", agent(&bob)),
-            ("Indexing an empty items list panics", agent(&carol)),
+            ("Finding a widget walks the whole Vec", None),
+            ("Indexing an empty items list panics", None),
             ("The widget map is never cleared on logout", None),
+            ("Lookups by widget id are linear", agent(&bob)),
+        ]
+    );
+    let thread = |t: &str| RaisedRef::Thread(t.parse().unwrap());
+    let related: Vec<_> = out.findings.iter().map(|f| f.related_to.clone()).collect();
+    assert_eq!(
+        related,
+        vec![
+            vec![thread(&bob)],
+            vec![thread(&carol)],
+            vec![thread(&bob)],
+            vec![thread(&bob)]
         ]
     );
     // The unknown id left the list, not the finding.
     assert_eq!(out.findings[2].related, vec![bob.clone()]);
-    assert_eq!(out.dropped_duplicates, 2);
-    assert_eq!(out.checklist, vec!["Is turning the cache off intended?"]);
+    assert_eq!(out.dropped_duplicates, 1);
+    // Both items kept; the repeat marked.
+    assert_eq!(
+        out.checklist,
+        vec![
+            "Do old cache entries need a migration on upgrade?",
+            "Is turning the cache off intended?"
+        ]
+    );
+    assert!(out.checklist[0].repeat.is_some() && out.checklist[1].repeat.is_none());
     assert_eq!(out.skipped_checklist, 1);
     let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
     assert!(stdin.contains("relatedThreadIds (every finding and checklist item)"));
@@ -1774,9 +1855,25 @@ fn the_agents_related_threads_catch_paraphrases_and_dutch_comments() {
         .unwrap()
         .unwrap()
         .state(true, false);
-    assert_eq!((state.dropped_duplicates, state.skipped_checklist), (2, 1));
-    assert_eq!(ai_store::skipped_findings(&store, r.id).unwrap().len(), 2);
+    assert_eq!((state.dropped_duplicates, state.skipped_checklist), (1, 1));
+    assert_eq!(ai_store::skipped_findings(&store, r.id).unwrap().len(), 1);
+    // What a kept finding relates to survives the store.
+    let shown = ai_store::findings(&store, r.id).unwrap();
+    let dutch = shown.iter().find(|f| f.severity == Severity::High).unwrap();
+    assert_eq!(
+        dutch.related_to,
+        vec![RelatedRef {
+            thread_id: Some(carol.parse().unwrap()),
+            finding_id: None
+        }]
+    );
     assert_eq!(ai_store::checklist(&store, r.id).unwrap().len(), 1);
+    let skipped = ai_store::skipped_checklist(&store, r.id).unwrap();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(
+        skipped[0].repeat_of.as_ref().map(|r| r.thread_id),
+        Some(Some(dave.parse().unwrap()))
+    );
 }
 
 /// A later-round review with one open thread of the user's, `t1`, on head

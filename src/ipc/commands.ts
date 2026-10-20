@@ -241,6 +241,20 @@ export function showFindingAnyway(findingId: FindingId): Promise<Finding> {
   return invoke("show_finding_anyway", { findingId });
 }
 
+/** The review's checklist items set aside as already raised in the review. */
+export function listSkippedChecklist(
+  reviewId: ReviewId,
+): Promise<ChecklistItem[]> {
+  return invoke("list_skipped_checklist", { reviewId });
+}
+
+/** Show a set-aside checklist item anyway: it becomes a normal item. Local only. */
+export function showChecklistItemAnyway(
+  checklistId: ChecklistId,
+): Promise<ChecklistItem> {
+  return invoke("show_checklist_item_anyway", { checklistId });
+}
+
 /** Queue a run now; rejects with `invalidInput` when the AI pass is off. */
 export function runAi(reviewId: ReviewId): Promise<AiRunState> {
   return invoke("run_ai", { reviewId });

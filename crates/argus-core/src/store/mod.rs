@@ -177,6 +177,9 @@ const MIGRATIONS: &[&str] = &[
     // 9: findings set aside as repeats of the review, kept with what they
     // repeat; a posted finding's platform ids; checklist repeats counted.
     crate::ai::store::MIGRATION_9,
+    // 10: checklist items set aside as repeats of the review, kept; the
+    // points a finding relates to.
+    crate::ai::store::MIGRATION_10,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus

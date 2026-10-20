@@ -545,6 +545,18 @@ export interface Finding {
    * aside as already raised, and kept once the user shows it anyway.
    */
   repeatOf: RepeatOf | null;
+  /**
+   * The points of the review the agent said this overlaps, when it does not
+   * repeat them ("related to bob's comment"). A high-severity finding is
+   * never set aside on the agent's mark alone: it lists them here.
+   */
+  relatedTo: RelatedRef[];
+}
+
+/** `ai::RelatedRef`: a thread of the review, or a posted finding. */
+export interface RelatedRef {
+  threadId: ThreadId | null;
+  findingId: FindingId | null;
 }
 
 /**
@@ -567,6 +579,11 @@ export interface ChecklistItem {
   round: number;
   text: string;
   checked: boolean;
+  /**
+   * What the review already says that this repeats: set on an item set
+   * aside as already raised, and kept once the user shows it anyway.
+   */
+  repeatOf: RepeatOf | null;
 }
 
 /** `ai::FindingPost`: a finding to post, with the user's edit of its text. */

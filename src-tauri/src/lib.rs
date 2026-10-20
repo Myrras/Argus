@@ -200,6 +200,8 @@ pub fn run() {
             commands::ai::list_verdicts,
             commands::ai::list_skipped_findings,
             commands::ai::show_finding_anyway,
+            commands::ai::list_skipped_checklist,
+            commands::ai::show_checklist_item_anyway,
             commands::ai::run_ai,
             commands::ai::cancel_ai,
             commands::ai::dismiss_finding,

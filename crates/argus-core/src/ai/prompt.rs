@@ -1408,6 +1408,7 @@ mod tests {
             posted_at: Some(at(2, 2)),
             posted_url: None,
             repeat_of: None,
+            related_to: Vec::new(),
         };
         let p = build(&PromptInput {
             record: &record,
@@ -1629,6 +1630,7 @@ mod tests {
                 posted_at: Some(at(2, 2)),
                 posted_url: None,
                 repeat_of: None,
+                related_to: Vec::new(),
             })
             .collect();
         let posted: Vec<&Finding> = posted.iter().collect();

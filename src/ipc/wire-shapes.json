@@ -118,6 +118,10 @@
     "ChecklistItem": [
       "checked",
       "id",
+      "repeatOf",
+      "repeatOf.findingId",
+      "repeatOf.reason",
+      "repeatOf.threadId",
       "reviewId",
       "round",
       "text"
@@ -139,6 +143,9 @@
       "path",
       "postedAt",
       "postedUrl",
+      "relatedTo",
+      "relatedTo[].findingId",
+      "relatedTo[].threadId",
       "repeatOf",
       "repeatOf.findingId",
       "repeatOf.reason",

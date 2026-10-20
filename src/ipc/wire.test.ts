@@ -351,6 +351,7 @@ const finding: Finding = {
   postedAt: T,
   postedUrl: "u",
   repeatOf: { reason: "agentMarked", threadId: THREAD, findingId: FINDING },
+  relatedTo: [{ threadId: THREAD, findingId: FINDING }],
 };
 
 const checklist: ChecklistItem = {
@@ -359,6 +360,7 @@ const checklist: ChecklistItem = {
   round: 2,
   text: "Is this intended?",
   checked: false,
+  repeatOf: { reason: "similar", threadId: THREAD, findingId: FINDING },
 };
 
 const verdict: Verdict = {
