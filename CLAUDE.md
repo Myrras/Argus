@@ -102,8 +102,9 @@ sibling app Iris (`../Iris`).
   cached per review + stored head). `PostError { kind, message }` → `IpcError`
   by `kind.as_str()`; new kinds `postRejected`, `lineNotInDiff`,
   `headMoved`. Shell `commands/post.rs` emits `review:changed` after every
-  successful write. Only these four commands write, each from a button or
-  shortcut handler; nothing auto-posts.
+  successful write. Only these commands (plus `submit_review` and
+  `post_findings`) write, each from a button or shortcut handler; nothing
+  auto-posts.
   - UI: `DiffEditor` takes `items` (blocks under lines besides threads) and
     `comment` (`CommentGutter`: "+" on commentable lines per side, click /
     shift-click / drag, selection + focused-line decorations); the unified
@@ -113,7 +114,8 @@ sibling app Iris (`../Iris`).
     the one composer, reply composers, the focused line; `CommentComposer`
     (textarea + Preview via `Markdown`) and `CommentBlocks`
     (`InlineComposer`, `DraftBlock`, `ReplyComposer`). Header: pending
-    count + Post all, Approve… with `ApproveModal`. Keys `commentLine`
+    count + Post all, Submit review… with `SubmitReviewModal` (see Review
+    state below; it replaced Approve… / `ApproveModal`). Keys `commentLine`
     (`files`), `submitComment` / `cancelComment` (new `composer` scope;
     Escape is `fixed`). Ranges: `lib/commentRanges` (one hunk).
 - ✅ **Milestone 3 — Thread history.** Core `history/`:
@@ -234,6 +236,41 @@ sibling app Iris (`../Iris`).
     reply, `h` then/now, `c` comment, `v` viewed, `a` AI panel, `x` select,
     `e` edit, `d` dismiss finding; composer `Mod+Enter` submit, `Esc`
     (fixed) cancel.
+
+- ✅ **Review state — the platform decides the tabs; Submit review.**
+  Providers report the user's own reviewer state (`MyReviewState`:
+  `awaitingReview`, `reviewStarted`, `requestedChanges`, `commented`,
+  `approved`, `notReviewer`; GitLab `/reviewers` `state`, GitHub
+  `requested_reviewers` + latest standing review), when they last submitted
+  a review on the platform and at which head (`my_reviewed_at/sha`: GitHub
+  the latest review's `submitted_at`/`commit_id`; GitLab the newest
+  "approved this merge request" / "requested changes" system note of theirs
+  from `notes?sort=desc`, one page, at the diff version current then) and
+  the newest "requested review from @me" note (`review_requested_at`,
+  parsed by `gitlab::requested_reviewers`). Migration 13 stores the three
+  `my_*` columns (12 is the thread resolve's). `review::classify`: approved
+  → Approved; closed → Closed; owed (awaiting / started) → Needs review,
+  or Needs re-review with `reRequested` once the user reviewed on the
+  platform or a request is newer than Argus' watermark (never an edge
+  between polls); otherwise the later of Argus' watermark and the platform
+  review is the watermark (a dated verdict without either waits on the
+  author). `rerequested_at` = max(edge, platform). Core
+  `post/submit.rs`: `Core::submit_review(id, verdict, seen_head, summary)`
+  (head checks as approve; GitHub `POST pulls/{n}/reviews` `event` +
+  `commit_id` + `body`, summary required for request changes / comment;
+  GitLab approve = `approve`, request changes = the `/request_changes`
+  quick action note after `GET /version` ≥ 17.2 and a reviewer check,
+  verified by the 202 and `/reviewers`, else `unsupported` — REST
+  `bulk_publish reviewer_state` is 19.2+ only — then the summary as a
+  note); an approval marks every file of the diff at that head viewed
+  (`Store::set_viewed_all`). `approve_review` delegates to it. The local
+  `mark_reviewed` stays core-only (no IPC). UI: `SubmitReviewModal`
+  (verdict radios per `lib/reviews.verdictsFor`, summary Write/Preview,
+  "Post N pending comments with it" via `commentStore.postAll`, aborting
+  and listing refused drafts), `reviewStore.submit` + `justApproved`
+  (`APPROVED_LINGER_MS` "Approved ✓" in its old tab, kept across list
+  reloads), overlay confirm `{ kind: "submit", verdict? }`, key
+  `submitReview` (⇧S, scope `files`).
 
 ## Architecture
 
