@@ -30,8 +30,10 @@ import type {
   ThreadId,
 } from "../ipc/types";
 import {
+  RELATED_HINT,
   REPEAT_REASON_HINT,
   SEVERITY_LABEL,
+  SHOWN_ANYWAY_HINT,
   SEVERITY_TONE,
   findingLocation,
   fromEarlierRound,
@@ -200,11 +202,7 @@ function FindingRow({
               reviewId={reviewId}
               threadId={pointed.threadId}
               findingId={pointed.findingId}
-              title={
-                f.repeatOf
-                  ? "Shown anyway: the review already makes this point"
-                  : "The AI said this overlaps that comment; it describes the new part"
-              }
+              title={f.repeatOf ? SHOWN_ANYWAY_HINT : RELATED_HINT}
             >
               {related ?? `repeats ${repeatTarget(f, threads)}`}
             </PointLink>
@@ -246,7 +244,7 @@ const NO_THREADS: StoredThread[] = [];
  * A link to a point of the review: focuses its thread, or scrolls to the
  * posted finding. Disabled when neither is loaded.
  */
-function PointLink({
+export function PointLink({
   reviewId,
   threadId,
   findingId,

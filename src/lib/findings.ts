@@ -187,6 +187,14 @@ export const REPEAT_REASON_HINT: Record<RepeatReason, string> = {
   similar: "Argus found the same point in this thread, near the same lines",
 };
 
+/** Tooltip of a "related to …" tag. */
+export const RELATED_HINT =
+  "Close to that comment (the AI's mark or the same words), but kept as a point of its own";
+
+/** Tooltip of a "repeats …" tag on a finding or item shown anyway. */
+export const SHOWN_ANYWAY_HINT =
+  "Shown anyway: the review already makes this point";
+
 /**
  * A point of the review by who made it: "bob's comment", "your comment" (a
  * thread the user started), "your posted finding", or "an existing comment"
@@ -214,12 +222,13 @@ export function repeatTarget(
 }
 
 /**
- * "related to bob's comment" ("… and 1 more") for a finding the agent tied
- * to points of the review it does not repeat; `null` for none, or for one
- * marked as a repeat (it says "repeats …" instead).
+ * "related to bob's comment" ("… and 1 more") for a finding or checklist
+ * item tied to points of the review it does not repeat (the agent's mark,
+ * or close in words); `null` for none, or for one marked as a repeat (it
+ * says "repeats …" instead).
  */
 export function relatedLabel(
-  f: Finding,
+  f: Pick<Finding, "relatedTo" | "repeatOf">,
   threads: readonly StoredThread[],
 ): string | null {
   const [first, ...rest] = f.relatedTo;

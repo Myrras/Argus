@@ -118,6 +118,9 @@
     "ChecklistItem": [
       "checked",
       "id",
+      "relatedTo",
+      "relatedTo[].findingId",
+      "relatedTo[].threadId",
       "repeatOf",
       "repeatOf.findingId",
       "repeatOf.reason",

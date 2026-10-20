@@ -361,6 +361,7 @@ const checklist: ChecklistItem = {
   text: "Is this intended?",
   checked: false,
   repeatOf: { reason: "similar", threadId: THREAD, findingId: FINDING },
+  relatedTo: [{ threadId: THREAD, findingId: FINDING }],
 };
 
 const verdict: Verdict = {

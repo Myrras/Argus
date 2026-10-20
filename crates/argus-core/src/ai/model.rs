@@ -22,7 +22,7 @@
 //! interface RelatedRef { threadId: string | null; findingId: string | null }
 //! interface ChecklistItem {
 //!   id: string; reviewId: string; round: number; text: string; checked: boolean;
-//!   repeatOf: RepeatOf | null;
+//!   repeatOf: RepeatOf | null; relatedTo: RelatedRef[];
 //! }
 //! interface FindingPost { findingId: string; body?: string }  // body: the user's edit
 //! type FindingPostResult = { findingId: string } & (
@@ -238,11 +238,13 @@ pub struct Finding {
     /// finding with it is listed under "Skipped as already raised" until
     /// the user shows it anyway (it keeps the mark then).
     pub repeat_of: Option<RepeatOf>,
-    /// The points of the review the agent said this finding overlaps
-    /// (`relatedThreadIds`) when it does not repeat them: shown as a tag
-    /// ("related to bob's comment"), so a new point on a discussed line is
-    /// seen as such. A high-severity finding the agent marked is never set
-    /// aside on that mark alone; it lists here instead.
+    /// The points of the review this finding overlaps without repeating
+    /// them: the ones the agent marked (`relatedThreadIds`), then the ones
+    /// Argus finds it close to (`super::dedupe`). Shown as a tag ("related
+    /// to bob's comment"), so a new point on a discussed line, or a close
+    /// call the filter kept, is seen as such. A high-severity finding the
+    /// agent marked is never set aside on that mark alone; it lists here
+    /// instead.
     pub related_to: Vec<RelatedRef>,
 }
 
@@ -339,6 +341,9 @@ pub struct ChecklistItem {
     /// item is listed under "Skipped as already raised" until the user
     /// shows it anyway (it keeps the mark then).
     pub repeat_of: Option<RepeatOf>,
+    /// The points of the review it relates to without repeating them, as
+    /// [`Finding::related_to`].
+    pub related_to: Vec<RelatedRef>,
 }
 
 /// How far a later round addressed one of the user's threads.

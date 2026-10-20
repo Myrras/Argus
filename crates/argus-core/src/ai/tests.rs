@@ -1782,7 +1782,7 @@ fn the_agents_related_threads_set_aside_what_shares_their_words_and_tag_the_rest
         ],
         "checklist": [
             {"text": "Do old cache entries need a migration on upgrade?", "relatedThreadIds": [dave]},
-            {"text": "Is turning the cache off intended?", "relatedThreadIds": []}
+            {"text": "Is turning the cache off intended?", "relatedThreadIds": [dave]}
         ],
         "verdicts": []
     });
@@ -1845,6 +1845,8 @@ fn the_agents_related_threads_set_aside_what_shares_their_words_and_tag_the_rest
     );
     assert!(out.checklist[0].repeat.is_some() && out.checklist[1].repeat.is_none());
     assert_eq!(out.skipped_checklist, 1);
+    // The kept item the agent marked names the thread, as a finding does.
+    assert_eq!(out.checklist[1].related_to, vec![thread(&dave)]);
     let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
     assert!(stdin.contains("relatedThreadIds (every finding and checklist item)"));
     assert!(stdin.contains(&format!("## id: {bob} · open ·")));
@@ -1867,7 +1869,15 @@ fn the_agents_related_threads_set_aside_what_shares_their_words_and_tag_the_rest
             finding_id: None
         }]
     );
-    assert_eq!(ai_store::checklist(&store, r.id).unwrap().len(), 1);
+    let items = ai_store::checklist(&store, r.id).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        items[0].related_to,
+        vec![RelatedRef {
+            thread_id: Some(dave.parse().unwrap()),
+            finding_id: None
+        }]
+    );
     let skipped = ai_store::skipped_checklist(&store, r.id).unwrap();
     assert_eq!(skipped.len(), 1);
     assert_eq!(
