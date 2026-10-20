@@ -1,4 +1,5 @@
-//! Posting commands: new line comments, replies and approvals. The only
+//! Posting commands: new line comments, replies, approvals and resolving
+//! threads. The only
 //! commands that write to a platform; each runs on one explicit user action
 //! (a button or shortcut in the UI), never on a poll or a timer.
 //!
@@ -9,6 +10,7 @@ use tauri::{AppHandle, State};
 
 use argus_core::{
     CommentableLines, NewComment, PostErrorKind, PostResult, PostedNote, ReviewId, ReviewRecord,
+    StoredThread,
 };
 
 use super::{blocking, blocking_post, parse_review_id, parse_thread_id};
@@ -107,6 +109,26 @@ pub async fn approve_review(
     let record = record?;
     events::emit_changed(&app, record.id);
     Ok(record)
+}
+
+/// Resolve (`resolved: true`) or reopen a stored thread of the review
+/// `review_id` on its platform; the thread as stored after the refresh. A
+/// thread of another review, or one its platform cannot resolve, is refused
+/// before anything is written.
+#[tauri::command]
+pub async fn resolve_thread(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    review_id: String,
+    thread_id: String,
+    resolved: bool,
+) -> Result<StoredThread, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    let thread = parse_thread_id(&thread_id)?;
+    let stored =
+        blocking_post(state, move |core| core.resolve_thread(id, thread, resolved)).await?;
+    events::emit_changed(&app, stored.review_id);
+    Ok(stored)
 }
 
 /// The lines of `path` a new comment can go on, per hunk of the review's

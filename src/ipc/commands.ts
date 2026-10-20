@@ -155,6 +155,18 @@ export function approveReview(
   return invoke("approve_review", { reviewId, headSha });
 }
 
+/**
+ * Resolve (`resolved: true`) or reopen a stored thread of `reviewId` on its
+ * platform; the thread as stored afterwards. Only for a `resolvable` thread.
+ */
+export function resolveThread(
+  reviewId: ReviewId,
+  threadId: ThreadId,
+  resolved: boolean,
+): Promise<StoredThread> {
+  return invoke("resolve_thread", { reviewId, threadId, resolved });
+}
+
 /** The lines of `path` a new comment can go on (read only). */
 export function commentableLines(
   reviewId: ReviewId,
