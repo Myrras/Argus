@@ -26,10 +26,12 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type { PostResult } from "../ipc/types";
 import { clearContentsCache, useCodeViewStore } from "../state/codeViewStore";
 import { useCommentStore, type Draft } from "../state/commentStore";
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { ReviewDetail } from "./ReviewDetail";
+import { ReviewDialogs } from "./ReviewDialogs";
 
 const mockInvoke = vi.mocked(invoke);
 const initialReviews = useReviewStore.getState();
@@ -133,8 +135,19 @@ function backend(extra: Record<string, (args: unknown) => unknown> = {}) {
   }) as typeof invoke);
 }
 
+/** The detail with the one owner of its dialogs, as `App` mounts them. */
+function Detail() {
+  return (
+    <>
+      <ReviewDetail now={NOW} />
+      <ReviewDialogs />
+    </>
+  );
+}
+
 describe("ReviewDetail", () => {
   beforeEach(() => {
+    useOverlayStore.setState({ open: null, confirm: null });
     clearContentsCache();
     localStorage.clear();
     useCommentStore.setState({
@@ -167,14 +180,14 @@ describe("ReviewDetail", () => {
 
   it("shows a placeholder without a selection", () => {
     useReviewStore.setState({ ...initialReviews, reviews: [r] }, true);
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     expect(
       screen.getByText("Select a review to see its threads."),
     ).toBeInTheDocument();
   });
 
   it("shows one page: the conversation, then each file with its threads", async () => {
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     expect(mockInvoke).toHaveBeenCalledWith("list_threads", {
       reviewId: r.id,
     });
@@ -205,7 +218,7 @@ describe("ReviewDetail", () => {
   });
 
   it("shows status, round, reasons and the user's review state", async () => {
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     expect(
       screen.getByRole("heading", { name: "Add widget caching" }),
     ).toBeInTheDocument();
@@ -232,7 +245,7 @@ describe("ReviewDetail", () => {
   });
 
   it("opens the review in the browser", async () => {
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     fireEvent.click(screen.getByRole("button", { name: /Open in GitHub/ }));
     expect(openUrl).toHaveBeenCalledWith(r.url);
     await screen.findAllByRole("article");
@@ -244,7 +257,7 @@ describe("ReviewDetail", () => {
       { ...initialReviews, reviews: [merged], selectedId: merged.id },
       true,
     );
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     expect(
       screen.getByRole("button", { name: "Submit review…" }),
     ).toBeDisabled();
@@ -272,7 +285,7 @@ describe("ReviewDetail", () => {
       { status: "failed", kind: "postRejected", message: "GitHub: refused" },
     ];
     backend({ post_comments: () => results });
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     expect(screen.getByText("2 pending comments")).toBeInTheDocument();
     await screen.findAllByRole("article");
     expect(writes()).toEqual([]);
@@ -295,7 +308,7 @@ describe("ReviewDetail", () => {
         return { url: "u", providerThreadId: "1", providerNoteId: "2" };
       },
     });
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     const conversation = screen.getByRole("region", { name: "Conversation" });
     fireEvent.click(
       await within(conversation).findByRole("button", {
@@ -343,7 +356,7 @@ describe("ReviewDetail", () => {
 
   /** Open Submit review from the header; the dialog. */
   async function openSubmit() {
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     await screen.findAllByRole("article");
     fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
     return screen.getByRole("dialog", {
@@ -445,7 +458,7 @@ describe("ReviewDetail", () => {
       true,
     );
     backend({ submit_review: () => ({ ...gl, status: "waitingOnAuthor" }) });
-    render(<ReviewDetail now={NOW} />);
+    render(<Detail />);
     await screen.findAllByRole("article");
     fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
     const dialog = screen.getByRole("dialog");

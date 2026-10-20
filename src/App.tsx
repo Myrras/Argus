@@ -37,6 +37,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { ShortcutHelp } from "./components/ShortcutHelp";
 import { LogoMark } from "./components/LogoMark";
 import { ReviewDetail } from "./components/ReviewDetail";
+import { ReviewDialogs } from "./components/ReviewDialogs";
 import { SettingsModal } from "./components/SettingsModal";
 import { Sidebar } from "./components/Sidebar";
 import { Toasts } from "./components/Toasts";
@@ -220,6 +221,8 @@ export default function App() {
       <Toasts />
       {/* ⌘K and ? (M6): open state in `overlayStore`. */}
       <CommandPalette />
+      {/* Submit review and Post all: one dialog at a time (`overlayStore`). */}
+      <ReviewDialogs />
       <ShortcutHelp />
       <SettingsModal
         open={settingsOpen}

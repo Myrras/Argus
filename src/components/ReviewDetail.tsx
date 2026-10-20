@@ -14,10 +14,10 @@
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
  * its own explicit action in `SubmitReviewModal`: it names the head being
  * judged and can post the pending comments first; the backend refuses
- * when the review moved past that head.
+ * when the review moved past that head. The header's button only asks
+ * `overlayStore` for it, as ⇧S and the palette do, so there is only ever
+ * one (`ReviewDialogs`).
  */
-
-import { useState } from "react";
 
 import type { ReviewRecord } from "../ipc/types";
 import { openExternal } from "../lib/links";
@@ -31,12 +31,12 @@ import {
 } from "../lib/reviews";
 import { ago, fullTime } from "../lib/time";
 import { useCommentStore, useDrafts } from "../state/commentStore";
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
 import { ExternalLinkIcon } from "./icons";
 import { ReviewView } from "./ReviewView";
-import { SubmitReviewModal } from "./SubmitReviewModal";
 import { WelcomeScreen } from "./WelcomeScreen";
 import styles from "./ReviewDetail.module.css";
 
@@ -85,7 +85,7 @@ function ReviewHeader({
   const failed = drafts.filter((d) => d.error).length;
   const posting = useCommentStore((s) => !!s.posting[r.id]);
   const postAll = useCommentStore((s) => s.postAll);
-  const [confirming, setConfirming] = useState(false);
+  const ask = useOverlayStore((s) => s.ask);
   const canSubmit = r.state === "open";
   const myState = MY_STATE_LABEL[r.myReviewState];
 
@@ -125,7 +125,7 @@ function ReviewHeader({
                   ? `Approve or request changes on ${PROVIDER_LABEL[r.provider]} (opens a dialog)`
                   : "Only an open review can be reviewed"
               }
-              onClick={() => setConfirming(true)}
+              onClick={() => ask({ kind: "submit", reviewId: r.id })}
             >
               {submitting ? "Submitting…" : "Submit review…"}
             </button>
@@ -197,11 +197,6 @@ function ReviewHeader({
           )}
         </div>
       </div>
-      <SubmitReviewModal
-        review={r}
-        open={confirming}
-        onClose={() => setConfirming(false)}
-      />
     </header>
   );
 }

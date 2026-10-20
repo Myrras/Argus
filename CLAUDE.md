@@ -259,7 +259,8 @@ sibling app Iris (`../Iris`).
   thread's own reversible write). `CommandPalette` (fuzzy
   `lib/fuzzy`, rows `lib/palette`: every action, review actions, Go to
   review…, Go to file…; Submit review… and Approve… open
-  `SubmitReviewModal`, Post all… confirms first) and
+  `SubmitReviewModal`, Post all… confirms first; both rendered once by
+  `ReviewDialogs`) and
   `ShortcutHelp`, one at a time via `overlayStore`. `Modal` takes
   `initialFocus` and focuses on open.
   - Keys (all rebindable): list `↑`/`↓`, `Enter`, `1`–`4`, refresh
@@ -317,8 +318,11 @@ sibling app Iris (`../Iris`).
   and listing refused drafts), `reviewStore.submit` (success clears
   `selectedId`: the work column shows `WelcomeScreen`) + `justApproved`
   (`APPROVED_LINGER_MS` "Approved ✓" in its old tab, kept across list
-  reloads), overlay confirm `{ kind: "submit", verdict? }`, key
-  `submitReview` (⇧S, scope `files`).
+  reloads), overlay confirm `{ kind: "submit", verdict? }` (the dialog's
+  one owner: the header button, ⇧S, the palette and the list's menu only
+  `ask`; `ReviewDialogs` in `App` renders it, so a second request replaces
+  the open dialog, never stacks one), key `submitReview` (⇧S, scope
+  `files`).
 
 ## Architecture
 

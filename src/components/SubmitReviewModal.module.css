@@ -8,7 +8,8 @@
 }
 
 .verdicts {
-  /* A fieldset defaults to min-width: min-content, which can push the dialog wider. */
+  /* A fieldset defaults to min-width: min-content, which can push the
+     dialog wider than its card (a horizontal scrollbar). */
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -20,15 +21,25 @@
 
 .legend {
   margin-bottom: var(--sp-1);
+  padding: 0;
   font-size: var(--fs-sm);
   color: var(--text-muted);
 }
 
+/* One card per verdict: the radio in its own column, the text in the
+   rest. A grid, so the global `label` and `input` rules (block label,
+   inputs at 100% width with padding) can never hand the radio the card's
+   width and squeeze the text out of it. */
 .verdict {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--sp-2);
+  min-width: 0;
+  margin: 0;
   padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-md);
+  color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   cursor: pointer;
@@ -37,25 +48,37 @@
     background var(--dur-1) var(--ease-out);
 }
 
+.verdict:hover {
+  border-color: var(--border-strong);
+}
+
 .verdict[data-checked="true"] {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
-/* global.css stretches inputs to 100% with padding; undo it for the radio. */
-.verdict input {
+/* global.css styles every input as a text field; the radio is a radio. */
+.verdict input[type="radio"] {
   width: auto;
-  flex: none;
+  height: auto;
   margin: 3px 0 0;
   padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  accent-color: var(--accent);
+  cursor: pointer;
 }
 
+/* The name, the muted hint beside it, wrapping inside the card. */
 .verdictText {
-  flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--sp-2);
+  row-gap: 2px;
+  overflow-wrap: anywhere;
 }
 
 .verdictName {
@@ -63,8 +86,8 @@
 }
 
 .verdictHint {
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
 }
 
 .summary {
@@ -140,17 +163,19 @@
 }
 
 .drafts {
+  margin: 0;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   font-size: var(--fs-sm);
 }
 
-.drafts input {
+.drafts input[type="checkbox"] {
   width: auto;
   flex: none;
   margin: 0;
   padding: 0;
+  accent-color: var(--accent);
 }
 
 .text {

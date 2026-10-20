@@ -100,6 +100,7 @@ import { clearContentsCache, useCodeViewStore } from "./state/codeViewStore";
 import { clearCommentableCache, useCommentStore } from "./state/commentStore";
 import { useHistoryStore } from "./state/historyStore";
 import { useLayoutStore } from "./state/layoutStore";
+import { useOverlayStore } from "./state/overlayStore";
 import { APPROVED_LINGER_MS, useReviewStore } from "./state/reviewStore";
 import { useSettingsRequestStore } from "./state/settingsRequestStore";
 import { useThreadStore } from "./state/threadStore";
@@ -644,6 +645,68 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     // The failed submit keeps the review open in the middle.
     expect(useReviewStore.getState().selectedId).not.toBeNull();
     expect(within(detail()).getByText("Needs review")).toBeInTheDocument();
+  });
+
+  it("opens exactly one Submit review dialog, from any entry point", async () => {
+    const { A } = makeBackend({ ai: false });
+    render(<App />);
+    await openReview("Fixture A");
+    const name = `Submit review — acme-fixture/widgets#${A.number}`;
+    const press = (init: KeyboardEventInit & { key: string }) =>
+      act(() => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            bubbles: true,
+            cancelable: true,
+            ...init,
+          }),
+        );
+      });
+    const submitDialogs = () =>
+      screen.queryAllByRole("dialog", { name: /^Submit review/ });
+    const expectOne = () => {
+      expect(submitDialogs()).toHaveLength(1);
+      return screen.getByRole("dialog", { name });
+    };
+    const closeIt = async (dialog: HTMLElement) => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(submitDialogs()).toHaveLength(0));
+    };
+
+    // The header's button.
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    await closeIt(expectOne());
+
+    // ⇧S.
+    press({ key: "S", code: "KeyS", shiftKey: true });
+    await closeIt(expectOne());
+
+    // The palette.
+    press({ key: "k", code: "KeyK", ctrlKey: true });
+    const field = screen.getByRole("combobox");
+    fireEvent.change(field, { target: { value: "Submit review" } });
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Command palette" })).toBe(
+        null,
+      ),
+    );
+    await closeIt(expectOne());
+
+    // A second request while one is open (the palette's Approve…, the
+    // list's menu) takes over the open dialog instead of stacking another.
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    expectOne();
+    act(() =>
+      useOverlayStore
+        .getState()
+        .ask({ kind: "submit", reviewId: A.id, verdict: "approve" }),
+    );
+    const dialog = expectOne();
+    expect(
+      within(dialog).getByRole("radio", { name: /Approve/ }),
+    ).toBeChecked();
+    await closeIt(dialog);
   });
 
   it("leaves the review for the welcome screen after submitting it", async () => {

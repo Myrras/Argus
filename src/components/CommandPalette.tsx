@@ -9,11 +9,11 @@
  * is its `aria-activedescendant`).
  *
  * Writing to a platform never runs from here unasked: "Submit review…" and
- * "Approve…" open the same `SubmitReviewModal` as the header's button (the
- * latter with Approve chosen), and "Post all…" a confirmation first
- * (`PaletteConfirms`). "Resolve thread" / "Unresolve thread" (the focused
- * thread, when its platform can resolve it) is the thread button's own
- * action, reversible, so it runs on Enter.
+ * "Approve…" ask `overlayStore` for the one Submit review dialog (the
+ * latter with Approve chosen), "Post all…" for a confirmation first; both
+ * are rendered by `ReviewDialogs`. "Resolve thread" / "Unresolve thread"
+ * (the focused thread, when its platform can resolve it) is the thread
+ * button's own action, reversible, so it runs on Enter.
  */
 
 import {
@@ -25,7 +25,6 @@ import {
   useState,
 } from "react";
 
-import type { ReviewId } from "../ipc/types";
 import {
   paletteRows,
   type PaletteItem,
@@ -47,7 +46,6 @@ import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import { useThreadStore } from "../state/threadStore";
 import { toastInfo } from "../state/toastStore";
 import { Modal } from "./Modal";
-import { SubmitReviewModal } from "./SubmitReviewModal";
 import styles from "./CommandPalette.module.css";
 
 const PLACEHOLDER: Record<Mode, string> = {
@@ -404,90 +402,19 @@ function PaletteBody({
   );
 }
 
-/** Confirm "Post all" from the palette: the header's button, asked first. */
-function PostAllModal({
-  reviewId,
-  onClose,
-}: {
-  reviewId: ReviewId;
-  onClose: () => void;
-}) {
-  const review = useReviewStore((s) =>
-    s.reviews.find((r) => r.id === reviewId),
-  );
-  // What Post all sends: an emptied edit's draft is left out.
-  const n = usePostableCount(reviewId);
-  const postAll = useCommentStore((s) => s.postAll);
-  return (
-    <Modal
-      open
-      title={`Post ${n} pending ${n === 1 ? "comment" : "comments"}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" onClick={onClose}>
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="primary"
-            disabled={n === 0}
-            onClick={() => {
-              onClose();
-              void postAll(reviewId);
-            }}
-          >
-            Post all
-          </button>
-        </>
-      }
-    >
-      <p className={styles.confirmText}>
-        Posts every pending comment of{" "}
-        <strong>{review ? reviewRef(review) : "this review"}</strong>
-        {review ? ` on ${PROVIDER_LABEL[review.provider]}` : ""} now, one by
-        one. A comment the platform refuses stays pending with the reason.
-      </p>
-    </Modal>
-  );
-}
-
-/** The confirmations the palette asks for (`overlayStore.confirm`). */
-function PaletteConfirms() {
-  const confirm = useOverlayStore((s) => s.confirm);
-  const closeConfirm = useOverlayStore((s) => s.closeConfirm);
-  const review = useReviewStore((s) =>
-    confirm ? s.reviews.find((r) => r.id === confirm.reviewId) : undefined,
-  );
-  if (!confirm || !review) return null;
-  return confirm.kind === "submit" ? (
-    <SubmitReviewModal
-      review={review}
-      verdict={confirm.verdict ?? null}
-      open
-      onClose={closeConfirm}
-    />
-  ) : (
-    <PostAllModal reviewId={review.id} onClose={closeConfirm} />
-  );
-}
-
 export function CommandPalette() {
   const open = useOverlayStore((s) => s.open === "palette");
   const close = useOverlayStore((s) => s.close);
   const input = useRef<HTMLInputElement>(null);
   return (
-    <>
-      <Modal
-        open={open}
-        title="Command palette"
-        onClose={close}
-        width="min(600px, 94vw)"
-        initialFocus={input}
-      >
-        {open && <PaletteBody onClose={close} input={input} />}
-      </Modal>
-      <PaletteConfirms />
-    </>
+    <Modal
+      open={open}
+      title="Command palette"
+      onClose={close}
+      width="min(600px, 94vw)"
+      initialFocus={input}
+    >
+      {open && <PaletteBody onClose={close} input={input} />}
+    </Modal>
   );
 }

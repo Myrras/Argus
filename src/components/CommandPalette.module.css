@@ -116,8 +116,3 @@
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
-
-.confirmText {
-  margin: 0;
-  line-height: 1.5;
-}

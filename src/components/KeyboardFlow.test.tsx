@@ -32,6 +32,7 @@ import { useSettingsStore } from "../state/settingsStore";
 import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { CommandPalette } from "./CommandPalette";
+import { ReviewDialogs } from "./ReviewDialogs";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { ThreadBlock } from "./ThreadBlock";
 
@@ -62,6 +63,7 @@ function Shell() {
   return (
     <>
       <CommandPalette />
+      <ReviewDialogs />
       <ShortcutHelp />
     </>
   );
