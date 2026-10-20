@@ -12,7 +12,8 @@
  * and what is untouched. Under a narrow island the actions move
  * below (container query). Beside the ref: open it on the platform, and
  * refresh this review alone (spinning while it runs; the full refresh in
- * the title bar stays free).
+ * the title bar stays free). The meta row ends with the local-clone chip
+ * (`CloneChip`: found, missing, or none set).
  *
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
  * its own explicit action in `SubmitReviewModal`: it names the head being
@@ -43,6 +44,7 @@ import { useReviewStore } from "../state/reviewStore";
 import { useThreadStore } from "../state/threadStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
+import { CloneChip } from "./CloneChip";
 import {
   ExternalLinkIcon,
   NextThreadIcon,
@@ -189,6 +191,7 @@ function ReviewHeader({
               updated {ago(r.updatedAt, now)}
             </span>
           )}
+          <CloneChip review={r} />
         </div>
         <div className={styles.status}>
           {/* The status and its round read as one: "Needs re-review · R2". */}
