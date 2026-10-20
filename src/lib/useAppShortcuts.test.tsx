@@ -96,6 +96,19 @@ describe("useAppShortcuts", () => {
     useOverlayStore.getState().closeConfirm();
   });
 
+  it("⌥R refreshes the open review alone, never the whole list", () => {
+    renderHook(() => useAppShortcuts());
+    const altR = { key: "®", code: "KeyR", altKey: true };
+    // No review open: left alone.
+    expect(press(altR).defaultPrevented).toBe(false);
+    useReviewStore.setState({ selectedId: a.id });
+    expect(press(altR).defaultPrevented).toBe(true);
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith("refresh_review", {
+      reviewId: a.id,
+    });
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith("refresh_reviews");
+  });
+
   it("moves through the list, opens and switches lists", () => {
     renderHook(() => useAppShortcuts());
     press({ key: "ArrowDown" });

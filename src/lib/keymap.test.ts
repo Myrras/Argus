@@ -195,6 +195,25 @@ describe("defaults", () => {
     expect(DEFAULT_KEYMAP.openSettings).toEqual(["Mod+Comma"]);
   });
 
+  it("refresh one review on ⌥R, in the review view, not a browser key", () => {
+    expect(DEFAULT_KEYMAP.refreshReview).toEqual(["Alt+KeyR"]);
+    const key = {
+      key: "®",
+      code: "KeyR",
+      metaKey: false,
+      ctrlKey: false,
+      altKey: true,
+      shiftKey: false,
+    };
+    expect(findAction(key, DEFAULT_KEYMAP, "files", true)).toBe(
+      "refreshReview",
+    );
+    expect(findAction(key, DEFAULT_KEYMAP, "list", true)).toBeNull();
+    expect(isBrowserShortcut(key, true)).toBe(false);
+    expect(formatBinding("Alt+KeyR", true)).toBe("⌥R");
+    expect(formatBinding("Alt+KeyR", false)).toBe("Alt+R");
+  });
+
   it("all parse, none repeats, none is fixed or refused", () => {
     for (const mac of [true, false]) {
       const seen = new Map<string, string>();

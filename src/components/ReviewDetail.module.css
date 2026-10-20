@@ -117,6 +117,17 @@
   height: 22px;
 }
 
+/* Refreshing this review: the glyph turns in the accent, the button stays
+   put (disabled, not dimmed, so the motion reads as progress). */
+.ref .refresh[data-spinning="true"] {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.ref .refresh[data-spinning="true"] svg {
+  animation: spin var(--dur-spin) linear infinite;
+}
+
 /* "Needs re-review | R2": the status badge with its round as a second
    segment, so the round is read as part of the status. */
 .statusPill {

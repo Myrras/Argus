@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import type { RefreshReport } from "../ipc/types";
-import { reviewsInTab } from "../lib/reviews";
+import { reviewRef, reviewsInTab } from "../lib/reviews";
 import {
   APPROVED_LINGER_MS,
   subscribeReviewEvents,
@@ -139,6 +139,79 @@ describe("reviewStore", () => {
     expect(useToastStore.getState().toasts).toMatchObject([
       { kind: "error", message: "Could not refresh", detail: "disk full" },
     ]);
+  });
+
+  it("refreshes one review: busy for it alone, then its fresh record", async () => {
+    const fresh = { ...a, headSha: "f".repeat(40) };
+    let answer!: (v: unknown) => void;
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === "refresh_review"
+        ? new Promise((resolve) => (answer = resolve))
+        : Promise.resolve(cmd === "list_reviews" ? [fresh, b, c] : null),
+    );
+    const done = useReviewStore.getState().refreshOne(a.id);
+    expect(mockInvoke).toHaveBeenCalledWith("refresh_review", {
+      reviewId: a.id,
+    });
+    const s = useReviewStore.getState();
+    expect(s.refreshingOne[a.id]).toBe(true);
+    expect(s.refreshingOne[b.id]).toBeUndefined();
+    // The full refresh is not blocked by it.
+    expect(s.refreshing).toBe(false);
+    // A second ask for the same review while it runs is not sent again.
+    await useReviewStore.getState().refreshOne(a.id);
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "refresh_review"),
+    ).toHaveLength(1);
+
+    answer({ review: fresh, changed: true });
+    await done;
+    expect(useReviewStore.getState().refreshingOne[a.id]).toBeUndefined();
+    expect(useReviewStore.getState().reviews[0]).toEqual(fresh);
+    // Changed: the list is read again (it may have left a tab).
+    expect(mockInvoke).toHaveBeenCalledWith("list_reviews");
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
+  it("an unchanged review is not re-listed", async () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === "refresh_review" ? { review: a, changed: false } : [a],
+      ),
+    );
+    await useReviewStore.getState().refreshOne(a.id);
+    expect(mockInvoke).not.toHaveBeenCalledWith("list_reviews");
+    expect(useReviewStore.getState().reviews).toEqual([a, b, c]);
+  });
+
+  it("toasts a rate-limited single refresh with when it lifts", async () => {
+    mockInvoke.mockRejectedValue({
+      kind: "rateLimited",
+      message: "GitHub is rate limited until 14:05; Argus tries again then",
+    });
+    await useReviewStore.getState().refreshOne(a.id);
+    expect(useReviewStore.getState().refreshingOne[a.id]).toBeUndefined();
+    expect(useToastStore.getState().toasts).toMatchObject([
+      {
+        kind: "error",
+        message: `Could not refresh ${reviewRef(a)}`,
+        detail: "GitHub is rate limited until 14:05; Argus tries again then",
+      },
+    ]);
+    expect(useReviewStore.getState().reviews).toEqual([a, b, c]);
+  });
+
+  it("a full refresh still runs while one review refreshes", async () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === "refresh_review"
+        ? new Promise(() => {})
+        : Promise.resolve(
+            cmd === "refresh_reviews" ? report("2026-10-16T12:00:00Z") : [a],
+          ),
+    );
+    void useReviewStore.getState().refreshOne(a.id);
+    await useReviewStore.getState().refresh();
+    expect(mockInvoke).toHaveBeenCalledWith("refresh_reviews");
   });
 
   it("submits a review on the platform, then re-reads the list", async () => {

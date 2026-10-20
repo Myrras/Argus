@@ -3,7 +3,8 @@
  * and the reviews of the current tab. Keyboard handling (↑/↓, Enter, 1–4)
  * lives in `App`; this renders the store's cursor and selection. A row's
  * context menu (Iris's `ContextMenu`) opens it in the browser, copies its
- * link or opens Submit review. A review just approved from Argus stays in
+ * link, refreshes it alone or opens Submit review. A row refreshing on its
+ * own shows a small turning glyph by its age. A review just approved from Argus stays in
  * its tab as "Approved ✓" for a moment, then leaves.
  */
 
@@ -26,6 +27,7 @@ import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { toastError, toastSuccess } from "../state/toastStore";
 import { AiRunIndicator } from "./AiStatus";
+import { RefreshIcon } from "./icons";
 import { Badge, PlatformBadge } from "./Badge";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import styles from "./ReviewList.module.css";
@@ -40,6 +42,8 @@ export function ReviewList({ now }: { now: number }) {
   const select = useReviewStore((s) => s.select);
   const justApproved = useReviewStore((s) => s.justApproved);
   const ask = useOverlayStore((s) => s.ask);
+  const refreshingOne = useReviewStore((s) => s.refreshingOne);
+  const refreshOne = useReviewStore((s) => s.refreshOne);
   const [menu, setMenu] = useState<{
     review: ReviewRecord;
     x: number;
@@ -91,6 +95,7 @@ export function ReviewList({ now }: { now: number }) {
                 now={now}
                 selected={r.id === selectedId}
                 cursor={r.id === cursorId}
+                refreshing={!!refreshingOne[r.id]}
                 onSelect={() => select(r.id)}
                 onMenu={(x, y) => setMenu({ review: r, x, y })}
               />
@@ -104,9 +109,12 @@ export function ReviewList({ now }: { now: number }) {
         y={menu?.y ?? 0}
         items={
           menu
-            ? menuItems(menu.review, () =>
-                ask({ kind: "submit", reviewId: menu.review.id }),
-              )
+            ? menuItems(menu.review, {
+                refreshing: !!refreshingOne[menu.review.id],
+                refresh: () => void refreshOne(menu.review.id),
+                submitReview: () =>
+                  ask({ kind: "submit", reviewId: menu.review.id }),
+              })
             : []
         }
         onClose={() => setMenu(null)}
@@ -117,7 +125,11 @@ export function ReviewList({ now }: { now: number }) {
 
 function menuItems(
   r: ReviewRecord,
-  submitReview: () => void,
+  actions: {
+    refreshing: boolean;
+    refresh: () => void;
+    submitReview: () => void;
+  },
 ): ContextMenuItem[] {
   return [
     {
@@ -133,9 +145,14 @@ function menuItems(
           .catch(() => toastError("Could not copy the link")),
     },
     {
+      label: "Refresh",
+      disabled: actions.refreshing,
+      onSelect: actions.refresh,
+    },
+    {
       label: "Submit review…",
       disabled: r.state !== "open" || r.status === "approved",
-      onSelect: submitReview,
+      onSelect: actions.submitReview,
     },
   ];
 }
@@ -145,6 +162,7 @@ function ReviewItem({
   now,
   selected,
   cursor,
+  refreshing,
   onSelect,
   onMenu,
 }: {
@@ -152,6 +170,7 @@ function ReviewItem({
   now: number;
   selected: boolean;
   cursor: boolean;
+  refreshing: boolean;
   onSelect: () => void;
   onMenu: (x: number, y: number) => void;
 }) {
@@ -169,6 +188,7 @@ function ReviewItem({
         className={styles.item}
         data-selected={selected}
         data-cursor={cursor}
+        aria-busy={refreshing || undefined}
         aria-current={selected ? "true" : undefined}
         onClick={onSelect}
         onContextMenu={(e) => {
@@ -181,6 +201,16 @@ function ReviewItem({
           <span className={`${styles.ref} mono`}>{reviewRef(r)}</span>
           {r.draft && <Badge>Draft</Badge>}
           <AiRunIndicator reviewId={r.id} />
+          {refreshing && (
+            <span
+              className={styles.refreshing}
+              role="img"
+              aria-label="Refreshing"
+              title="Refreshing this review"
+            >
+              <RefreshIcon size={11} />
+            </span>
+          )}
           <span
             className={styles.age}
             title={fullTime(r.updatedAt ?? r.fetchedAt)}

@@ -9,7 +9,9 @@
  * "Submit review…"); where the review lives and who wrote it; then its
  * status with the round, the user's review state on the platform, the
  * reasons and what is untouched. Under a narrow island the actions move
- * below (container query).
+ * below (container query). Beside the ref: open it on the platform, and
+ * refresh this review alone (spinning while it runs; the full refresh in
+ * the title bar stays free).
  *
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
  * its own explicit action in `SubmitReviewModal`: it names the head being
@@ -20,6 +22,7 @@
 import { useState } from "react";
 
 import type { ReviewRecord } from "../ipc/types";
+import { withHint } from "../lib/keymap";
 import { openExternal } from "../lib/links";
 import {
   MY_STATE_LABEL,
@@ -30,11 +33,12 @@ import {
   untouchedLabel,
 } from "../lib/reviews";
 import { ago, fullTime } from "../lib/time";
+import { useKeymap } from "../lib/useKeymap";
 import { useCommentStore, useDrafts } from "../state/commentStore";
 import { useReviewStore } from "../state/reviewStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
-import { ExternalLinkIcon } from "./icons";
+import { ExternalLinkIcon, RefreshIcon } from "./icons";
 import { ReviewView } from "./ReviewView";
 import { SubmitReviewModal } from "./SubmitReviewModal";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -87,6 +91,9 @@ function ReviewHeader({
   const postAll = useCommentStore((s) => s.postAll);
   const [confirming, setConfirming] = useState(false);
   const canSubmit = r.state === "open";
+  const refreshingThis = useReviewStore((s) => !!s.refreshingOne[r.id]);
+  const refreshOne = useReviewStore((s) => s.refreshOne);
+  const keymap = useKeymap();
   const myState = MY_STATE_LABEL[r.myReviewState];
 
   return (
@@ -143,6 +150,18 @@ function ReviewHeader({
               title={`Open in ${PROVIDER_LABEL[r.provider]}: ${r.url}`}
             >
               <ExternalLinkIcon />
+            </button>
+            <button
+              type="button"
+              className={`iconButton ${styles.open} ${styles.refresh}`}
+              onClick={() => void refreshOne(r.id)}
+              disabled={refreshingThis}
+              aria-busy={refreshingThis || undefined}
+              data-spinning={refreshingThis ? "true" : undefined}
+              aria-label="Refresh this review"
+              title={withHint("Refresh this review", keymap, "refreshReview")}
+            >
+              <RefreshIcon size={13} />
             </button>
           </span>
           {r.draft && <Badge>Draft</Badge>}

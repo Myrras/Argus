@@ -101,6 +101,37 @@ describe("ReviewList context menu", () => {
     ).toBeInTheDocument();
   });
 
+  it("refreshes one review from its menu and shows it refreshing in the row", async () => {
+    let answer!: (v: unknown) => void;
+    mockInvoke.mockImplementation(((cmd: string) =>
+      cmd === "refresh_review"
+        ? new Promise<unknown>((resolve) => (answer = resolve))
+        : Promise.resolve(
+            cmd === "list_reviews" ? [fresh, waiting] : null,
+          )) as typeof invoke);
+    render(<ReviewList now={NOW} />);
+    fireEvent.click(
+      within(openMenu("First look")).getByRole("menuitem", {
+        name: "Refresh",
+      }),
+    );
+    expect(mockInvoke).toHaveBeenCalledWith("refresh_review", {
+      reviewId: fresh.id,
+    });
+    const row = screen.getByText("First look").closest("button")!;
+    expect(row).toHaveAttribute("aria-busy", "true");
+    expect(within(row).getByRole("img", { name: "Refreshing" })).toBeVisible();
+    // The menu's item waits while it runs.
+    expect(
+      within(openMenu("First look")).getByRole("menuitem", {
+        name: "Refresh",
+      }),
+    ).toBeDisabled();
+    await act(async () => answer({ review: fresh, changed: false }));
+    await waitFor(() => expect(row).not.toHaveAttribute("aria-busy"));
+    expect(within(row).queryByRole("img", { name: "Refreshing" })).toBeNull();
+  });
+
   it("opens Submit review for an open review, never posting by itself", async () => {
     render(<ReviewList now={NOW} />);
     fireEvent.click(

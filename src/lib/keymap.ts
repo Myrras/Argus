@@ -16,6 +16,7 @@
  * Unlike Iris, a bare key may be bound: Argus has no type-to-select for it to
  * fight, and its list keys (`1`–`4`, the arrows) and the review page's
  * focus keys (`n`/`p`, `r`, `e`, `d`, M6; `s` resolves) are bare by default.
+ * ⌥R (Alt+R) refreshes the open review alone; ⇧R / Mod+R refresh them all.
  * ↑/↓ are both the list's and the review page's (next/previous open
  * thread): where the focus is decides (`SHARED_BY_CONTEXT`).
  * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
@@ -32,6 +33,7 @@ export type ActionId =
   | "prevReview"
   | "openReview"
   | "refresh"
+  | "refreshReview"
   | "showNeedsReview"
   | "showNeedsReReview"
   | "showWaitingOnAuthor"
@@ -120,6 +122,16 @@ export const ACTIONS: ActionDef[] = [
     scope: "list",
     // Bare R replies to the focused thread (M6); refresh moved to ⇧R.
     defaults: ["Shift+KeyR", "Mod+KeyR"],
+  },
+  {
+    id: "refreshReview",
+    label: "Refresh this review",
+    group: "Navigate",
+    scope: "files",
+    // R replies, ⇧R and Mod+R refresh everything, Mod+Alt+R shows in
+    // Finder: Option/Alt+R is the free one next to them.
+    defaults: ["Alt+KeyR"],
+    note: "Reads the open review again from its platform, without waiting for the next poll.",
   },
   {
     id: "showNeedsReview",

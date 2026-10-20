@@ -133,6 +133,10 @@ function runFilesAction(
     case "toggleFindingSelected":
       if (!useAiStore.getState().runs[review]?.enabled) return false;
       return useAiStore.getState().toggleFocused(review);
+    case "refreshReview":
+      // A read: the open review alone, beside any full refresh.
+      void useReviewStore.getState().refreshOne(review);
+      return true;
     case "submitReview":
       // Opens the dialog only; its button submits.
       useOverlayStore.getState().ask({ kind: "submit", reviewId: review });
