@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,10 +17,11 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import type { StoredThread, ThreadId } from "../ipc/types";
+import { useHistoryStore } from "../state/historyStore";
 import { useThreadStore } from "../state/threadStore";
 import { useToastStore } from "../state/toastStore";
 import { thread } from "../test/fixtures";
-import { ThreadBlock } from "./ThreadBlock";
+import { ListedThread, ThreadBlock } from "./ThreadBlock";
 
 const mockInvoke = vi.mocked(invoke);
 const NOW = Date.parse("2026-10-16T12:00:00Z");
@@ -200,5 +202,155 @@ describe("replying from the thread header", () => {
     fireEvent.change(field(), { target: { value: "looks good" } });
     fireEvent.change(field(), { target: { value: "looks good to me" } });
     expect(scroll).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resolved threads fold", () => {
+  /** A backend whose `list_threads` reports what `resolve_thread` did. */
+  function resolving(start: StoredThread[]) {
+    let current = start;
+    mockInvoke.mockImplementation(((cmd: string, raw?: unknown) => {
+      const a = (raw ?? {}) as Record<string, unknown>;
+      if (cmd === "resolve_thread") {
+        current = current.map((x) =>
+          x.threadId === a.threadId ? { ...x, resolved: !!a.resolved } : x,
+        );
+        return Promise.resolve(current.find((x) => x.threadId === a.threadId));
+      }
+      if (cmd === "list_threads") return Promise.resolve(current);
+      return Promise.resolve(null);
+    }) as typeof invoke);
+  }
+  const card = (author: string) =>
+    screen.getByRole("article", { name: `Thread by ${author}` });
+
+  beforeEach(() => {
+    useHistoryStore.setState({ open: {}, expanded: {}, focused: null });
+  });
+
+  it("folds once a resolve lands and unfolds when reopened", async () => {
+    const mine = thread({
+      resolvable: true,
+      mine: true,
+      author: "rev-fixture",
+      notes: [
+        {
+          id: "n-fold",
+          author: "rev-fixture",
+          body: "Guard the empty cache.",
+          createdAt: "2026-10-15T09:00:00Z",
+          system: false,
+        },
+      ],
+    });
+    seed([mine]);
+    resolving([mine]);
+    render(<Live id={mine.threadId} />);
+    expect(card("rev-fixture")).toHaveAttribute("data-open", "true");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Resolve rev-fixture's thread" }),
+    );
+    // Folded to its header: badge, author, a one-line preview.
+    await waitFor(() =>
+      expect(card("rev-fixture")).toHaveAttribute("data-open", "false"),
+    );
+    expect(within(card("rev-fixture")).getByText("Resolved")).toBeVisible();
+    expect(
+      within(card("rev-fixture")).getByText("Guard the empty cache."),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Unresolve rev-fixture's thread" }),
+    );
+    await waitFor(() =>
+      expect(card("rev-fixture")).toHaveAttribute("data-open", "true"),
+    );
+  });
+
+  it("start folded, everywhere; a click opens one and it stays open", async () => {
+    const done = thread({
+      resolvable: true,
+      resolved: true,
+      mine: true,
+      author: "rev-fixture",
+    });
+    const outdated = thread({
+      resolvable: true,
+      resolved: true,
+      outdated: true,
+      mine: true,
+      author: "carol-fixture",
+    });
+    seed([done, outdated]);
+    resolving([done, outdated]);
+    render(
+      <>
+        <Live id={done.threadId} />
+        <ListedThread thread={outdated} provider="gitlab" now={NOW} />
+      </>,
+    );
+    expect(card("rev-fixture")).toHaveAttribute("data-open", "false");
+    expect(card("carol-fixture")).toHaveAttribute("data-open", "false");
+    // The user's own resolved one keeps its then/now closed too.
+    expect(document.querySelector('[data-slot="then-now"]')).toBeNull();
+    fireEvent.click(
+      within(card("rev-fixture")).getByRole("button", {
+        name: /^rev-fixture/,
+        expanded: false,
+      }),
+    );
+    expect(card("rev-fixture")).toHaveAttribute("data-open", "true");
+    // A re-read with the same state keeps the user's choice.
+    await act(() => useThreadStore.getState().load(done.reviewId));
+    expect(card("rev-fixture")).toHaveAttribute("data-open", "true");
+  });
+
+  it("reply and then/now unfold a folded one first", () => {
+    const done = thread({ resolvable: true, resolved: true });
+    const other = thread({
+      resolvable: true,
+      resolved: true,
+      author: "carol-fixture",
+    });
+    seed([done, other]);
+    render(
+      <>
+        <Live id={done.threadId} />
+        <Live id={other.threadId} />
+      </>,
+    );
+    expect(card("bob-fixture")).toHaveAttribute("data-open", "false");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Reply to bob-fixture's thread" }),
+    );
+    expect(card("bob-fixture")).toHaveAttribute("data-open", "true");
+    expect(card("carol-fixture")).toHaveAttribute("data-open", "false");
+    fireEvent.click(
+      within(card("carol-fixture")).getByRole("button", {
+        name: "Then/now history",
+      }),
+    );
+    expect(card("carol-fixture")).toHaveAttribute("data-open", "true");
+  });
+
+  it("the h key on a focused folded one unfolds it with its then/now", () => {
+    const done = thread({
+      resolvable: true,
+      resolved: true,
+      mine: true,
+      author: "rev-fixture",
+    });
+    seed([done]);
+    render(<Live id={done.threadId} />);
+    expect(card("rev-fixture")).toHaveAttribute("data-open", "false");
+    act(() => {
+      useHistoryStore.getState().focus({
+        threadId: done.threadId,
+        reviewId: done.reviewId,
+        mine: true,
+      });
+      useHistoryStore.getState().toggleFocused(done.reviewId);
+    });
+    expect(card("rev-fixture")).toHaveAttribute("data-open", "true");
+    expect(document.querySelector('[data-slot="then-now"]')).not.toBeNull();
   });
 });

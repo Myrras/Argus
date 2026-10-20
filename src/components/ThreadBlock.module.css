@@ -42,6 +42,16 @@
   opacity: 0.85;
 }
 
+/* Resolved: settled, so it recedes. The user's own keeps its edge, toned
+   down; the author drops to the muted text. */
+.thread[data-resolved="true"][data-mine="true"] {
+  border-left-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+.thread[data-resolved="true"] .author {
+  color: var(--text-muted);
+}
+
 .headRow {
   display: flex;
   align-items: center;

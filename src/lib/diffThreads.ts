@@ -97,6 +97,52 @@ export function threadsOnFile(
   return threads.filter((t) => onFile(t, file));
 }
 
+/**
+ * A list of threads as the Conversation shows it, GitLab/GitHub style: the
+ * threads still to settle first, then the plain comments (a GitHub PR
+ * conversation entry, a GitLab single comment: nothing to resolve, so not
+ * "unresolved"), then the resolved ones. Each keeps the order it came in.
+ */
+export interface ThreadGroups {
+  /** The platform can resolve them and they are not. */
+  unresolved: StoredThread[];
+  /** Neither resolvable nor resolved. */
+  comments: StoredThread[];
+  resolved: StoredThread[];
+}
+
+export function groupThreads(list: readonly StoredThread[]): ThreadGroups {
+  const out: ThreadGroups = { unresolved: [], comments: [], resolved: [] };
+  for (const t of list) {
+    if (t.resolved) out.resolved.push(t);
+    else if (t.resolvable) out.unresolved.push(t);
+    else out.comments.push(t);
+  }
+  return out;
+}
+
+/** `list` in its groups' order (the page order `n`/`p` walk). */
+export function groupedOrder(list: readonly StoredThread[]): StoredThread[] {
+  const g = groupThreads(list);
+  return [...g.unresolved, ...g.comments, ...g.resolved];
+}
+
+/** Threads the platform can resolve and that are not resolved yet. */
+export function unresolvedCount(list: readonly StoredThread[]): number {
+  return list.filter((t) => t.resolvable && !t.resolved).length;
+}
+
+/**
+ * The review header's line, as GitLab words it: "2 unresolved threads",
+ * or "All threads resolved"; null when no thread can be resolved at all.
+ */
+export function resolutionLabel(list: readonly StoredThread[]): string | null {
+  if (!list.some((t) => t.resolvable || t.resolved)) return null;
+  const n = unresolvedCount(list);
+  if (n === 0) return "All threads resolved";
+  return `${n} unresolved ${n === 1 ? "thread" : "threads"}`;
+}
+
 /** Total and mine, for the file tree and the card header. */
 export function threadCounts(threads: readonly StoredThread[]): {
   total: number;

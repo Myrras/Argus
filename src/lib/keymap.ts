@@ -16,8 +16,9 @@
  * Unlike Iris, a bare key may be bound: Argus has no type-to-select for it to
  * fight, and its list keys (`1`–`4`, the arrows) and the review page's
  * focus keys (`n`/`p`, `r`, `e`, `d`, M6; `s` resolves) are bare by default.
- * ↑/↓ are both the list's and the review page's (next/previous open
- * thread): where the focus is decides (`SHARED_BY_CONTEXT`).
+ * ↑/↓ are the list's only: on the review page they scroll natively
+ * (`keyboardFlow.onReviewPage`); the unresolved-thread jumps have no
+ * default key (the header's arrow buttons).
  * `list` actions only fire outside fields and dialogs (`useAppShortcuts`);
  * `files` actions likewise, and only while a review is open; `composer`
  * actions only inside a comment composer (`CommentComposer`).
@@ -290,23 +291,25 @@ export const ACTIONS: ActionDef[] = [
     defaults: ["KeyS"],
     note: "Resolves the focused thread on its platform, or reopens a resolved one.",
   },
+  // No default key: bare ↑/↓ scroll the review page (and move the list's
+  // cursor); the header's arrow buttons and the palette run these.
   {
     id: "nextOpenThread",
-    label: "Next open thread",
+    label: "Next unresolved thread",
     group: "Files",
     scope: "files",
-    defaults: ["ArrowDown"],
+    defaults: [],
     repeats: true,
-    note: "In a review: the next unresolved thread in page order. In the review list ↓ moves the cursor; in the code it picks a line.",
+    note: "The next thread still to resolve, in page order; also the ⌄ by the header's unresolved count.",
   },
   {
     id: "prevOpenThread",
-    label: "Previous open thread",
+    label: "Previous unresolved thread",
     group: "Files",
     scope: "files",
-    defaults: ["ArrowUp"],
+    defaults: [],
     repeats: true,
-    note: "In a review: the previous unresolved thread. In the review list ↑ moves the cursor; in the code it picks a line.",
+    note: "The previous thread still to resolve; also the ⌃ by the header's unresolved count.",
   },
   {
     id: "openPalette",
@@ -361,24 +364,6 @@ export const GROUPS: ActionGroup[] = [
 ];
 
 const BY_ID = new Map(ACTIONS.map((a) => [a.id, a]));
-
-/**
- * Pairs of actions that may share a binding: where the focus is decides
- * which one a press is (`keyboardFlow.onReviewPage`): ↑/↓ move the review
- * list's cursor from the sidebar and jump between open threads on the
- * review page.
- */
-const SHARED_BY_CONTEXT: [ActionId, ActionId][] = [
-  ["nextReview", "nextOpenThread"],
-  ["prevReview", "prevOpenThread"],
-];
-
-/** `a` and `b` may hold the same binding (see `SHARED_BY_CONTEXT`). */
-export function sharesByContext(a: ActionId, b: ActionId): boolean {
-  return SHARED_BY_CONTEXT.some(
-    ([x, y]) => (x === a && y === b) || (x === b && y === a),
-  );
-}
 
 export function actionDef(id: ActionId): ActionDef {
   return BY_ID.get(id)!;
@@ -609,7 +594,7 @@ export function findConflict(
 ): ActionId | null {
   const text = serializeBinding(binding);
   for (const a of activeActions(mac)) {
-    if (a.id === action || sharesByContext(a.id, action)) continue;
+    if (a.id === action) continue;
     if (keymap[a.id].includes(text)) return a.id;
   }
   return null;

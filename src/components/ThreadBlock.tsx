@@ -14,7 +14,10 @@
  * (`ReplyComposer`; posted only on its Reply button or ⌘↩). "Resolve" /
  * "Unresolve" (only on a thread its platform can resolve) writes that to
  * the platform at once (`threadStore.setResolved`; reversible, so no
- * confirmation); the badge follows the re-read.
+ * confirmation); the badge follows the re-read. A resolved thread reads
+ * as settled: a check on its badge, a muted head and edge, and it folds
+ * (`historyStore.threadOpen`: folded by default, and once a resolve lands;
+ * reopened, it unfolds). A click, Reply, then/now or `h` still opens it.
  * The keyboard (M6, `focusStore`): the focused thread has a ring and the
  * DOM focus; Enter (or `t`) opens or folds it, `r` starts a reply, `s`
  * resolves or reopens it.
@@ -46,7 +49,7 @@ import { useKeymap } from "../lib/useKeymap";
 import { withHint } from "../lib/keymap";
 import { Badge } from "./Badge";
 import { ReplyComposer } from "./CommentBlocks";
-import { CaretIcon } from "./icons";
+import { CaretIcon, ResolvedIcon } from "./icons";
 import { Markdown, type RenderFence } from "./Markdown";
 import { SuggestedChange } from "./SuggestedChange";
 import { ThenNow, Timeline } from "./ThreadHistory";
@@ -121,8 +124,12 @@ export function ThreadBlock({
   // Opened from the key too; the height moves when the history lands.
   const resizeRef = useRef(onResize);
   resizeRef.current = onResize;
+  // Only when it turns on (the `h` key on a folded thread): a card
+  // rebuilt with its widget must not unfold a thread that was folded.
+  const historyWas = useRef(history);
   useEffect(() => {
-    if (history) storeOpen(t.threadId, true);
+    if (history && !historyWas.current) storeOpen(t.threadId, true);
+    historyWas.current = history;
   }, [history, storeOpen, t.threadId]);
   useEffect(() => {
     requestAnimationFrame(() => resizeRef.current?.());
@@ -159,7 +166,12 @@ export function ThreadBlock({
           <span className={styles.count}>
             {comments} {comments === 1 ? "comment" : "comments"}
           </span>
-          {t.resolved && <Badge tone="success">Resolved</Badge>}
+          {t.resolved && (
+            <Badge tone="success">
+              <ResolvedIcon size={11} />
+              Resolved
+            </Badge>
+          )}
           {!open && <span className={styles.preview}>{preview(t)}</span>}
         </button>
         <VerdictBadge

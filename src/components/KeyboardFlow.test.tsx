@@ -456,8 +456,12 @@ describe("ShortcutHelp", () => {
     expect(within(review).getByText("]")).toBeVisible();
     expect(within(review).getByText("Reply to thread")).toBeVisible();
     expect(within(review).getByText("Resolve or reopen thread")).toBeVisible();
-    expect(within(review).getByText("Next open thread")).toBeVisible();
-    expect(within(review).getByText("↓")).toBeVisible();
+    // No default key any more: the header's arrows run it.
+    const jump = within(review)
+      .getByText("Next unresolved thread")
+      .closest("div")!;
+    expect(within(jump).getByText("Not bound")).toBeVisible();
+    expect(within(review).queryByText("↓")).toBeNull();
     const anywhere = within(dialog).getByRole("region", { name: "Anywhere" });
     expect(within(anywhere).getByText("Refresh")).toBeVisible();
     expect(within(anywhere).getByText("Shift+R")).toBeVisible();

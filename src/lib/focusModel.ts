@@ -5,11 +5,11 @@
  * findings.
  *
  * The page reads top to bottom: the Conversation (its threads, then "On
- * other files"), then each shown file — its header, the threads listed at
+ * other files", each as unresolved, comments, resolved), then each shown file — its header, the threads listed at
  * the top of the card (outdated, then those without a usable line), then
  * the threads and AI findings under their lines, by line. That is the stop
- * order; `n`/`p` step through the threads and findings in it, ↑/↓ through
- * the threads that are not resolved, `j`/`k` the Conversation and the files
+ * order; `n`/`p` step through the threads and findings in it, the
+ * header's arrows through the unresolved threads, `j`/`k` the Conversation and the files
  * (`codeViewStore.move`).
  *
  * A focused diff line (a click in the code) is a position between stops:
@@ -26,6 +26,7 @@ import type {
 } from "../ipc/types";
 import {
   conversationThreads,
+  groupedOrder,
   placeThreads,
   threadsOnFile,
 } from "./diffThreads";
@@ -174,7 +175,13 @@ export function pageStops(input: PageInput): FocusItem[] {
   for (const card of input.order) {
     if (card === CONVERSATION_CARD) {
       out.push({ kind: "conversation" });
-      for (const t of [...talk.conversation, ...talk.elsewhere]) {
+      // As the card groups them: unresolved, comments, resolved (M6 + the
+      // resolved split); a folded Resolved group opens when `n`/`p` land
+      // in it (`ConversationCard`).
+      for (const t of [
+        ...groupedOrder(talk.conversation),
+        ...groupedOrder(talk.elsewhere),
+      ]) {
         out.push(threadItem(t, CONVERSATION_CARD, input.since));
       }
       continue;
@@ -267,18 +274,22 @@ export function moveFocus(
 }
 
 /**
- * ↑/↓: the next (+1) or previous (-1) thread that is not resolved, in page
- * order (the user's and everyone else's, outdated ones included), or null
- * at the end. `threads` says which are resolved.
+ * The next (+1) or previous (-1) unresolved thread (one its platform can
+ * resolve and that is not), in page order (the user's and everyone else's,
+ * outdated ones included), or null at the end: what the header's
+ * "N unresolved threads" counts. `threads` says which those are.
  */
 export function moveToOpenThread(
   stops: readonly FocusItem[],
   current: FocusItem | null,
   delta: 1 | -1,
-  threads: readonly Pick<StoredThread, "threadId" | "resolved">[],
+  threads: readonly Pick<
+    StoredThread,
+    "threadId" | "resolved" | "resolvable"
+  >[],
 ): FocusItem | null {
   const open = new Set(
-    threads.filter((t) => !t.resolved).map((t) => t.threadId),
+    threads.filter((t) => t.resolvable && !t.resolved).map((t) => t.threadId),
   );
   return moveFocus(
     stops,

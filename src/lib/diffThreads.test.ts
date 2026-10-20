@@ -6,11 +6,15 @@ import {
   collapsedRanges,
   conversationThreads,
   fitPlacements,
+  groupThreads,
+  groupedOrder,
   isConversationThread,
   mapOldLine,
   placeThreads,
+  resolutionLabel,
   threadCounts,
   threadsOnFile,
+  unresolvedCount,
 } from "./diffThreads";
 
 const anchor = thread().anchor!;
@@ -62,6 +66,51 @@ describe("conversationThreads", () => {
       onCache,
       away,
     ]);
+  });
+});
+
+describe("groupThreads", () => {
+  const mineOpen = thread({ mine: true, resolvable: true });
+  const open = thread({ resolvable: true });
+  const comment = thread({ mine: true });
+  const otherComment = thread();
+  const mineDone = thread({ mine: true, resolvable: true, resolved: true });
+  const done = thread({ resolvable: true, resolved: true });
+  // Mine first, as conversationThreads hands them over.
+  const list = [mineOpen, comment, mineDone, open, otherComment, done];
+
+  it("splits unresolved, plain comments and resolved, keeping the order", () => {
+    expect(groupThreads(list)).toEqual({
+      unresolved: [mineOpen, open],
+      comments: [comment, otherComment],
+      resolved: [mineDone, done],
+    });
+    expect(groupedOrder(list)).toEqual([
+      mineOpen,
+      open,
+      comment,
+      otherComment,
+      mineDone,
+      done,
+    ]);
+  });
+
+  it("counts only threads the platform can resolve as unresolved", () => {
+    expect(unresolvedCount(list)).toBe(2);
+    expect(unresolvedCount([comment, otherComment])).toBe(0);
+    // Resolved but no longer resolvable (a platform quirk): still resolved.
+    const stale = thread({ resolved: true });
+    expect(groupThreads([stale]).resolved).toEqual([stale]);
+  });
+
+  it("labels the review's resolution like GitLab, nothing without any", () => {
+    expect(resolutionLabel(list)).toBe("2 unresolved threads");
+    expect(resolutionLabel([open, done])).toBe("1 unresolved thread");
+    expect(resolutionLabel([mineDone, done, comment])).toBe(
+      "All threads resolved",
+    );
+    expect(resolutionLabel([comment, otherComment])).toBeNull();
+    expect(resolutionLabel([])).toBeNull();
   });
 });
 

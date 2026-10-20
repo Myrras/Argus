@@ -156,6 +156,8 @@ export function ShortcutsTab() {
                         <span className={styles.recordingHint}>
                           Press keys…
                         </span>
+                      ) : keymap[a.id].length === 0 ? (
+                        <span className={styles.rowHelp}>Not bound</span>
                       ) : (
                         keymap[a.id].map((b) => (
                           <kbd key={b} className={styles.kbd}>

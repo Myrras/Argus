@@ -54,8 +54,13 @@ sibling app Iris (`../Iris`).
     tree/flat + filter) beside the page (`data-slot="diff"`):
     `ConversationCard` (threads without a code reference, mine first; plus
     "On other files" for anchored threads whose file the list does not show,
-    `diffThreads.conversationThreads`) then one `FileDiffCard` per file,
-    contents loaded lazily (IntersectionObserver or selection; cached per
+    `diffThreads.conversationThreads`; both parts grouped by
+    `diffThreads.groupThreads` into Unresolved, Comments (not resolvable)
+    and Resolved, folded in card state, opened when `n`/`p` land in it via
+    `useRevealCard`; `pageStops` walks the same order; counts:
+    `unresolvedCount` as "N open" in the tree entry and card header,
+    `resolutionLabel` over all threads in the header's status row) then
+    one `FileDiffCard` per file, contents loaded lazily (IntersectionObserver or selection; cached per
     review/sha/path in `codeViewStore`), binary and large (>1500 lines or no
     patch) diffs as cards. `codeViewStore.selected`/`order` hold the
     `CONVERSATION` key first, so j/k stop there before the files.
@@ -116,7 +121,14 @@ sibling app Iris (`../Iris`).
     comments (`PUT …/discussions/:id` with `resolved`). Refusals
     (permission) are `postRejected` with the platform's message. UI: a
     Resolve / Unresolve button in `ThreadBlock` (`threadStore.setResolved`:
-    busy state, toast on failure, badge after the re-read), key `s`
+    busy state, toast on failure, badge after the re-read; the header's
+    "N unresolved threads" with ⌃ ⌄ jumps). Resolved threads fold, GitLab
+    style: by default everywhere (`historyStore.threadOpen` /
+    `thenNowOpen`: open only when mine and not resolved), and when a
+    re-read flips a thread's resolved state (`foldOnResolve` sets
+    `open` to `!resolved`; the user's own click holds until the next
+    flip); a click, Reply, then/now or `h` opens one; `n`/`p` focus the
+    header without unfolding. Key `s`
     (`resolveThread`), palette "Resolve thread" / "Unresolve thread"; no
     confirmation (reversible).
   - UI: `DiffEditor` takes `items` (blocks under lines besides threads) and
@@ -266,11 +278,14 @@ sibling app Iris (`../Iris`).
   - Keys (all rebindable): list `↑`/`↓`, `Enter`, `1`–`4`, refresh
     `Shift+R` / `Mod+R` (was bare `r`; a saved override still wins),
     `Mod+K` palette, `?` help; app `Mod+,` settings; files `j`/`k` files,
-    `n`/`p` threads and findings, `↓`/`↑` next/previous open (unresolved)
-    thread (`nextOpenThread`/`prevOpenThread`, shared with the list's
-    `↑`/`↓` via `keymap.SHARED_BY_CONTEXT`; `keyboardFlow.onReviewPage`
-    decides: the sidebar keeps the list cursor, a diff's `.cm-content` its
-    line picking; no wrap, "No more open threads" at an end), `Enter`/`t`
+    `n`/`p` threads and findings; next/previous unresolved thread
+    (`nextOpenThread`/`prevOpenThread`: resolvable and not resolved, as the
+    header counts them; no default key, run by the header's ⌃ ⌄ buttons
+    and the palette, a saved binding still applies; no wrap, "No more open
+    threads" at an end). Bare `↑`/`↓` are the list's only: on an open
+    review's page (`keyboardFlow.onReviewPage`: not the sidebar, unless the
+    list's arrows came last) they are left to the browser and scroll (a
+    diff's `.cm-content` picks lines), `Enter`/`t`
     open or fold the thread, `r` reply, `s` resolve or reopen, `h`
     then/now, `c` comment, `v` viewed, `a` AI panel, `x` select, `e` edit,
     `d` dismiss finding; composer `Mod+Enter` submit, `Esc` (fixed)

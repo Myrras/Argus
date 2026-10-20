@@ -68,3 +68,17 @@ export function ThreadCount({ total, mine }: { total: number; mine: number }) {
     </span>
   );
 }
+
+/**
+ * "2 open": the unresolved threads (resolvable, not resolved) of the
+ * Conversation; nothing when there are none.
+ */
+export function OpenCount({ count }: { count: number }) {
+  if (count === 0) return null;
+  const label = `${count} unresolved ${count === 1 ? "thread" : "threads"}`;
+  return (
+    <span className={styles.open} title={label}>
+      {count} open
+    </span>
+  );
+}

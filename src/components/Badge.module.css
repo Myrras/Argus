@@ -2,6 +2,7 @@
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
+  gap: 3px;
   height: 18px;
   padding: 0 6px;
   font-size: var(--fs-xs);

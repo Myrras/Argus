@@ -8,7 +8,8 @@
  * group, pending comments with "Post all", then the review's verdict slot:
  * "Submit review…"); where the review lives and who wrote it; then its
  * status with the round, the user's review state on the platform, the
- * reasons and what is untouched. Under a narrow island the actions move
+ * reasons, GitLab's "N unresolved threads" (every thread of the review)
+ * and what is untouched. Under a narrow island the actions move
  * below (container query).
  *
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
@@ -19,8 +20,12 @@
  * one (`ReviewDialogs`).
  */
 
-import type { ReviewRecord } from "../ipc/types";
+import type { ReviewRecord, StoredThread } from "../ipc/types";
+import { resolutionLabel, unresolvedCount } from "../lib/diffThreads";
+import { withHint } from "../lib/keymap";
 import { openExternal } from "../lib/links";
+import { runShortcut } from "../lib/useAppShortcuts";
+import { useKeymap } from "../lib/useKeymap";
 import {
   MY_STATE_LABEL,
   PROVIDER_LABEL,
@@ -33,9 +38,16 @@ import { ago, fullTime } from "../lib/time";
 import { useCommentStore, useDrafts } from "../state/commentStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
+import { useThreadStore } from "../state/threadStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
-import { ExternalLinkIcon } from "./icons";
+import {
+  ExternalLinkIcon,
+  NextThreadIcon,
+  OpenThreadIcon,
+  PrevThreadIcon,
+  ResolvedIcon,
+} from "./icons";
 import { ReviewView } from "./ReviewView";
 import { WelcomeScreen } from "./WelcomeScreen";
 import styles from "./ReviewDetail.module.css";
@@ -186,6 +198,7 @@ function ReviewHeader({
               {REASON_LABEL[reason]}
             </Badge>
           ))}
+          <Resolution reviewId={r.id} />
           {untouched && <span className={styles.untouched}>{untouched}</span>}
           {r.lastReviewedAt && (
             <span
@@ -198,5 +211,58 @@ function ReviewHeader({
         </div>
       </div>
     </header>
+  );
+}
+
+const NO_THREADS: StoredThread[] = [];
+
+/**
+ * "3 unresolved threads" or "All threads resolved", over every thread of
+ * the review (anchored ones too); nothing while they load or when none can
+ * be resolved. Follows the thread store, so a resolve moves it at once.
+ * GitLab's ⌃ / ⌄ beside it jump to the previous / next unresolved thread
+ * (`prevOpenThread` / `nextOpenThread`, as the palette runs them; "No more
+ * open threads" at an end); none when everything is resolved.
+ */
+function Resolution({ reviewId }: { reviewId: ReviewRecord["id"] }) {
+  const threads = useThreadStore(
+    (s) => s.byReview[reviewId]?.threads ?? NO_THREADS,
+  );
+  const keymap = useKeymap();
+  const label = resolutionLabel(threads);
+  if (!label) return null;
+  const open = unresolvedCount(threads);
+  const done = open === 0;
+  const Icon = done ? ResolvedIcon : OpenThreadIcon;
+  return (
+    <span className={styles.resolution} data-done={done}>
+      <Icon size={13} className={styles.resolutionIcon} />
+      {label}
+      {!done && (
+        <span
+          className={styles.jumps}
+          role="group"
+          aria-label="Unresolved threads"
+        >
+          {(
+            [
+              ["prevOpenThread", "Previous unresolved thread", PrevThreadIcon],
+              ["nextOpenThread", "Next unresolved thread", NextThreadIcon],
+            ] as const
+          ).map(([action, name, Glyph]) => (
+            <button
+              key={action}
+              type="button"
+              className={`iconButton ${styles.jump}`}
+              aria-label={name}
+              title={withHint(name, keymap, action)}
+              onClick={() => runShortcut(action)}
+            >
+              <Glyph />
+            </button>
+          ))}
+        </span>
+      )}
+    </span>
   );
 }

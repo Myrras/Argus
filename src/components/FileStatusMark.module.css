@@ -61,3 +61,12 @@
   background: var(--accent);
   border-color: var(--accent);
 }
+
+/* Unresolved threads: what is still to settle, quiet but warm. */
+.open {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--warning);
+}

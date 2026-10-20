@@ -55,6 +55,11 @@ describe("SettingsModal — Shortcuts tab", () => {
     expect(keys("Refresh")).toEqual(["⇧R", "⌘R"]);
     expect(keys("Needs review")).toEqual(["1"]);
     expect(keys("Closed without my approval")).toEqual(["4"]);
+    // The unresolved-thread jumps have no default key (bare ↑/↓ scroll).
+    expect(keys("Next unresolved thread")).toEqual([]);
+    expect(
+      within(row("Next unresolved thread")).getByText("Not bound"),
+    ).toBeVisible();
     // The native menu owns ⌘, on macOS.
     expect(screen.queryByRole("group", { name: "Open Settings" })).toBeNull();
   });

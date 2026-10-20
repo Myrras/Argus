@@ -1,7 +1,8 @@
 /**
  * The review view's navigation (`data-slot="file-tree"` body): a
- * Conversation entry with its thread count first, then the changed files as
- * folders with single-child chains compacted, or a flat path list. Per file
+ * Conversation entry with its unresolved ("2 open") and thread counts
+ * first, then the changed files as folders with single-child chains
+ * compacted, or a flat path list. Per file
  * its status, +/− counts, thread count (accent when some are the user's) and
  * a Viewed checkbox. Selecting an entry scrolls the page to it.
  *
@@ -14,7 +15,12 @@ import { useState } from "react";
 import type { FileEntry } from "../ipc/types";
 import { buildTree, type TreeNode } from "../lib/fileTree";
 import type { FileListMode } from "../state/layoutStore";
-import { FileStatusMark, LineStats, ThreadCount } from "./FileStatusMark";
+import {
+  FileStatusMark,
+  LineStats,
+  OpenCount,
+  ThreadCount,
+} from "./FileStatusMark";
 import { CaretIcon, ThreadsIcon } from "./icons";
 import styles from "./FileTree.module.css";
 
@@ -30,6 +36,8 @@ export interface FileTreeProps {
   /** The Conversation entry above the files. */
   conversation?: {
     count: { total: number; mine: number };
+    /** Its unresolved threads ("2 open"). */
+    open?: number;
     selected: boolean;
     onSelect: () => void;
   };
@@ -76,6 +84,7 @@ export function FileTree(props: FileTreeProps) {
             >
               <ThreadsIcon className={styles.conversationIcon} />
               <span className={styles.name}>Conversation</span>
+              <OpenCount count={c.open ?? 0} />
               <ThreadCount {...c.count} />
             </button>
           </li>

@@ -185,10 +185,11 @@ when it merges.
   AI findings in page order, `j`/`k` still move between files. The focused
   item gets a focus ring. `Enter` or `t` opens or folds the focused thread,
   `r` replies, `h` shows then/now, `c` comments on its line; on a finding `x`
-  selects it, `e` edits it and `d` dismisses it. `↓`/`↑` jump to the next or
-  previous open (unresolved) thread and open it, stopping at the last one
-  (in the review list they still move the cursor, in the code they still
-  pick a line); `s` resolves or reopens the focused thread.
+  selects it, `e` edits it and `d` dismisses it; `s` resolves or reopens
+  the focused thread. The ⌃ and ⌄ beside the header's unresolved count jump
+  to the previous or next unresolved thread and open it, stopping at the
+  last one. On the review page `↑`/`↓` scroll as usual; in the review list
+  they move the cursor, in the code they pick a line.
 - Command palette (⌘K / Ctrl+K): every action with its shortcut, plus Go to
   review… and Go to file…. Submit review…, Approve… and Post all… still ask
   before anything is sent.
@@ -255,6 +256,17 @@ when it merges.
   quote and with a mention ("> their line" then "@carol fixed").
 - Reply on a thread scrolls to the reply field and focuses it, also when the
   field is already open.
+- The Conversation splits its threads into Unresolved, Comments (entries
+  that cannot be resolved) and Resolved, folded until you open it, also
+  under "On other files". The file tree's Conversation entry shows how many
+  are open, and the review header says "3 unresolved threads" or "All
+  threads resolved", with ⌃ ⌄ buttons beside it that jump between the
+  unresolved threads. Resolving or reopening a thread moves it at once;
+  `n`/`p` open the Resolved group when they step into it.
+- Resolved threads fold to one line (author, Resolved badge, the first
+  words), the way GitLab collapses them: when a review opens and as soon
+  as you resolve one; reopening a thread unfolds it again. Click it, reply
+  or open its then/now history to read it in full.
 
 ### Changed
 
