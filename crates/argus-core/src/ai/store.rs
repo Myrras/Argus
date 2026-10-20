@@ -1,8 +1,10 @@
 //! AI state in SQLite: the v1 `findings`, `checklist` and `verdicts`
 //! tables, plus `ai_runs` (migration 5, [`MIGRATION`]), the diff a
-//! finding was read at (migration 6, [`MIGRATION_6`]) and the count of
+//! finding was read at (migration 6, [`MIGRATION_6`]), the count of
 //! findings left out as repeats of the review (migration 7,
-//! [`MIGRATION_7`]).
+//! [`MIGRATION_7`]) and, since migration 9 ([`MIGRATION_9`]), those
+//! findings themselves with what they repeat, plus the platform ids of a
+//! posted finding.
 
 use std::collections::{HashMap, HashSet};
 
@@ -10,8 +12,8 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, OptionalExtension, Row};
 
 use super::model::{
-    AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, Severity, Verdict,
-    VerdictLabel,
+    AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, RepeatOf,
+    RepeatReason, Severity, Verdict, VerdictLabel,
 };
 use super::output::RunOutput;
 use crate::error::{CoreError, CoreResult};
@@ -57,6 +59,23 @@ pub(crate) const MIGRATION_7: &str = r#"
     ALTER TABLE ai_runs ADD COLUMN dropped_duplicates INTEGER NOT NULL DEFAULT 0;
 "#;
 
+/// Migration 9: a finding that repeats the review is kept, set aside:
+/// `repeat_reason` (`agentMarked` / `similar`) with the thread or posted
+/// finding it repeats; `shown_anyway` once the user shows it (local only).
+/// A posted finding keeps the platform's thread and comment ids, which
+/// find its thread again whatever its text. `ai_runs.skipped_checklist`
+/// counts the checklist items a run left out as repeats. Rows from before
+/// are no repeats and have no ids (their URL still names the comment).
+pub(crate) const MIGRATION_9: &str = r#"
+    ALTER TABLE findings ADD COLUMN repeat_reason TEXT;
+    ALTER TABLE findings ADD COLUMN repeat_of_thread TEXT;
+    ALTER TABLE findings ADD COLUMN repeat_of_finding TEXT;
+    ALTER TABLE findings ADD COLUMN shown_anyway INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE findings ADD COLUMN posted_thread_id TEXT;
+    ALTER TABLE findings ADD COLUMN posted_note_id TEXT;
+    ALTER TABLE ai_runs ADD COLUMN skipped_checklist INTEGER NOT NULL DEFAULT 0;
+"#;
+
 /// Error text of a run that was running when Argus stopped.
 pub(crate) const INTERRUPTED: &str = "interrupted";
 
@@ -76,6 +95,7 @@ pub(crate) struct RunRow {
     pub dropped_findings: u32,
     pub dropped_verdicts: u32,
     pub dropped_duplicates: u32,
+    pub skipped_checklist: u32,
 }
 
 impl RunRow {
@@ -94,6 +114,7 @@ impl RunRow {
             dropped_findings: self.dropped_findings,
             dropped_verdicts: self.dropped_verdicts,
             dropped_duplicates: self.dropped_duplicates,
+            skipped_checklist: self.skipped_checklist,
             read_only_guaranteed: true,
         }
     }
@@ -108,7 +129,8 @@ fn bad(what: &str) -> rusqlite::Error {
 }
 
 const RUN_COLUMNS: &str = "review_id, status, round, adapter, error, interrupted, started_at,
-    finished_at, last_done_round, dropped_findings, dropped_verdicts, dropped_duplicates";
+    finished_at, last_done_round, dropped_findings, dropped_verdicts, dropped_duplicates,
+    skipped_checklist";
 
 fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
     let id: String = r.get(0)?;
@@ -126,6 +148,7 @@ fn run_row(r: &Row<'_>) -> rusqlite::Result<RunRow> {
         dropped_findings: r.get(9)?,
         dropped_verdicts: r.get(10)?,
         dropped_duplicates: r.get(11)?,
+        skipped_checklist: r.get(12)?,
     })
 }
 
@@ -195,12 +218,13 @@ pub(crate) fn interrupt_running(store: &Store, now: DateTime<Utc>) -> CoreResult
 
 /// Store a successful run's output for `round` and mark the run done, in
 /// one transaction. A rerun of the same round replaces that round's
-/// unposted findings and its checklist (keeping dismissed/checked marks on
-/// identical items) and the AI half of its verdicts (keeping overrides; a
-/// thread the rerun says nothing about loses its stale AI half). A finding
-/// identical to one of the round already posted is not stored again, so it
-/// cannot be posted twice. Other rounds' findings stay. A verdict in a new
-/// round takes the user's override along from the thread's previous one.
+/// unposted findings (repeats of the review included) and its checklist
+/// (keeping dismissed, shown-anyway and checked marks on identical items)
+/// and the AI half of its verdicts (keeping overrides; a thread the rerun
+/// says nothing about loses its stale AI half). A finding identical to one
+/// of the round already posted is not stored again, so it cannot be posted
+/// twice. Other rounds' findings stay. A verdict in a new round takes the
+/// user's override along from the thread's previous one.
 pub(crate) fn save_done(
     store: &Store,
     review: ReviewId,
@@ -216,6 +240,16 @@ pub(crate) fn save_done(
         let mut stmt = tx.prepare(
             "SELECT path, line, title FROM findings
              WHERE review_id = ?1 AND round = ?2 AND dismissed = 1",
+        )?;
+        let rows = stmt.query_map(params![rid, round], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
+    let shown_anyway: HashSet<(String, u32, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT path, line, title FROM findings
+             WHERE review_id = ?1 AND round = ?2 AND shown_anyway = 1",
         )?;
         let rows = stmt.query_map(params![rid, round], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -242,11 +276,14 @@ pub(crate) fn save_done(
         if posted.contains(&key) {
             continue;
         }
-        let was_dismissed = dismissed.contains(&(f.path.clone(), f.line, f.title.clone()));
+        let key = (f.path.clone(), f.line, f.title.clone());
+        let was_dismissed = dismissed.contains(&key);
+        let repeat = f.repeat.map(|r| r.repeat_of());
         tx.execute(
             "INSERT INTO findings (id, review_id, round, path, line, side, severity, title, body,
-                dismissed, head_sha, base_sha)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                dismissed, head_sha, base_sha, repeat_reason, repeat_of_thread,
+                repeat_of_finding, shown_anyway)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 FindingId::new().to_string(),
                 rid,
@@ -260,6 +297,16 @@ pub(crate) fn save_done(
                 was_dismissed,
                 out.head_sha,
                 out.base_sha,
+                repeat.as_ref().map(|r| r.reason.as_str()),
+                repeat
+                    .as_ref()
+                    .and_then(|r| r.thread_id)
+                    .map(|t| t.to_string()),
+                repeat
+                    .as_ref()
+                    .and_then(|r| r.finding_id)
+                    .map(|f| f.to_string()),
+                repeat.is_some() && shown_anyway.contains(&key),
             ],
         )?;
     }
@@ -275,7 +322,7 @@ pub(crate) fn save_done(
         "DELETE FROM checklist WHERE review_id = ?1 AND round = ?2",
         params![rid, round],
     )?;
-    for text in &out.checklist {
+    for text in out.checklist.iter().map(|c| &c.text) {
         tx.execute(
             "INSERT INTO checklist (id, review_id, round, text, checked)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -320,7 +367,7 @@ pub(crate) fn save_done(
     let n = tx.execute(
         "UPDATE ai_runs SET status = 'done', error = NULL, interrupted = 0, round = ?2,
             finished_at = ?3, last_done_round = ?2, dropped_findings = ?4, dropped_verdicts = ?5,
-            dropped_duplicates = ?6
+            dropped_duplicates = ?6, skipped_checklist = ?7
          WHERE review_id = ?1",
         params![
             rid,
@@ -328,7 +375,8 @@ pub(crate) fn save_done(
             now,
             out.dropped_findings,
             out.dropped_verdicts,
-            out.dropped_duplicates
+            out.dropped_duplicates,
+            out.skipped_checklist
         ],
     )?;
     if n == 0 {
@@ -345,8 +393,11 @@ fn side_str(side: Side) -> &'static str {
     }
 }
 
-const FINDING_COLUMNS: &str =
-    "id, review_id, round, path, line, side, severity, title, body, dismissed, posted_at, posted_url";
+const FINDING_COLUMNS: &str = "id, review_id, round, path, line, side, severity, title, body,
+    dismissed, posted_at, posted_url, repeat_reason, repeat_of_thread, repeat_of_finding";
+
+/// A finding set aside as a repeat of the review, not shown anyway.
+const SKIPPED: &str = "repeat_reason IS NOT NULL AND shown_anyway = 0";
 
 fn finding_row(r: &Row<'_>) -> rusqlite::Result<Finding> {
     let id: String = r.get(0)?;
@@ -369,19 +420,107 @@ fn finding_row(r: &Row<'_>) -> rusqlite::Result<Finding> {
         dismissed: r.get(9)?,
         posted_at: r.get(10)?,
         posted_url: r.get(11)?,
+        repeat_of: match r.get::<_, Option<String>>(12)? {
+            None => None,
+            Some(reason) => Some(RepeatOf {
+                reason: RepeatReason::parse(&reason).ok_or_else(|| bad("repeat reason"))?,
+                thread_id: r
+                    .get::<_, Option<String>>(13)?
+                    .map(|t| t.parse().map_err(|_| bad("thread id")))
+                    .transpose()?,
+                finding_id: r
+                    .get::<_, Option<String>>(14)?
+                    .map(|f| f.parse().map_err(|_| bad("finding id")))
+                    .transpose()?,
+            }),
+        },
     })
 }
 
-/// Every finding of `review`, all rounds: severity (high first), then path
-/// and line, newest round first among equals.
+/// Every finding of `review` shown as one, all rounds: severity (high
+/// first), then path and line, newest round first among equals. Repeats of
+/// the review are left out unless shown anyway ([`skipped_findings`]).
 pub(crate) fn findings(store: &Store, review: ReviewId) -> CoreResult<Vec<Finding>> {
+    findings_where(store, review, &format!("NOT ({SKIPPED})"))
+}
+
+/// The findings of `review` set aside as repeats of the review, in the
+/// same order.
+pub(crate) fn skipped_findings(store: &Store, review: ReviewId) -> CoreResult<Vec<Finding>> {
+    findings_where(store, review, SKIPPED)
+}
+
+fn findings_where(store: &Store, review: ReviewId, filter: &str) -> CoreResult<Vec<Finding>> {
     let conn = store.conn();
     let mut stmt = conn.prepare(&format!(
-        "SELECT {FINDING_COLUMNS} FROM findings WHERE review_id = ?1
+        "SELECT {FINDING_COLUMNS} FROM findings WHERE review_id = ?1 AND {filter}
          ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
             path, line, round DESC, rowid"
     ))?;
     let rows = stmt.query_map([review.to_string()], finding_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Show a finding set aside as a repeat anyway: it becomes a normal
+/// finding (keeping what it repeats). Local only.
+pub(crate) fn show_anyway(store: &Store, id: FindingId) -> CoreResult<Finding> {
+    let conn = store.conn();
+    let n = conn.execute(
+        "UPDATE findings SET shown_anyway = 1 WHERE id = ?1",
+        params![id.to_string()],
+    )?;
+    if n == 0 {
+        return Err(CoreError::NotFound);
+    }
+    Ok(conn.query_row(
+        &format!("SELECT {FINDING_COLUMNS} FROM findings WHERE id = ?1"),
+        [id.to_string()],
+        finding_row,
+    )?)
+}
+
+/// Whether `id` is set aside as a repeat of the review (and not shown
+/// anyway): such a finding is not posted.
+pub(crate) fn is_skipped(store: &Store, id: FindingId) -> CoreResult<bool> {
+    Ok(store
+        .conn()
+        .query_row(
+            &format!("SELECT {SKIPPED} FROM findings WHERE id = ?1"),
+            [id.to_string()],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// The platform ids a posted finding's comment got (`None` before
+/// migration 9).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PostedIds {
+    pub thread: Option<String>,
+    pub note: Option<String>,
+}
+
+/// [`PostedIds`] of every posted finding of `review`.
+pub(crate) fn posted_ids(
+    store: &Store,
+    review: ReviewId,
+) -> CoreResult<HashMap<FindingId, PostedIds>> {
+    let conn = store.conn();
+    let mut stmt = conn.prepare(
+        "SELECT id, posted_thread_id, posted_note_id FROM findings
+         WHERE review_id = ?1 AND posted_at IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([review.to_string()], |r| {
+        let id: String = r.get(0)?;
+        Ok((
+            id.parse().map_err(|_| bad("finding id"))?,
+            PostedIds {
+                thread: r.get(1)?,
+                note: r.get(2)?,
+            },
+        ))
+    })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -425,16 +564,20 @@ pub(crate) fn finding_shas(
     )?)
 }
 
-/// Record that the user posted the finding as a comment at `url`.
+/// Record that the user posted the finding as a comment at `url`, with the
+/// platform's ids of it.
 pub(crate) fn mark_posted(
     store: &Store,
     id: FindingId,
     url: &str,
+    ids: &PostedIds,
     now: DateTime<Utc>,
 ) -> CoreResult<()> {
     let n = store.conn().execute(
-        "UPDATE findings SET posted_at = ?2, posted_url = ?3 WHERE id = ?1",
-        params![id.to_string(), now, url],
+        "UPDATE findings SET posted_at = ?2, posted_url = ?3, posted_thread_id = ?4,
+            posted_note_id = ?5
+         WHERE id = ?1",
+        params![id.to_string(), now, url, ids.thread, ids.note],
     )?;
     if n == 0 {
         return Err(CoreError::NotFound);

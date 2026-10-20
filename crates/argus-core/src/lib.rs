@@ -53,7 +53,8 @@ use chrono::Utc;
 
 pub use ai::{
     AiRunState, AiRunStatus, AiStateCallback, ChecklistId, ChecklistItem, Finding, FindingId,
-    FindingPost, FindingPostOutcome, FindingPostResult, Severity, Verdict, VerdictLabel,
+    FindingPost, FindingPostOutcome, FindingPostResult, RepeatOf, RepeatReason, Severity, Verdict,
+    VerdictLabel,
 };
 pub use error::{CoreError, CoreResult};
 pub use files::{FileEntry, ReviewFiles};

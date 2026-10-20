@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use argus_core::ai::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPostOutcome,
-    FindingPostResult, Severity, Verdict, VerdictLabel,
+    FindingPostResult, RepeatOf, RepeatReason, Severity, Verdict, VerdictLabel,
 };
 use argus_core::files::{FileEntry, ReviewFiles};
 use argus_core::history::{
@@ -435,6 +435,7 @@ fn current() -> Value {
         dropped_findings: 0,
         dropped_verdicts: 0,
         dropped_duplicates: 0,
+        skipped_checklist: 0,
         read_only_guaranteed: true,
     };
     let finding_id = FindingId::new();
@@ -451,6 +452,11 @@ fn current() -> Value {
         dismissed: false,
         posted_at: Some(t),
         posted_url: Some("https://github.com/acme-fixture/widgets/pull/12#r2".into()),
+        repeat_of: Some(RepeatOf {
+            reason: RepeatReason::AgentMarked,
+            thread_id: Some(thread_id),
+            finding_id: Some(finding_id),
+        }),
     };
     let checklist = ChecklistItem {
         id: ChecklistId::new(),
@@ -597,6 +603,10 @@ fn current() -> Value {
                 VerdictLabel::Partly,
                 VerdictLabel::Untouched,
             ]),
+        ),
+        (
+            "RepeatReason",
+            values(&[RepeatReason::AgentMarked, RepeatReason::Similar]),
         ),
     ]);
     json!({ "structs": structs, "enums": enums })

@@ -336,6 +336,10 @@ fn upgrades_every_older_database_to_the_latest_keeping_its_data() {
             (Side::New, Severity::High, 10)
         );
         assert_eq!(findings[0].title, "Old finding");
+        // No repeats before migration 9: nothing set aside.
+        assert_eq!(findings[0].repeat_of, None);
+        assert!(ai_store::skipped_findings(&store, r.id).unwrap().is_empty());
+        assert_eq!(ai_store::run(&store, r.id).unwrap(), None);
         let checklist = ai_store::checklist(&store, r.id).unwrap();
         assert_eq!(checklist.len(), 1);
         assert!(checklist[0].checked);

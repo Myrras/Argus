@@ -30,6 +30,7 @@ import type {
   ProviderId,
   ProviderStatus,
   RefreshReport,
+  RepeatReason,
   ReviewFiles,
   ReviewRecord,
   ReviewState,
@@ -332,6 +333,7 @@ const aiState: AiRunState = {
   droppedFindings: 0,
   droppedVerdicts: 0,
   droppedDuplicates: 0,
+  skippedChecklist: 0,
   readOnlyGuaranteed: true,
 };
 
@@ -348,6 +350,7 @@ const finding: Finding = {
   dismissed: false,
   postedAt: T,
   postedUrl: "u",
+  repeatOf: { reason: "agentMarked", threadId: THREAD, findingId: FINDING },
 };
 
 const checklist: ChecklistItem = {
@@ -494,6 +497,10 @@ const verdictLabels = [
   "partly",
   "untouched",
 ] as const satisfies readonly VerdictLabel[];
+const repeatReasons = [
+  "agentMarked",
+  "similar",
+] as const satisfies readonly RepeatReason[];
 
 // Each list names every member of its type (a compile error otherwise).
 const covered: true[] = [
@@ -513,6 +520,7 @@ const covered: true[] = [
   true satisfies Covers<AiRunStatus, typeof aiRunStatuses>,
   true satisfies Covers<Severity, typeof severities>,
   true satisfies Covers<VerdictLabel, typeof verdictLabels>,
+  true satisfies Covers<RepeatReason, typeof repeatReasons>,
 ];
 
 const enums: Record<string, readonly string[]> = {
@@ -532,6 +540,7 @@ const enums: Record<string, readonly string[]> = {
   AiRunStatus: aiRunStatuses,
   Severity: severities,
   VerdictLabel: verdictLabels,
+  RepeatReason: repeatReasons,
 };
 
 describe("wire shapes (types.ts vs the Rust snapshot)", () => {

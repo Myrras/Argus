@@ -174,6 +174,9 @@ const MIGRATIONS: &[&str] = &[
           AND r.viewer <> '' AND lower(n.author) = lower(r.viewer)
     );
     "#,
+    // 9: findings set aside as repeats of the review, kept with what they
+    // repeat; a posted finding's platform ids; checklist repeats counted.
+    crate::ai::store::MIGRATION_9,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus

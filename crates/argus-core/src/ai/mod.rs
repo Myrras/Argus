@@ -6,8 +6,9 @@
 //!   spawn/timeout/kill loop.
 //! - [`prompt`]: the prompt text (consts) and its assembly.
 //! - [`output`]: JSON extraction and strict validation of the answer.
-//! - [`dedupe`]: the safety net that drops findings the review already
-//!   makes (an existing thread, a posted finding).
+//! - [`dedupe`]: sets aside findings and checklist items the review
+//!   already makes (an existing thread, a posted finding): the agent's own
+//!   `relatedThreadIds`, checked against the text, plus a text net.
 //! - [`job`]: one run end to end (diff, workspace, prompt, retry).
 //! - [`runtime`]: queueing (per review serial, two at once), `ai:state`,
 //!   and the shutdown that kills running agents on quit.
@@ -32,7 +33,7 @@ pub mod model;
 pub use job::sweep_stale_temp_dirs;
 pub use model::{
     AiRunState, AiRunStatus, ChecklistId, ChecklistItem, Finding, FindingId, FindingPost,
-    FindingPostOutcome, FindingPostResult, Severity, Verdict, VerdictLabel,
+    FindingPostOutcome, FindingPostResult, RepeatOf, RepeatReason, Severity, Verdict, VerdictLabel,
 };
 pub use prompt::ThreadSnapshot;
 pub use runtime::AiStateCallback;

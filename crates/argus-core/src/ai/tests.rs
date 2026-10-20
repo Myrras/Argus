@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use super::adapter::{self, AgentError, Invocation, OutputKind};
 use super::job::{self, JobContext};
-use super::model::{AiRunStatus, Severity, VerdictLabel};
+use super::model::{AiRunStatus, RepeatOf, RepeatReason, Severity, VerdictLabel};
 use super::output::{RawFinding, RunOutput};
 use super::runtime::{AiRuntime, Executor};
 use super::store::{self as ai_store, RunRow};
@@ -115,6 +115,8 @@ fn finding(path: &str, line: u32, severity: Severity, title: &str) -> RawFinding
         severity,
         title: title.into(),
         body: "why".into(),
+        related: Vec::new(),
+        repeat: None,
     }
 }
 
@@ -132,6 +134,7 @@ fn run_row(status: AiRunStatus, round: u32, last_done: Option<u32>, interrupted:
         dropped_findings: 0,
         dropped_verdicts: 0,
         dropped_duplicates: 0,
+        skipped_checklist: 0,
     }
 }
 
@@ -428,7 +431,7 @@ fn a_rerun_drops_stale_verdicts_and_never_repeats_a_posted_finding() {
     };
     ai_store::save_done(&store, r.id, 1, &first, at(10, 2)).unwrap();
     let posted = ai_store::findings(&store, r.id).unwrap()[0].id;
-    ai_store::mark_posted(&store, posted, "u#1", at(10, 3)).unwrap();
+    ai_store::mark_posted(&store, posted, "u#1", &Default::default(), at(10, 3)).unwrap();
 
     // The same round again: the posted finding comes back, t2 is left out.
     let rerun = RunOutput {
@@ -742,7 +745,7 @@ fn a_secret_in_the_answer_never_reaches_the_store() {
                     body: format!("~/.config/gh/hosts.yml holds {t2}"),
                     ..finding("src/a.rs", 1, Severity::High, "Token in a file")
                 }],
-                checklist: vec![format!("Rotate {t2}")],
+                checklist: vec![format!("Rotate {t2}").as_str().into()],
                 ..RunOutput::default()
             })
         },
@@ -1535,8 +1538,41 @@ fn a_run_never_repeats_what_the_review_already_says() {
     );
 
     let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
-    let titles: Vec<_> = out.findings.iter().map(|f| f.title.as_str()).collect();
-    assert_eq!(titles, vec!["Unbounded cache growth"]);
+    let new: Vec<_> = out
+        .findings
+        .iter()
+        .filter(|f| f.repeat.is_none())
+        .map(|f| f.title.as_str())
+        .collect();
+    assert_eq!(new, vec!["Unbounded cache growth"]);
+    let bob = ThreadId::from_key(r.id, "bob");
+    let carol = ThreadId::from_key(r.id, "carol");
+    let repeats: Vec<_> = out
+        .findings
+        .iter()
+        .filter_map(|f| f.repeat.map(|rep| (f.title.as_str(), rep.repeat_of())))
+        .collect();
+    assert_eq!(
+        repeats,
+        vec![
+            (
+                "TTL of 0 disables the cache",
+                RepeatOf {
+                    reason: RepeatReason::Similar,
+                    thread_id: Some(bob),
+                    finding_id: None
+                }
+            ),
+            (
+                "Widgets are fetched twice per request",
+                RepeatOf {
+                    reason: RepeatReason::Similar,
+                    thread_id: Some(carol),
+                    finding_id: None
+                }
+            ),
+        ]
+    );
     assert_eq!(out.dropped_duplicates, 2);
     assert_eq!(out.dropped_findings, 0);
     let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
@@ -1554,7 +1590,14 @@ fn a_run_never_repeats_what_the_review_already_says() {
         .unwrap()
         .state(true, false);
     assert_eq!(state.dropped_duplicates, 2);
+    // Set aside, not lost: listed apart with what they repeat.
     assert_eq!(ai_store::findings(&store, r.id).unwrap().len(), 1);
+    let skipped = ai_store::skipped_findings(&store, r.id).unwrap();
+    assert_eq!(skipped.len(), 2);
+    assert_eq!(
+        skipped[0].repeat_of.as_ref().and_then(|x| x.thread_id),
+        Some(bob)
+    );
 }
 
 #[test]
@@ -1578,12 +1621,21 @@ fn a_later_round_does_not_repeat_a_finding_the_user_posted() {
             severity: Severity::High,
             title: "TTL of 0 disables the cache".into(),
             body: "Every lookup misses.".into(),
+            related: Vec::new(),
+            repeat: None,
         }],
         ..RunOutput::default()
     };
     ai_store::save_done(&store, r.id, 1, &round1, at(9, 2)).unwrap();
     let posted = ai_store::findings(&store, r.id).unwrap()[0].id;
-    ai_store::mark_posted(&store, posted, "https://example.test/c/1", at(9, 3)).unwrap();
+    ai_store::mark_posted(
+        &store,
+        posted,
+        "https://example.test/c/1",
+        &Default::default(),
+        at(9, 3),
+    )
+    .unwrap();
     r.round = 2;
     let c = ctx(
         fake_settings(&script, "claude"),
@@ -1591,23 +1643,140 @@ fn a_later_round_does_not_repeat_a_finding_the_user_posted() {
     );
 
     let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
-    let titles: Vec<_> = out.findings.iter().map(|f| f.title.as_str()).collect();
+    let new: Vec<_> = out
+        .findings
+        .iter()
+        .filter(|f| f.repeat.is_none())
+        .map(|f| f.title.as_str())
+        .collect();
     assert_eq!(
-        titles,
+        new,
         vec![
             "Unbounded cache growth",
             "Widgets are fetched twice per request"
         ]
     );
+    assert_eq!(
+        out.findings[0].repeat.map(|x| x.repeat_of()),
+        Some(RepeatOf {
+            reason: RepeatReason::Similar,
+            thread_id: None,
+            finding_id: Some(posted),
+        })
+    );
     assert_eq!(out.dropped_duplicates, 1);
     let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
     assert!(stdin.contains(prompt::LATER_ROUND_TASK));
-    assert!(stdin.contains(
-        "## Posted by the reviewer from the AI pass (round 1) · on src/a.rs line 2 (new side)"
-    ));
+    assert!(stdin.contains(&format!(
+        "## id: {posted} · Posted by the reviewer from the AI pass (round 1) · on src/a.rs line 2 (new side)"
+    )));
     // The user's open thread: pointed at from the existing threads, in
     // full under "Your open threads".
     assert!(stdin.contains("the reviewer's own; in full under \"Your open threads\""));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_agents_related_threads_catch_paraphrases_and_dutch_comments() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let linear = said_on(
+        "bob",
+        "bob-fixture",
+        Some(2),
+        "Lookups by id are linear in the widget count; a HashMap keyed by id avoids the scan.",
+    );
+    let dutch = said_on(
+        "carol",
+        "carol-fixture",
+        Some(2),
+        "Dit crasht als `items` leeg is: `items[0]` heeft geen check. Gebruik eerst `is_empty()`.",
+    );
+    let general = said_on(
+        "dave",
+        "dave-fixture",
+        None,
+        "No migration for old caches: existing entries keep the old format.",
+    );
+    store
+        .upsert_threads(r.id, &[linear, dutch, general], ME)
+        .unwrap();
+    let bob = ThreadId::from_key(r.id, "bob").to_string();
+    let carol = ThreadId::from_key(r.id, "carol").to_string();
+    let dave = ThreadId::from_key(r.id, "dave").to_string();
+    let answer = serde_json::json!({
+        "findings": [
+            {"path": "src/a.rs", "line": 2, "side": "new", "severity": "medium",
+             "title": "Finding a widget walks the whole Vec",
+             "body": "Every call iterates all widgets to match the id; index them in a map instead.",
+             "relatedThreadIds": [bob]},
+            {"path": "src/a.rs", "line": 2, "side": "new", "severity": "high",
+             "title": "Indexing an empty items list panics",
+             "body": "`items[0]` panics when `items` is empty; guard with `is_empty()` first.",
+             "relatedThreadIds": [carol.to_uppercase(), "00000000-0000-4000-8000-000000000000"]},
+            {"path": "src/a.rs", "line": 2, "side": "new", "severity": "low",
+             "title": "The widget map is never cleared on logout",
+             "body": "Entries of a logged-out user stay in memory for good; clear them in `logout`.",
+             "relatedThreadIds": [bob, "00000000-0000-4000-8000-000000000000"]}
+        ],
+        "checklist": [
+            {"text": "Do old cache entries need a migration on upgrade?", "relatedThreadIds": [dave]},
+            {"text": "Is turning the cache off intended?", "relatedThreadIds": []}
+        ],
+        "verdicts": []
+    });
+    std::fs::write(
+        bin.path().join("out.jsonl"),
+        result_line(&answer.to_string()),
+    )
+    .unwrap();
+    let c = ctx(
+        fake_settings(&script, "claude"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let marks: Vec<_> = out
+        .findings
+        .iter()
+        .map(|f| (f.title.as_str(), f.repeat.map(|x| x.repeat_of())))
+        .collect();
+    let agent = |t: &str| {
+        Some(RepeatOf {
+            reason: RepeatReason::AgentMarked,
+            thread_id: Some(t.parse().unwrap()),
+            finding_id: None,
+        })
+    };
+    assert_eq!(
+        marks,
+        vec![
+            ("Finding a widget walks the whole Vec", agent(&bob)),
+            ("Indexing an empty items list panics", agent(&carol)),
+            ("The widget map is never cleared on logout", None),
+        ]
+    );
+    // The unknown id left the list, not the finding.
+    assert_eq!(out.findings[2].related, vec![bob.clone()]);
+    assert_eq!(out.dropped_duplicates, 2);
+    assert_eq!(out.checklist, vec!["Is turning the cache off intended?"]);
+    assert_eq!(out.skipped_checklist, 1);
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(stdin.contains("relatedThreadIds (every finding and checklist item)"));
+    assert!(stdin.contains(&format!("## id: {bob} · open ·")));
+
+    ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();
+    ai_store::save_done(&store, r.id, 1, &out, at(10, 12)).unwrap();
+    let state = ai_store::run(&store, r.id)
+        .unwrap()
+        .unwrap()
+        .state(true, false);
+    assert_eq!((state.dropped_duplicates, state.skipped_checklist), (2, 1));
+    assert_eq!(ai_store::skipped_findings(&store, r.id).unwrap().len(), 2);
+    assert_eq!(ai_store::checklist(&store, r.id).unwrap().len(), 1);
 }
 
 /// A later-round review with one open thread of the user's, `t1`, on head

@@ -227,6 +227,20 @@ export function listVerdicts(reviewId: ReviewId): Promise<Verdict[]> {
   return invoke("list_verdicts", { reviewId });
 }
 
+/**
+ * The review's findings set aside as already raised in the review (an
+ * existing thread or a posted finding makes their point), with what each
+ * repeats.
+ */
+export function listSkippedFindings(reviewId: ReviewId): Promise<Finding[]> {
+  return invoke("list_skipped_findings", { reviewId });
+}
+
+/** Show a set-aside finding anyway: it becomes a normal finding. Local only. */
+export function showFindingAnyway(findingId: FindingId): Promise<Finding> {
+  return invoke("show_finding_anyway", { findingId });
+}
+
 /** Queue a run now; rejects with `invalidInput` when the AI pass is off. */
 export function runAi(reviewId: ReviewId): Promise<AiRunState> {
   return invoke("run_ai", { reviewId });

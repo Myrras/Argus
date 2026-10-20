@@ -16,6 +16,7 @@ use super::dedupe;
 use super::model::Finding;
 use super::output::{self, RunOutput};
 use super::prompt::{self, DiffScope, ExistingThread, PromptInput, Workspace};
+use super::store::PostedIds;
 use crate::files::{review_range, since_range};
 use crate::provider::{FileDiff, ReviewProvider};
 use crate::settings::Settings;
@@ -291,24 +292,29 @@ pub(crate) fn execute(
         .map(|t| thread_snapshot(store, record, t.thread_id))
         .collect();
     let earlier = super::store::findings(store, record.id).map_err(|e| e.to_string())?;
-    let posted: Vec<&Finding> = earlier.iter().filter(|f| f.posted_at.is_some()).collect();
+    let posted_ids = super::store::posted_ids(store, record.id).map_err(|e| e.to_string())?;
+    // A posted finding whose thread is already fetched is that thread.
+    let unfetched: Vec<&Finding> = earlier
+        .iter()
+        .filter(|f| f.posted_at.is_some())
+        .filter(|f| {
+            let ids = posted_ids.get(&f.id).cloned().unwrap_or_default();
+            !threads.iter().any(|t| posted_as(t, f, &ids))
+        })
+        .collect();
     let raised = dedupe::raised_points(
         &threads
             .iter()
             .zip(snapshots.iter().cloned())
             .collect::<Vec<_>>(),
-        &posted,
+        &unfetched,
     );
+    // What `relatedThreadIds` may name: what the prompt lists by id.
+    let related: HashSet<String> = raised.iter().map(|r| r.of.id()).collect();
     let existing: Vec<ExistingThread<'_>> = threads
         .iter()
         .zip(snapshots)
         .map(|(thread, snapshot)| ExistingThread { thread, snapshot })
-        .collect();
-    // A posted finding whose thread is already fetched is in `existing`.
-    let unfetched: Vec<&Finding> = posted
-        .iter()
-        .copied()
-        .filter(|f| !threads.iter().any(|t| posted_as(t, f)))
         .collect();
     let paths: HashSet<String> = diff
         .files
@@ -410,8 +416,8 @@ pub(crate) fn execute(
                 .map_err(|e| format!("the agent's answer was invalid after a retry: {e}"))?
         }
     };
-    let mut run = output::filter(parsed, &paths, &known);
-    dedupe::drop_repeats(&mut run, &raised);
+    let mut run = output::filter(parsed, &paths, &known, &related);
+    dedupe::classify(&mut run, &raised, &diff);
     Ok(RunOutput {
         // The shas of the diff actually returned (the provider's contract),
         // which for a run since the last review has the watermark as its
@@ -422,20 +428,43 @@ pub(crate) fn execute(
     })
 }
 
-/// Whether `t` is the thread posting `f` made: started by the user (a
-/// colleague's thread the user replied in is theirs, but not a post), on
-/// its file, its root carrying the finding's title (the posted body starts
-/// with it unless the user rewrote it).
-fn posted_as(t: &StoredThread, f: &Finding) -> bool {
-    t.started_by_me
-        && t.thread.anchor.as_ref().is_some_and(|a| {
-            a.path_new.as_deref() == Some(f.path.as_str())
-                || a.path_old.as_deref() == Some(f.path.as_str())
-        })
-        && t.thread
-            .notes
-            .first()
-            .is_some_and(|n| n.body.contains(f.title.as_str()))
+/// Whether `t` is the thread posting `f` made, by the platform's ids: the
+/// thread id and comment id the post returned, or (a finding posted before
+/// Argus kept them) the comment id in its URL (`#discussion_r<id>`,
+/// `#note_<id>`, `#issuecomment-<id>`). Never by text: the user may have
+/// edited what was posted.
+fn posted_as(t: &StoredThread, f: &Finding, ids: &PostedIds) -> bool {
+    if ids.thread.as_deref() == Some(t.thread.id.as_str()) {
+        return true;
+    }
+    let notes: Vec<String> = match &ids.note {
+        Some(n) => vec![n.clone()],
+        None => f
+            .posted_url
+            .as_deref()
+            .map(url_note_ids)
+            .unwrap_or_default(),
+    };
+    t.thread.notes.iter().any(|n| notes.contains(&n.id))
+}
+
+/// The comment ids a posted comment's URL may name, from its fragment: the
+/// fragment itself (`issuecomment-1`, a conversation entry's key) and its
+/// number after a known prefix.
+fn url_note_ids(url: &str) -> Vec<String> {
+    let Some((_, fragment)) = url.rsplit_once('#') else {
+        return Vec::new();
+    };
+    let mut ids = vec![fragment.to_string()];
+    for prefix in ["discussion_r", "note_", "r"] {
+        if let Some(n) = fragment.strip_prefix(prefix) {
+            if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                ids.push(n.to_string());
+                break;
+            }
+        }
+    }
+    ids
 }
 
 /// Why an auggie run did not start: its tools could not be listed (the
@@ -500,8 +529,8 @@ mod tests {
     }
 
     #[test]
-    fn a_posted_finding_is_a_thread_the_user_started_not_one_they_replied_in() {
-        let f = Finding {
+    fn a_posted_finding_is_found_by_the_platform_ids_not_its_text() {
+        let mut f = Finding {
             id: crate::ai::FindingId::new(),
             review_id: ReviewId::from_key("r"),
             round: 1,
@@ -513,10 +542,38 @@ mod tests {
             body: "b".into(),
             dismissed: false,
             posted_at: Some(at(10, 0)),
-            posted_url: None,
+            posted_url: Some(
+                "https://github.example.test/acme-fixture/widgets/pull/12#discussion_r501".into(),
+            ),
+            repeat_of: None,
         };
-        assert!(posted_as(&stored(ME, "**Off by one**\n\nb"), &f));
-        // A colleague's thread making the same point, with the user's reply.
-        assert!(!posted_as(&stored(AUTHOR, "Off by one here?"), &f));
+        // The user rewrote the text before posting: the comment id finds it.
+        let mut mine = stored(ME, "Rewritten: the loop stops one early.");
+        mine.thread.notes[0].id = "501".into();
+        assert!(posted_as(&mine, &f, &PostedIds::default()));
+        // A colleague's thread with the finding's very title is not it.
+        let theirs = stored(AUTHOR, "**Off by one**\n\nb");
+        assert!(!posted_as(&theirs, &f, &PostedIds::default()));
+        // GitLab's note URL, and the ids the post returned.
+        f.posted_url = Some(
+            "https://gitlab.example.test/acme-fixture/widgets/-/merge_requests/3#note_501".into(),
+        );
+        assert!(posted_as(&mine, &f, &PostedIds::default()));
+        f.posted_url = None;
+        assert!(!posted_as(&mine, &f, &PostedIds::default()));
+        let by_thread = PostedIds {
+            thread: Some("1".into()),
+            note: None,
+        };
+        assert!(posted_as(&mine, &f, &by_thread));
+        let by_note = PostedIds {
+            thread: None,
+            note: Some("501".into()),
+        };
+        assert!(posted_as(&mine, &f, &by_note));
+        assert_eq!(
+            url_note_ids("https://github.example.test/o/r/pull/1#issuecomment-77"),
+            vec!["issuecomment-77".to_string()]
+        );
     }
 }

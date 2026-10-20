@@ -8,14 +8,17 @@
 //!   queued: boolean; round: number | null; adapter: string | null;
 //!   error: string | null; startedAt: string | null; finishedAt: string | null;
 //!   lastDoneRound: number | null; droppedFindings: number; droppedVerdicts: number;
-//!   droppedDuplicates: number; readOnlyGuaranteed: boolean;
+//!   droppedDuplicates: number; skippedChecklist: number; readOnlyGuaranteed: boolean;
 //! }
 //! type Severity = "high" | "medium" | "low";
 //! interface Finding {
 //!   id: string; reviewId: string; round: number; path: string; line: number;
 //!   side: "old" | "new"; severity: Severity; title: string; body: string;
 //!   dismissed: boolean; postedAt: string | null; postedUrl: string | null;
+//!   repeatOf: RepeatOf | null;
 //! }
+//! type RepeatReason = "agentMarked" | "similar";
+//! interface RepeatOf { reason: RepeatReason; threadId: string | null; findingId: string | null }
 //! interface ChecklistItem { id: string; reviewId: string; round: number; text: string; checked: boolean }
 //! interface FindingPost { findingId: string; body?: string }  // body: the user's edit
 //! type FindingPostResult = { findingId: string } & (
@@ -146,10 +149,14 @@ pub struct AiRunState {
     pub dropped_findings: u32,
     /// Verdicts the latest successful run dropped: unknown thread ids.
     pub dropped_verdicts: u32,
-    /// Findings the latest successful run dropped because the review
+    /// Findings the latest successful run set aside because the review
     /// already makes their point: an existing thread (anyone's, open or
-    /// resolved) or a finding the user posted.
+    /// resolved) or a finding the user posted. They are listed apart
+    /// (`Core::skipped_findings`), never shown as findings.
     pub dropped_duplicates: u32,
+    /// Checklist items the latest successful run left out for the same
+    /// reason (counted only).
+    pub skipped_checklist: u32,
     /// Whether Argus can guarantee the configured agent only reads. False
     /// for `auggie`: its user-configured MCP tools cannot be turned off, so
     /// the UI warns.
@@ -172,6 +179,7 @@ impl AiRunState {
             dropped_findings: 0,
             dropped_verdicts: 0,
             dropped_duplicates: 0,
+            skipped_checklist: 0,
             read_only_guaranteed: true,
         }
     }
@@ -222,6 +230,48 @@ pub struct Finding {
     /// Set once the user posted it as a comment (`Core::post_findings`).
     pub posted_at: Option<DateTime<Utc>>,
     pub posted_url: Option<String>,
+    /// Set when the run found that the review already makes this point. A
+    /// finding with it is listed under "Skipped as already raised" until
+    /// the user shows it anyway (it keeps the mark then).
+    pub repeat_of: Option<RepeatOf>,
+}
+
+/// Why a finding counts as a repeat of the review (`super::dedupe`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RepeatReason {
+    /// The agent listed the thread as related and the text still says
+    /// what the thread says.
+    AgentMarked,
+    /// Argus' own text comparison found the point near the thread.
+    Similar,
+}
+
+impl RepeatReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RepeatReason::AgentMarked => "agentMarked",
+            RepeatReason::Similar => "similar",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "agentMarked" => Some(RepeatReason::AgentMarked),
+            "similar" => Some(RepeatReason::Similar),
+            _ => None,
+        }
+    }
+}
+
+/// What a finding repeats: a thread of the review, or a finding the user
+/// posted whose thread was not fetched yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepeatOf {
+    pub reason: RepeatReason,
+    pub thread_id: Option<ThreadId>,
+    pub finding_id: Option<FindingId>,
 }
 
 /// One finding the user posts as a line comment, with their edit of its
@@ -324,6 +374,11 @@ mod tests {
         assert!(v.get("lastDoneRound").is_some());
         assert!(v.get("droppedFindings").is_some());
         assert_eq!(v["droppedDuplicates"], 0);
+        assert_eq!(v["skippedChecklist"], 0);
+        for r in [RepeatReason::AgentMarked, RepeatReason::Similar] {
+            assert_eq!(RepeatReason::parse(r.as_str()), Some(r));
+            assert_eq!(serde_json::to_value(r).unwrap(), r.as_str());
+        }
         assert_eq!(serde_json::to_value(Severity::High).unwrap(), "high");
         assert_eq!(
             serde_json::to_value(VerdictLabel::Partly).unwrap(),
