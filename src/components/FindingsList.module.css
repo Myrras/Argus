@@ -201,6 +201,12 @@
   opacity: 0.85;
 }
 
+.skippedNote {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
 .caret {
   transition: transform var(--dur-2) var(--ease-out);
 }

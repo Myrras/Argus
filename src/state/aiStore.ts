@@ -10,9 +10,10 @@
  * `postSelected` writes to a platform, and only from the "Post selected"
  * button: selecting, editing, dismissing, ticking the checklist and
  * overriding a verdict are local (the last three stored by Argus, never on
- * GitHub/GitLab). Findings the run set aside as already raised in the
- * review are listed apart (`skipped`) and never posted; "Show anyway" makes
- * one a normal finding (local only). It posts what each finding shows: an open editor's text,
+ * GitHub/GitLab). Findings and checklist items the run set aside as
+ * already raised in the review are listed apart (`skipped`,
+ * `skippedChecklist`) and never posted; "Show anyway" makes one a normal
+ * finding or item (local only). It posts what each finding shows: an open editor's text,
  * else the saved edit, else its own text. While a review posts, Save edit
  * waits; text that changed meanwhile on a posted finding stays in its
  * editor.
@@ -29,12 +30,14 @@ import {
   dismissFinding,
   listChecklist,
   listFindings,
+  listSkippedChecklist,
   listSkippedFindings,
   listVerdicts,
   postFindings,
   runAi,
   setChecklistChecked,
   setVerdictOverride,
+  showChecklistItemAnyway,
   showFindingAnyway,
   toIpcError,
 } from "../ipc/commands";
@@ -77,6 +80,8 @@ export interface ReviewAi {
    * absent until the first read.
    */
   skipped?: Finding[];
+  /** Checklist items set aside the same way; absent until the first read. */
+  skippedChecklist?: ChecklistItem[];
   checklist: ChecklistItem[];
   verdicts: Verdict[];
   loading: boolean;
@@ -137,6 +142,8 @@ interface AiStoreState {
   dismiss: (f: Finding, dismissed: boolean) => Promise<void>;
   /** "Show anyway": a set-aside finding becomes a normal one (local only). */
   showAnyway: (f: Finding) => Promise<void>;
+  /** "Show anyway" for a set-aside checklist item (local only). */
+  showItemAnyway: (item: ChecklistItem) => Promise<void>;
   setChecked: (item: ChecklistItem, checked: boolean) => Promise<void>;
   setOverride: (
     reviewId: ReviewId,
@@ -166,6 +173,7 @@ interface AiStoreState {
 const EMPTY: ReviewAi = {
   findings: [],
   skipped: [],
+  skippedChecklist: [],
   checklist: [],
   verdicts: [],
   loading: false,
@@ -217,16 +225,19 @@ export const useAiStore = create<AiStoreState>((set, get) => {
       const current = outputReads.begin(id);
       patchReview(id, { loading: true });
       try {
-        const [findings, skipped, checklist, verdicts] = await Promise.all([
-          listFindings(id),
-          listSkippedFindings(id),
-          listChecklist(id),
-          listVerdicts(id),
-        ]);
+        const [findings, skipped, checklist, skippedChecklist, verdicts] =
+          await Promise.all([
+            listFindings(id),
+            listSkippedFindings(id),
+            listChecklist(id),
+            listSkippedChecklist(id),
+            listVerdicts(id),
+          ]);
         if (!current()) return;
         patchReview(id, {
           findings: findings ?? [],
           skipped: skipped ?? [],
+          skippedChecklist: skippedChecklist ?? [],
           checklist: checklist ?? [],
           verdicts: verdicts ?? [],
           loading: false,
@@ -300,6 +311,15 @@ export const useAiStore = create<AiStoreState>((set, get) => {
         toastError("Could not show the finding", toIpcError(e).message);
       }
       await get().reloadOutput(f.reviewId);
+    },
+
+    showItemAnyway: async (item) => {
+      try {
+        await showChecklistItemAnyway(item.id);
+      } catch (e) {
+        toastError("Could not show the item", toIpcError(e).message);
+      }
+      await get().reloadOutput(item.reviewId);
     },
 
     setChecked: async (item, checked) => {
@@ -533,6 +553,17 @@ export function useSkippedFindings(reviewId: ReviewId): Finding[] {
     s.runs[reviewId]?.enabled
       ? (s.byReview[reviewId]?.skipped ?? NO_FINDINGS)
       : NO_FINDINGS,
+  );
+}
+
+const NO_ITEMS: ChecklistItem[] = [];
+
+/** The review's checklist items set aside as already raised (none with AI off). */
+export function useSkippedChecklist(reviewId: ReviewId): ChecklistItem[] {
+  return useAiStore((s) =>
+    s.runs[reviewId]?.enabled
+      ? (s.byReview[reviewId]?.skippedChecklist ?? NO_ITEMS)
+      : NO_ITEMS,
   );
 }
 

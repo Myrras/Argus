@@ -353,7 +353,7 @@ describe("AiPanel", () => {
     expect(screen.getByText(warning)).toBeInTheDocument();
   });
 
-  it("lists the findings set aside as already raised, folded, with a link and Show anyway", async () => {
+  it("lists what is set aside as already raised, open when a high one is among it, with a link and Show anyway", async () => {
     const bobs = thread({ reviewId: ID, author: "bob-fixture" });
     const mine = thread({ reviewId: ID, mine: true, author: "me-fixture" });
     const posted = findings[5];
@@ -389,19 +389,35 @@ describe("AiPanel", () => {
         [ID]: { threads: [bobs, mine], loading: false, error: null },
       },
     });
+    const skippedChecklist = [
+      checklistItem({
+        reviewId: ID,
+        round: 2,
+        text: "Does the cache keep stale entries?",
+        repeatOf: {
+          reason: "agentMarked",
+          threadId: bobs.threadId,
+          findingId: null,
+        },
+      }),
+    ];
     useAiStore.setState((st) => ({
-      byReview: { [ID]: { ...st.byReview[ID], skipped } },
+      byReview: { [ID]: { ...st.byReview[ID], skipped, skippedChecklist } },
     }));
     mockInvoke.mockClear();
     render(<AiPanel />);
-    // Not among the findings; folded under its toggle.
+    // Not among the findings or the checklist.
     expect(rows()).not.toContain("Said by bob");
-    expect(screen.queryByText("Said by bob")).toBeNull();
+    expect(
+      within(
+        screen.getByRole("region", { name: "Look here yourself" }),
+      ).queryByText("Does the cache keep stale entries?"),
+    ).toBeNull();
+    // A high one among them: the list is open, the header says so.
     const toggle = screen.getByRole("button", {
-      name: "Skipped as already raised (3)",
+      name: "Skipped as already raised (4, 1 high)",
     });
-    expect(toggle).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     const row = (title: string) =>
       screen.getByRole("listitem", { name: `Skipped: ${title}` });
     expect(
@@ -427,6 +443,16 @@ describe("AiPanel", () => {
     );
     const item = useFocusStore.getState().item;
     expect(item?.kind === "thread" && item.threadId).toBe(bobs.threadId);
+    // The checklist item: listed with what it repeats.
+    const check = row("Does the cache keep stale entries?");
+    expect(
+      within(check).getByRole("button", {
+        name: "repeats bob-fixture's comment",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(check).getByRole("button", { name: "Show anyway" }),
+    ).toBeInTheDocument();
     // Show anyway: local, then re-read. Nothing is posted.
     fireEvent.click(
       within(row("Said by bob")).getByRole("button", { name: "Show anyway" }),
@@ -446,19 +472,97 @@ describe("AiPanel", () => {
     ).toEqual([]);
   });
 
-  it("says nothing about repeats when there are none, and counts checklist repeats", () => {
+  it("shows a set-aside checklist item anyway, locally", async () => {
+    const item = checklistItem({
+      reviewId: ID,
+      text: "Said already?",
+      repeatOf: { reason: "similar", threadId: null, findingId: null },
+    });
+    useAiStore.setState((st) => ({
+      byReview: { [ID]: { ...st.byReview[ID], skippedChecklist: [item] } },
+    }));
+    mockInvoke.mockClear();
+    render(<AiPanel />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Skipped as already raised (1)" }),
+    );
+    const row = screen.getByRole("listitem", {
+      name: "Skipped: Said already?",
+    });
+    fireEvent.click(within(row).getByRole("button", { name: "Show anyway" }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("show_checklist_item_anyway", {
+        checklistId: item.id,
+      }),
+    );
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("list_skipped_checklist", {
+        reviewId: ID,
+      }),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "post_findings"),
+    ).toEqual([]);
+  });
+
+  it("folds the skipped list without a high one, and says nothing without any", () => {
     const { unmount } = render(<AiPanel />);
     expect(screen.queryByText(/already raised/)).toBeNull();
     unmount();
-    useAiStore.setState({
-      runs: { [ID]: aiRun({ reviewId: ID, skippedChecklist: 2 }) },
-    });
+    useAiStore.setState((st) => ({
+      byReview: {
+        [ID]: {
+          ...st.byReview[ID],
+          skipped: [
+            finding({
+              reviewId: ID,
+              severity: "medium",
+              title: "Said before",
+              repeatOf: { reason: "similar", threadId: null, findingId: null },
+            }),
+          ],
+          skippedChecklist: [],
+        },
+      },
+    }));
     render(<AiPanel />);
-    expect(
-      screen.getByText(
-        "2 checklist items left out: already raised in the review.",
-      ),
-    ).toBeInTheDocument();
+    const toggle = screen.getByRole("button", {
+      name: "Skipped as already raised (1)",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Said before")).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByText("Said before")).toBeInTheDocument();
+    // How "Show anyway" lasts is said where it is offered.
+    expect(screen.getByText(/rerun that rewords/)).toBeInTheDocument();
+  });
+
+  it("tags a kept finding with the comment it relates to", () => {
+    const bobs = thread({ reviewId: ID, author: "bob-fixture" });
+    useThreadStore.setState({
+      byReview: { [ID]: { threads: [bobs], loading: false, error: null } },
+    });
+    findings = [
+      finding({
+        reviewId: ID,
+        round: 2,
+        severity: "high",
+        title: "Tenant check missing",
+        relatedTo: [{ threadId: bobs.threadId, findingId: null }],
+      }),
+    ];
+    seed();
+    render(<AiPanel />);
+    const row = screen.getByRole("listitem", {
+      name: "Finding: Tenant check missing",
+    });
+    fireEvent.click(
+      within(row).getByRole("button", {
+        name: "related to bob-fixture's comment",
+      }),
+    );
+    const item = useFocusStore.getState().item;
+    expect(item?.kind === "thread" && item.threadId).toBe(bobs.threadId);
   });
 
   it("is absent with the AI pass off", () => {

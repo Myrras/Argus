@@ -12,7 +12,7 @@
 import { useEffect } from "react";
 
 import type { ReviewId, ReviewRecord } from "../ipc/types";
-import { aiStatusText, skippedDuplicatesText } from "../lib/findings";
+import { aiStatusText, skippedSummary, skippedText } from "../lib/findings";
 import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import {
@@ -20,6 +20,8 @@ import {
   useAiRun,
   useAiStore,
   useFindings,
+  useSkippedChecklist,
+  useSkippedFindings,
 } from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { AiIcon } from "./icons";
@@ -34,6 +36,11 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
 
   const run = useAiRun(id);
   const findings = useFindings(id);
+  // Counted from the list the panel shows, so the two always agree.
+  const skipped = skippedSummary(
+    useSkippedFindings(id),
+    useSkippedChecklist(id),
+  );
   const starting = useAiStore((s) => !!s.starting[id]);
   const runAi = useAiStore((s) => s.run);
   const cancel = useAiStore((s) => s.cancel);
@@ -62,7 +69,7 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
           aiStatusText(run, active),
           run.adapter &&
             `${run.adapter}${run.round !== null ? `, round ${run.round}` : ""}`,
-          skippedDuplicatesText(run),
+          skippedText(skipped),
         ]
           .filter(Boolean)
           .join(" — ")}

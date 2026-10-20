@@ -1,7 +1,8 @@
 /**
  * The AI island right of the review (Iris's preview island): the selected
- * review's findings (`FindingsList`, with "Post selected"), those set aside
- * as already raised in the review (`SkippedFindings`, folded), and its
+ * review's findings (`FindingsList`, with "Post selected"), the findings and
+ * checklist items set aside as already raised in the review
+ * (`SkippedFindings`, folded unless a high one is among them), and its
  * "look here yourself" checklist (`Checklist`). Open or closed is remembered
  * (`layoutStore.aiPanelOpen`; the header's Findings toggle and the
  * toggle-findings key flip it). Closed, or without a review, or with the AI
@@ -16,7 +17,6 @@ import {
 } from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
-import { skippedChecklistText } from "../lib/findings";
 import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { Checklist } from "./Checklist";
@@ -38,7 +38,6 @@ function Panel({ reviewId }: { reviewId: string }) {
   const error = useAiStore((s) => s.byReview[reviewId]?.error ?? null);
   const reload = useAiStore((s) => s.reloadOutput);
   const keymap = useKeymap();
-  const skippedChecklist = run ? skippedChecklistText(run) : null;
 
   const note =
     run?.status === "running"
@@ -81,7 +80,6 @@ function Panel({ reviewId }: { reviewId: string }) {
             out: not on a file of this change.
           </p>
         )}
-        {skippedChecklist && <p className={styles.note}>{skippedChecklist}.</p>}
         {error && (
           <div className={styles.error} role="alert">
             {error.message}{" "}
