@@ -201,5 +201,9 @@ describe("set-aside findings", () => {
         threads,
       ),
     ).toBeNull();
+    // A checklist item reads the same way.
+    expect(
+      relatedLabel(checklistItem({ relatedTo: [ref(bobs.threadId)] }), threads),
+    ).toBe("related to bob-fixture's comment");
   });
 });

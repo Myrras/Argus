@@ -74,6 +74,14 @@
   accent-color: var(--accent);
 }
 
+/* Under the text, in line with it (past the checkbox). */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2) var(--sp-1) calc(var(--sp-2) * 2 + 14px);
+}
+
 .item[data-checked="true"] .label span {
   color: var(--text-faint);
   text-decoration: line-through;

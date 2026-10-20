@@ -565,6 +565,43 @@ describe("AiPanel", () => {
     expect(item?.kind === "thread" && item.threadId).toBe(bobs.threadId);
   });
 
+  it("tags a kept checklist item with the comment it relates to", () => {
+    const bobs = thread({ reviewId: ID, author: "bob-fixture" });
+    useThreadStore.setState({
+      byReview: { [ID]: { threads: [bobs], loading: false, error: null } },
+    });
+    checklist = [
+      checklistItem({
+        reviewId: ID,
+        round: 2,
+        text: "Is turning the cache off intended?",
+        relatedTo: [{ threadId: bobs.threadId, findingId: null }],
+      }),
+      checklistItem({ reviewId: ID, round: 2, text: "Unrelated question" }),
+    ];
+    seed();
+    render(<AiPanel />);
+    const tagged = screen.getByRole("listitem", {
+      name: "Check: Is turning the cache off intended?",
+    });
+    fireEvent.click(
+      within(tagged).getByRole("button", {
+        name: "related to bob-fixture's comment",
+      }),
+    );
+    const item = useFocusStore.getState().item;
+    expect(item?.kind === "thread" && item.threadId).toBe(bobs.threadId);
+    // The tag is no part of the checkbox's label: the item stays unticked.
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "set_checklist_checked",
+      expect.anything(),
+    );
+    const plain = screen.getByRole("listitem", {
+      name: "Check: Unrelated question",
+    });
+    expect(within(plain).queryByRole("button")).toBeNull();
+  });
+
   it("is absent with the AI pass off", () => {
     seed(false);
     const { container } = render(<AiPanel />);
