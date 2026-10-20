@@ -43,7 +43,8 @@ sibling app Iris (`../Iris`).
     `argus.settings`: reduced motion, shortcut overrides),
     `backendSettingsStore` (the core's `settings.json`, provider status,
     token presence; the GitLab token only ever goes to `set_gitlab_token`),
-    `settingsRequestStore` (open on a tab from deeper in the tree). Opened by
+    `settingsRequestStore` (open on a tab from deeper in the tree; an
+    Editors tab sits between AI and Shortcuts). Opened by
     the macOS menu's Settings… (`menu:open-settings`, `lib.rs`) or the
     keymap's `openSettings` (Ctrl+, elsewhere). Shortcuts: `lib/keymap`
     (rebindable, bare keys allowed unlike Iris), `useAppShortcuts`,
@@ -204,6 +205,23 @@ sibling app Iris (`../Iris`).
   boundary, type change, non-UTF-8 file or any git failure is answered by the
   API, per thread or per file (`git::file_or`; `compute_histories` takes
   `clone: Option<&Path>`). Argus never changes or fetches the clone.
+  - Open in editor (Iris's `open_local` + `editorOverrides`): core `open/`
+    `local_files` / `local_file` (repository path → the clone's working
+    tree: no absolute paths or `.`/`..` parts, symlinks resolved must stay
+    inside; `exists`, `cloneHead` via `LocalClone::head` = `rev-parse HEAD`,
+    `matchesReviewHead`; `None` without a clone), `open_in_editor` (app =
+    `editorOverrides[ext]`, else `defaultEditor`, else the OS default, which
+    is refused for files that would run) and `reveal_local_file`, through the
+    injected `Opener` (shell `opener.rs`: tauri-plugin-opener `open_path` /
+    `reveal_item_in_dir` from Rust; the webview has no open-path
+    permission). No line support (Iris has none). UI: `localFileStore`
+    (one `local_files` per review + file list, again on window focus),
+    `OpenInEditorButton` (tree rows via `FileTree.fileAction`, card
+    headers), `lib/useLocalFileMenu` (right-click: Open in Editor / Open
+    With Default App / Show in Finder), `lib/localFiles` (tooltips, keys),
+    Settings → Editors (`lib/editorOverrides`, Iris's tab + a default
+    editor). Keys `openInEditor` (`o`) and `showInFinder` (`Mod+Alt+R`),
+    scope `files`, on the focused item's file.
 - ✅ **Milestone 6 — Provider polish.** Polling is polite. `provider/conditional`:
   in-memory ETag / Last-Modified cache per provider (LRU, bounded), so
   unchanged requests are a 304 (free on GitHub). GitHub: `gh api -i` with
@@ -249,7 +267,8 @@ src-tauri/           # thin IPC adapter: (de)serialize and forward, nothing else
   src/state.rs       # AppState: Arc<Core> + last RefreshReport
   src/error.rs       # IpcError { kind, message } ← CoreError / PostError
   src/events.rs      # review:changed / reviews:refreshed / ai:state emission
-  src/commands/      # review, thread, files, post, history, ai, settings, provider shims
+  src/commands/      # review, thread, files, post, history, ai, settings, provider, open shims
+  src/opener.rs      # the core's Opener: tauri-plugin-opener, called from Rust
 src/                 # React (presentation only)
   ipc/types.ts       # hand-written wire types (mirror the serde derives)
   ipc/commands.ts    # typed invoke() wrappers
@@ -261,7 +280,8 @@ src/                 # React (presentation only)
 `argus-core` modules: `provider/` (GitLab/GitHub clients, provider status,
 conditional-GET cache, rate limits), `git/` (read-only local clone access),
 `review/` (rounds), `store/` (SQLite), `settings/`, `poll/`, `files/` (the
-code view's file list + viewed marks), `post/` (comments, replies,
+code view's file list + viewed marks), `open/` (a clone's file in the
+user's editor), `post/` (comments, replies,
 approvals; the only writes, explicit only), `history/` (then/now thread
 history, line walk, timeline, cache), `ai/` (the AI pass: adapters,
 prompt, output validation, runs, findings/checklist/verdicts).
