@@ -299,62 +299,77 @@ impl Inner {
 
     /// Start queued runs while there is a free slot, oldest first, skipping
     /// reviews that already run.
+    ///
+    /// A run is marked `running` in the store under the scheduler lock, in
+    /// the same step that takes it off the queue: there is no moment where
+    /// it is neither queued nor running. So `run_ai`, which reads the state
+    /// right after the enqueue that started it, answers with the new run
+    /// instead of the last one's end (the UI showed that "done", and the
+    /// user had to click Run again a second time).
     fn pump(this: &Arc<Self>) {
-        let mut s = this.sched.lock().expect("sched lock poisoned");
-        // Checked under the lock, against a `set_enabled(false)` racing the
-        // enqueue that led here.
-        if !s.enabled || s.stopped {
-            return;
-        }
-        while s.running.len() < this.max_concurrent {
-            let Some(i) = s
-                .queue
-                .iter()
-                .position(|(id, _)| !s.running.contains_key(id))
-            else {
-                break;
-            };
-            let (review, mut ctx) = s.queue.remove(i).expect("index in range");
-            let flag = Arc::new(AtomicBool::new(false));
-            ctx.child = ChildSlot::default();
-            s.running.insert(
-                review,
-                Running {
-                    cancel: flag.clone(),
-                    child: ctx.child.clone(),
-                },
-            );
-            let inner = Arc::clone(this);
-            let spawned = std::thread::Builder::new()
-                .name("argus-ai".into())
-                .spawn(move || inner.work(review, ctx, flag));
-            if spawned.is_err() {
-                s.running.remove(&review);
-                tracing::warn!("could not start an AI run thread");
+        let mut dropped = Vec::new();
+        {
+            let mut s = this.sched.lock().expect("sched lock poisoned");
+            // Checked under the lock, against a `set_enabled(false)` racing
+            // the enqueue that led here.
+            if !s.enabled || s.stopped {
+                return;
+            }
+            while s.running.len() < this.max_concurrent {
+                let Some(i) = s
+                    .queue
+                    .iter()
+                    .position(|(id, _)| !s.running.contains_key(id))
+                else {
+                    break;
+                };
+                let (review, mut ctx) = s.queue.remove(i).expect("index in range");
+                let Some(record) = this.mark_started(review, &ctx) else {
+                    dropped.push(review);
+                    continue;
+                };
+                let flag = Arc::new(AtomicBool::new(false));
+                ctx.child = ChildSlot::default();
+                s.running.insert(
+                    review,
+                    Running {
+                        cancel: flag.clone(),
+                        child: ctx.child.clone(),
+                    },
+                );
+                let inner = Arc::clone(this);
+                let spawned = std::thread::Builder::new()
+                    .name("argus-ai".into())
+                    .spawn(move || inner.work(record, ctx, flag));
+                if spawned.is_err() {
+                    s.running.remove(&review);
+                    tracing::warn!("could not start an AI run thread");
+                    let _ = ai_store::mark_failed(
+                        &this.store,
+                        review,
+                        "could not start the AI run",
+                        Utc::now(),
+                    );
+                    dropped.push(review);
+                }
             }
         }
-    }
-
-    fn work(self: Arc<Self>, review: ReviewId, ctx: JobContext, cancel: Arc<AtomicBool>) {
-        self.run_one(review, &ctx, &cancel);
-        // Reported before the slot is freed, so whoever waits for idle has
-        // seen the final state.
-        self.emit(review);
-        {
-            let mut s = self.sched.lock().expect("sched lock poisoned");
-            s.running.remove(&review);
+        // Outside the lock: `emit` reads the state, which takes it.
+        for review in dropped {
+            this.emit(review);
         }
-        self.changed.notify_all();
-        Inner::pump(&self);
     }
 
-    fn run_one(&self, review: ReviewId, ctx: &JobContext, cancel: &AtomicBool) {
+    /// Record a run's start: the review as it is now, `running` in the
+    /// store. `None` (the run is dropped) when the review is gone or the
+    /// store fails.
+    fn mark_started(&self, review: ReviewId, ctx: &JobContext) -> Option<ReviewRecord> {
         let record = match self.store.review(review) {
             Ok(Some(r)) => r,
-            Ok(None) => return,
+            Ok(None) => return None,
             Err(e) => {
                 tracing::warn!("AI run: could not read the review: {e}");
-                return;
+                return None;
             }
         };
         let adapter = ctx.settings.ai.adapter.trim().to_string();
@@ -367,16 +382,37 @@ impl Inner {
             Utc::now(),
         ) {
             tracing::warn!("AI run: could not record its start: {e}");
-            return;
+            return None;
         }
+        Some(record)
+    }
+
+    fn work(self: Arc<Self>, record: ReviewRecord, ctx: JobContext, cancel: Arc<AtomicBool>) {
+        let review = record.id;
+        // `running`, from this thread, so it is always reported before the
+        // run's end.
         self.emit(review);
+        self.run_one(&record, &ctx, &cancel);
+        // Reported before the slot is freed, so whoever waits for idle has
+        // seen the final state.
+        self.emit(review);
+        {
+            let mut s = self.sched.lock().expect("sched lock poisoned");
+            s.running.remove(&review);
+        }
+        self.changed.notify_all();
+        Inner::pump(&self);
+    }
+
+    fn run_one(&self, record: &ReviewRecord, ctx: &JobContext, cancel: &AtomicBool) {
+        let review = record.id;
         let executor = self
             .executor
             .lock()
             .expect("executor lock poisoned")
             .clone();
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            executor(&self.store, &record, ctx, cancel)
+            executor(&self.store, record, ctx, cancel)
         }))
         .unwrap_or_else(|_| Err("the AI run crashed".into()));
         let now = Utc::now();

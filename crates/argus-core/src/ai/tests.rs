@@ -948,6 +948,48 @@ fn refresh_triggers_new_items_and_new_rounds_only() {
     ));
 }
 
+/// Run again on a finished review: the answer already says the new run
+/// is running (it was "done", the old run, while the thread had yet to
+/// mark it; the UI showed nothing and the user clicked again). Each
+/// `ai:state` the run emits is in order: queued, running, done.
+#[test]
+fn run_ai_on_a_finished_review_answers_with_the_new_run_at_once() {
+    let (core, probe, r) = core_with_review();
+    assert_eq!(core.on_refresh_report(&report()), vec![r.id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(5)));
+    assert_eq!(core.ai_state(r.id).unwrap().status, AiRunStatus::Done);
+
+    // The next run blocks until the gate opens.
+    *probe.gate.lock().unwrap() = false;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let e2 = events.clone();
+    core.on_ai_state(move |s| e2.lock().unwrap().push((s.status, s.queued)));
+    for _ in 0..20 {
+        let st = core.run_ai(r.id).unwrap();
+        assert_eq!(st.status, AiRunStatus::Running, "{st:?}");
+        assert!(st.finished_at.is_none(), "{st:?}");
+        // The state read right after says the same.
+        assert_eq!(core.ai_state(r.id).unwrap().status, AiRunStatus::Running);
+        core.cancel_ai(r.id).unwrap();
+        assert!(core.ai.wait_idle(Duration::from_secs(5)));
+    }
+    probe.open();
+    let st = core.run_ai(r.id).unwrap();
+    assert!(st.status == AiRunStatus::Running || st.status == AiRunStatus::Done);
+    assert!(core.ai.wait_idle(Duration::from_secs(5)));
+    assert_eq!(core.ai_state(r.id).unwrap().status, AiRunStatus::Done);
+    let seen = events.lock().unwrap();
+    assert_eq!(
+        seen[..3],
+        [
+            (AiRunStatus::Done, true),
+            (AiRunStatus::Running, false),
+            (AiRunStatus::Failed, false),
+        ]
+    );
+    assert_eq!(seen.last(), Some(&(AiRunStatus::Done, false)));
+}
+
 #[test]
 fn ai_disabled_runs_and_queues_nothing() {
     let (core, probe, r) = core_with_review();

@@ -149,6 +149,19 @@ describe("AiStatus", () => {
     );
   });
 
+  it("one click on Run again starts the run and the chip shows it at once", async () => {
+    render(<AiStatus review={r} />);
+    await waitFor(() => expect(chip()).toHaveAttribute("data-status", "done"));
+    // The core answers with the run it started.
+    run = aiRun({ reviewId: r.id, status: "running", finishedAt: null });
+    fireEvent.click(screen.getByRole("button", { name: "Run again" }));
+    await waitFor(() => expect(chip()).toHaveTextContent("AI: running…"));
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "run_ai"),
+    ).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  });
+
   it("shows a queued run", async () => {
     run = aiRun({ reviewId: r.id, status: "done", queued: true });
     render(<AiStatus review={r} />);

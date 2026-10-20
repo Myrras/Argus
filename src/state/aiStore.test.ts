@@ -503,6 +503,72 @@ describe("aiStore", () => {
     ).toBe(true);
   });
 
+  it("Run again: an ai:state that came in meanwhile wins over the answer", async () => {
+    const off = await subscribeAiEvents();
+    await useAiStore.getState().load(ID);
+    let answer: (v: unknown) => void = () => {};
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "run_ai"
+        ? new Promise<unknown>((r) => (answer = r))
+        : backend(cmd, args)) as typeof invoke);
+    const started = useAiStore.getState().run(ID);
+    // The run starts and fails fast; its events beat the command's answer.
+    events.emit("ai:state", aiRun({ reviewId: ID, queued: true }));
+    events.emit(
+      "ai:state",
+      aiRun({ reviewId: ID, status: "running", finishedAt: null }),
+    );
+    const failed = aiRun({
+      reviewId: ID,
+      status: "failed",
+      error: "`claude` was not found",
+      finishedAt: "2026-10-16T11:00:00Z",
+    });
+    events.emit("ai:state", failed);
+    answer(aiRun({ reviewId: ID, status: "running", finishedAt: null }));
+    await started;
+    expect(useAiStore.getState().runs[ID]).toEqual(failed);
+    off();
+  });
+
+  it("Run again: the answer shows the run when no event came first", async () => {
+    await useAiStore.getState().load(ID);
+    const running = aiRun({
+      reviewId: ID,
+      status: "running",
+      finishedAt: null,
+    });
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "run_ai"
+        ? Promise.resolve(running)
+        : backend(cmd, args)) as typeof invoke);
+    await useAiStore.getState().run(ID);
+    expect(useAiStore.getState().runs[ID]).toEqual(running);
+  });
+
+  it("Cancel: an ai:state that came in meanwhile wins over the answer", async () => {
+    const off = await subscribeAiEvents();
+    await useAiStore.getState().load(ID);
+    let answer: (v: unknown) => void = () => {};
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "cancel_ai"
+        ? new Promise<unknown>((r) => (answer = r))
+        : backend(cmd, args)) as typeof invoke);
+    const cancelled = aiRun({
+      reviewId: ID,
+      status: "failed",
+      error: "cancelled",
+      finishedAt: "2026-10-16T11:00:00Z",
+    });
+    const stopping = useAiStore.getState().cancel(ID);
+    events.emit("ai:state", cancelled);
+    // Read before the run had stopped.
+    answer(aiRun({ reviewId: ID, status: "running", finishedAt: null }));
+    await stopping;
+    expect(useAiStore.getState().runs[ID]).toEqual(cancelled);
+    off();
+  });
+
   it("keeps the newest output when an older read answers last", async () => {
     const answers: ((v: unknown) => void)[] = [];
     mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>

@@ -181,6 +181,15 @@ const EMPTY: ReviewAi = {
 };
 
 let revealSeq = 0;
+/**
+ * `ai:state` events applied per review. The answer of `run_ai` /
+ * `cancel_ai` is a state read at one moment; an event that came in while
+ * the call was out is at least as new (the core emits every state the run
+ * goes through), so the answer only applies when none did. Else a fast
+ * run's "failed" could be overwritten by the answer's "running", a spinner
+ * that never stops.
+ */
+const stateEvents = new Map<ReviewId, number>();
 /** Only the newest output read of a review applies its answer. */
 const outputReads = latestOnly<ReviewId>();
 
@@ -195,6 +204,12 @@ export const useAiStore = create<AiStoreState>((set, get) => {
     }));
   const setRun = (state: AiRunState) =>
     set((s) => ({ runs: { ...s.runs, [state.reviewId]: state } }));
+  /** Apply a command's answer, unless an `ai:state` came in meanwhile. */
+  const applyAnswer = async (id: ReviewId, call: Promise<AiRunState>) => {
+    const before = stateEvents.get(id) ?? 0;
+    const state = await call;
+    if ((stateEvents.get(id) ?? 0) === before) setRun(state);
+  };
   const findingOf = (reviewId: ReviewId, id: FindingId) =>
     get().byReview[reviewId]?.findings.find((f) => f.id === id);
 
@@ -250,6 +265,10 @@ export const useAiStore = create<AiStoreState>((set, get) => {
     },
 
     applyState: (state) => {
+      stateEvents.set(
+        state.reviewId,
+        (stateEvents.get(state.reviewId) ?? 0) + 1,
+      );
       const prev = get().runs[state.reviewId];
       setRun(state);
       const finished =
@@ -268,7 +287,7 @@ export const useAiStore = create<AiStoreState>((set, get) => {
       if (get().starting[id]) return;
       set((s) => ({ starting: { ...s.starting, [id]: true } }));
       try {
-        setRun(await runAi(id));
+        await applyAnswer(id, runAi(id));
       } catch (e) {
         toastError("Could not start the AI pass", toIpcError(e).message);
         await get().loadState(id);
@@ -281,7 +300,7 @@ export const useAiStore = create<AiStoreState>((set, get) => {
       if (get().starting[id]) return;
       set((s) => ({ starting: { ...s.starting, [id]: true } }));
       try {
-        setRun(await cancelAi(id));
+        await applyAnswer(id, cancelAi(id));
       } catch (e) {
         toastError("Could not stop the AI pass", toIpcError(e).message);
       } finally {
