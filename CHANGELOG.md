@@ -182,13 +182,17 @@ when it merges.
   default editor and editors per extension in Settings → Editors; files that
   would run instead of open (scripts, apps) only open in an editor you chose.
 - Review a merge request without the mouse: `n`/`p` move through threads and
-  AI findings in page order, `j`/`k` still move between files. The focused
-  item gets a focus ring. `Enter` or `t` opens or folds the focused thread,
-  `r` replies, `h` shows then/now, `c` comments on its line; on a finding `x`
-  selects it, `e` edits it and `d` dismisses it; `s` resolves or reopens
-  the focused thread. The ⌃ and ⌄ beside the header's unresolved count jump
-  to the previous or next unresolved thread and open it, stopping at the
-  last one. On the review page `↑`/`↓` scroll as usual; in the review list
+  AI findings in page order, `j`/`k` still move between files. The page
+  scrolls to the thread or finding itself, also far down a long file, and
+  the focused item gets a focus ring. Only moving scrolls the page:
+  resolving, dismissing, replying, marking a file viewed, a refresh, the AI
+  panel or the layout switch keep what you are reading where it is.
+  `Enter` or `t` opens or folds the focused thread, `r` replies, `h` shows
+  then/now, `c` comments on its line; on a finding `x` selects it, `e`
+  edits it and `d` dismisses it; `s` resolves or reopens the focused
+  thread. The ⌃ and ⌄ beside the header's unresolved count jump to the
+  previous or next unresolved thread and open it, stopping at the last
+  one. On the review page `↑`/`↓` scroll as usual; in the review list
   they move the cursor, in the code they pick a line.
 - Command palette (⌘K / Ctrl+K): every action with its shortcut, plus Go to
   review… and Go to file…. Submit review…, Approve… and Post all… still ask

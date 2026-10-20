@@ -30,6 +30,7 @@ import {
   memo,
   Suspense,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -54,7 +55,11 @@ import {
   threadCounts,
   type DiffSide,
 } from "../lib/diffThreads";
-import { loadContents, useCodeViewStore } from "../state/codeViewStore";
+import {
+  loadFileSides,
+  useCodeViewStore,
+  waitsForLoadAnyway,
+} from "../state/codeViewStore";
 import {
   clearCommentableCache,
   loadCommentable,
@@ -63,6 +68,7 @@ import {
   type CommentTarget,
 } from "../state/commentStore";
 import { findingPlacement } from "../lib/findings";
+import { keepFoldedCardInPlace, readingInside } from "../lib/scrollAnchor";
 import { useAiStore, useFindings } from "../state/aiStore";
 import { useRevealCard } from "../state/focusStore";
 import { DraftBlock, InlineComposer } from "./CommentBlocks";
@@ -80,9 +86,6 @@ import styles from "./FileDiffCard.module.css";
 const DiffEditor = lazy(() =>
   import("./DiffEditor").then((m) => ({ default: m.DiffEditor })),
 );
-
-/** Above this many changed lines a diff waits for "Load anyway". */
-export const LARGE_DIFF_LINES = 1500;
 
 type Contents =
   | { state: "idle" }
@@ -139,12 +142,22 @@ export const FileDiffCard = memo(function FileDiffCard({
   const [attempt, setAttempt] = useState(0);
   const root = useRef<HTMLElement | null>(null);
 
-  // A viewed file folds away; un-viewing opens it again.
+  // A viewed file folds away; un-viewing opens it again. Folding the file
+  // being read keeps its header where it was (an action never scrolls).
   const viewedRef = useRef(f.viewed);
+  const keepHeader = useRef(false);
   useEffect(() => {
-    if (viewedRef.current !== f.viewed) setCollapsed(f.viewed);
+    if (viewedRef.current !== f.viewed) {
+      keepHeader.current = f.viewed && readingInside(root.current);
+      setCollapsed(f.viewed);
+    }
     viewedRef.current = f.viewed;
   }, [f.viewed]);
+  useLayoutEffect(() => {
+    if (!collapsed || !keepHeader.current) return;
+    keepHeader.current = false;
+    keepFoldedCardInPlace(root.current);
+  }, [collapsed]);
 
   // Revealing one of its AI findings opens a folded card.
   const revealSeq = useAiStore((s) =>
@@ -184,7 +197,7 @@ export const FileDiffCard = memo(function FileDiffCard({
     return () => io.disconnect();
   }, [near]);
 
-  const large = f.tooLarge || f.additions + f.deletions > LARGE_DIFF_LINES;
+  const large = waitsForLoadAnyway(f);
   const wanted =
     !collapsed && !f.binary && (!large || forced) && (near || selected);
 
@@ -204,15 +217,7 @@ export const FileDiffCard = memo(function FileDiffCard({
     if (!wanted || started.current === loadKey) return;
     started.current = loadKey;
     setContents({ state: "loading" });
-    const base =
-      f.status === "added"
-        ? Promise.resolve("")
-        : loadContents(review.reviewId, review.baseSha, f.oldPath ?? f.path);
-    const head =
-      f.status === "removed"
-        ? Promise.resolve("")
-        : loadContents(review.reviewId, review.headSha, f.path);
-    Promise.all([base, head]).then(
+    loadFileSides(review, f).then(
       ([original, modified]) => {
         if (started.current === loadKey) {
           setContents({ state: "ready", original, modified });

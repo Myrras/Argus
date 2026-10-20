@@ -78,12 +78,14 @@
   overflow: auto;
 }
 
-/* The page scrolls as a whole; each section's header sticks. */
+/* The page scrolls as a whole; each section's header sticks. Anchoring is
+   the page's own (`lib/scrollAnchor`): the same in every webview. */
 .diff {
   flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
   display: flex;
   flex-direction: column;
 }

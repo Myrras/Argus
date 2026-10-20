@@ -16,6 +16,7 @@ import { useEffect, useRef } from "react";
 import type { ReviewId, ThreadId } from "../ipc/types";
 import { rangeLabel } from "../lib/commentRanges";
 import { FOCUS, takeFocus } from "../lib/focusRequests";
+import { pauseScrollAnchor } from "../lib/scrollAnchor";
 import { useCommentStore } from "../state/commentStore";
 import { Badge } from "./Badge";
 import { CommentComposer } from "./CommentComposer";
@@ -172,6 +173,7 @@ export function ReplyComposer({
     const reduce =
       document.documentElement.dataset.reduceMotion === "true" ||
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    pauseScrollAnchor();
     box.current?.scrollIntoView?.({
       block: "nearest",
       behavior: reduce ? "auto" : "smooth",

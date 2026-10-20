@@ -54,6 +54,7 @@ import {
   useSkippedFindings,
 } from "../state/aiStore";
 import { useCodeViewStore } from "../state/codeViewStore";
+import { pauseScrollAnchor } from "../lib/scrollAnchor";
 import { focusThread } from "../state/focusStore";
 import { useThreadStore } from "../state/threadStore";
 import { Badge } from "./Badge";
@@ -68,6 +69,7 @@ function scrollToFinding(reviewId: ReviewId, f: Finding) {
   const tick = () => {
     const el = document.getElementById(`finding-${f.id}`);
     if (el) {
+      pauseScrollAnchor();
       el.scrollIntoView?.({ block: "center" });
       return;
     }

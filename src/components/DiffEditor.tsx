@@ -61,7 +61,15 @@ import {
   type DiffSide,
   type Placement,
 } from "../lib/diffThreads";
-import type { DiffLayout } from "../state/layoutStore";
+import {
+  blockHeight,
+  blockSignature,
+  registerDiffEditor,
+  rememberBlockHeight,
+  threadBlockKey,
+} from "../lib/diffEditors";
+import { pauseScrollAnchor, readingEdge } from "../lib/scrollAnchor";
+import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
 import { useThemeStore } from "../state/themeStore";
 
 const COLLAPSE = { margin: 3, minSize: 4 };
@@ -87,16 +95,38 @@ interface Block {
 }
 
 /**
- * Each widget DOM's React root and the block keys it shows. Keyed by the
- * DOM, not the widget: CodeMirror hands a kept DOM to a new widget instance
+ * Each widget DOM's React root, the block keys it shows (and their
+ * signature) and the observer that records its height. Keyed by the DOM,
+ * not the widget: CodeMirror hands a kept DOM to a new widget instance
  * (`updateDOM`) and destroys whichever instance holds it last.
  */
-const roots = new WeakMap<HTMLElement, { root: Root; keys: Set<string> }>();
+const roots = new WeakMap<
+  HTMLElement,
+  {
+    root: Root;
+    keys: Set<string>;
+    signature: string;
+    sizes: ResizeObserver | null;
+  }
+>();
 
 /** The blocks under one line. */
 class BlocksWidget extends WidgetType {
+  readonly signature: string;
+
   constructor(readonly blocks: readonly Block[]) {
     super();
+    this.signature = blockSignature(blocks.map((b) => b.key));
+  }
+
+  /**
+   * The height these blocks had when last drawn: every placement rebuilds
+   * the widgets, and one above the viewport is not drawn again, so the
+   * default (one line) would shrink the page above the reader
+   * (`lib/diffEditors`).
+   */
+  get estimatedHeight(): number {
+    return blockHeight(this.signature);
   }
 
   /**
@@ -111,7 +141,22 @@ class BlocksWidget extends WidgetType {
   toDOM(view: EditorView): HTMLElement {
     const dom = document.createElement("div");
     dom.className = "cm-argusThreads";
-    roots.set(dom, { root: createRoot(dom), keys: new Set() });
+    const entry = {
+      root: createRoot(dom),
+      keys: new Set<string>(),
+      signature: this.signature,
+      sizes: null as ResizeObserver | null,
+    };
+    if (typeof ResizeObserver !== "undefined") {
+      entry.sizes = new ResizeObserver((entries) => {
+        for (const e of entries) {
+          const h = e.borderBoxSize?.[0]?.blockSize ?? e.contentRect.height;
+          rememberBlockHeight(entry.signature, h);
+        }
+      });
+      entry.sizes.observe(dom);
+    }
+    roots.set(dom, entry);
     this.show(dom, view);
     return dom;
   }
@@ -130,6 +175,7 @@ class BlocksWidget extends WidgetType {
   private show(dom: HTMLElement, view: EditorView) {
     const r = roots.get(dom)!;
     r.keys = new Set(this.blocks.map((b) => b.key));
+    r.signature = this.signature;
     const resize = () => view.requestMeasure();
     r.root.render(
       <>
@@ -144,6 +190,7 @@ class BlocksWidget extends WidgetType {
     const r = roots.get(dom);
     if (!r) return;
     roots.delete(dom);
+    r.sizes?.disconnect();
     // Not during CodeMirror's own update (React warns on a sync unmount
     // inside another render).
     queueMicrotask(() => r.root.unmount());
@@ -157,7 +204,7 @@ class BlocksWidget extends WidgetType {
 
 /** A thread's block key: the thread alone, so new notes keep its state. */
 function threadKey(t: StoredThread): string {
-  return `t:${t.threadId}`;
+  return threadBlockKey(t.threadId);
 }
 
 /**
@@ -518,6 +565,92 @@ function group(
   return out;
 }
 
+/** Where the reader is in a diff: a head line and its offset in the column. */
+interface ReadingLine {
+  line: number;
+  /** From the page column's top to the line's top. */
+  offset: number;
+}
+
+/**
+ * The head line under the page column's reading edge, when that edge is
+ * inside this diff; null otherwise. The head is the last view (unified:
+ * the only one; split: `b`), so the line numbers carry across layouts.
+ */
+function readingLine(views: readonly EditorView[]): ReadingLine | null {
+  const view = views[views.length - 1];
+  const column = view?.dom.closest<HTMLElement>('[data-slot="diff"]');
+  if (!view || !column) return null;
+  const edge = readingEdge(column);
+  const top = view.documentTop;
+  if (edge < top || edge > top + view.contentHeight) return null;
+  const columnTop = column.getBoundingClientRect().top;
+  let block = view.lineBlockAtHeight(edge - top);
+  // A line whose blocks (a thread, a finding) straddle the edge starts
+  // above the column: take the next line, whose top is in view.
+  if (top + block.top < columnTop && block.to < view.state.doc.length) {
+    block = view.lineBlockAt(block.to + 1);
+  }
+  return {
+    line: view.state.doc.lineAt(block.from).number,
+    offset: Math.max(0, Math.round(top + block.top - columnTop)),
+  };
+}
+
+/** Frames to hold a restored line while the rebuilt page measures. */
+const HOLD_FRAMES = 30;
+
+/**
+ * Keep the line at `pos` `offset` px under the page column's top while
+ * the rebuilt editors measure their widgets (the heights above it change
+ * for a few frames after CodeMirror scrolled there). Stops once it held
+ * still for a few frames, after `HOLD_FRAMES`, or when the reader scrolls.
+ */
+function holdLine(view: EditorView, pos: number, offset: number) {
+  const column = view.dom.closest<HTMLElement>('[data-slot="diff"]');
+  if (!column || typeof requestAnimationFrame !== "function") return;
+  let frames = 0;
+  let still = 0;
+  const stop = () => {
+    column.removeEventListener("wheel", stop);
+    column.removeEventListener("keydown", stop);
+    frames = HOLD_FRAMES;
+  };
+  column.addEventListener("wheel", stop, { passive: true });
+  column.addEventListener("keydown", stop);
+  const tick = () => {
+    if (frames++ >= HOLD_FRAMES || !view.dom.isConnected) return stop();
+    pauseScrollAnchor(100);
+    // Where the line really is (drawn), else where the height map has it.
+    const drawn = view.coordsAtPos(pos, 1)?.top;
+    const top =
+      (drawn ?? view.documentTop + view.lineBlockAt(pos).top) -
+      column.getBoundingClientRect().top;
+    const delta = top - offset;
+    if (Math.abs(delta) >= 1) {
+      column.scrollTop += delta;
+      still = 0;
+    } else if (++still >= 3) {
+      return stop();
+    }
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+/** Each block key's editor index and line. */
+function locate(
+  perView: readonly LineBlocks[],
+): Map<string, { view: number; line: number }> {
+  const out = new Map<string, { view: number; line: number }>();
+  perView.forEach((lines, view) => {
+    for (const [line, blocks] of lines) {
+      for (const b of blocks) out.set(b.key, { view, line });
+    }
+  });
+  return out;
+}
+
 /** Expand every collapsed stretch of `view` that holds one of `lines`. */
 function uncollapseAt(view: EditorView, side: DiffSide, lines: number[]) {
   const info = getChunks(view.state);
@@ -571,6 +704,21 @@ export function DiffEditor({
   const host = useRef<HTMLDivElement>(null);
   const mode = useThemeStore((s) => s.mode);
   const views = useRef<EditorView[]>([]);
+  // Where each block sits (editor index, line), for `reveal`.
+  const where = useRef(new Map<string, { view: number; line: number }>());
+  // The line being read when the layout switched: the rebuilt editor puts
+  // it back at the same height. Noted as the setting changes, before any
+  // editor of the page is torn down (each one gone shifts the others).
+  const reading = useRef<ReadingLine | null>(null);
+  useEffect(
+    () =>
+      useLayoutStore.subscribe((s, prev) => {
+        if (s.diffLayout !== prev.diffLayout) {
+          reading.current = readingLine(views.current);
+        }
+      }),
+    [],
+  );
   const theme = useRef(new Compartment());
   const language = useRef(new Compartment());
   // The latest props for the (re)build effect without rebuilding on each.
@@ -660,6 +808,7 @@ export function DiffEditor({
       uncollapseAt(b, "b", [...onB.keys()]);
       a.dispatch({ effects: setBlocks.of(onA) });
       b.dispatch({ effects: setBlocks.of(onB) });
+      where.current = locate([onA, onB]);
     } else {
       // Unified: base-side blocks go where those lines show on the head.
       const [view] = vs;
@@ -676,8 +825,51 @@ export function DiffEditor({
       }
       uncollapseAt(view, "b", [...lines.keys()]);
       view.dispatch({ effects: setBlocks.of(lines) });
+      where.current = locate([lines]);
+    }
+    // After a rebuild (a layout switch), back to the line being read once
+    // its blocks are placed: every height in the page changed, so only the
+    // line itself says where the reader was.
+    const keep = reading.current;
+    reading.current = null;
+    if (keep) {
+      const head = vs[vs.length - 1];
+      const doc = head.state.doc;
+      const at = doc.line(Math.min(keep.line, doc.lines)).from;
+      uncollapseAt(head, "b", [keep.line]);
+      head.dispatch({
+        effects: EditorView.scrollIntoView(at, {
+          y: "start",
+          yMargin: keep.offset,
+        }),
+      });
+      holdLine(head, at, keep.offset);
     }
   }, [placements, items, original, modified, layout]);
+
+  // A keyboard move to a block far down: CodeMirror renders only lines
+  // near the viewport, so scroll there first (`lib/revealItem`). The
+  // effect walks up to the page column, the scroller here.
+  useEffect(
+    () =>
+      registerDiffEditor(path, {
+        reveal: (key) => {
+          const at = where.current.get(key);
+          const view = at ? views.current[at.view] : undefined;
+          if (!at || !view) return false;
+          const doc = view.state.doc;
+          const line = doc.line(Math.min(at.line, doc.lines));
+          view.dispatch({
+            effects: EditorView.scrollIntoView(line.to, {
+              y: "start",
+              yMargin: 80,
+            }),
+          });
+          return true;
+        },
+      }),
+    [path],
+  );
 
   // The "+" lines, the selection and the focused line.
   useEffect(() => {
