@@ -190,3 +190,21 @@
   -webkit-user-select: text;
   user-select: text;
 }
+
+.skipped {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.skipped .row {
+  opacity: 0.85;
+}
+
+.caret {
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.caret[data-open="true"] {
+  transform: rotate(90deg);
+}

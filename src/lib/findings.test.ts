@@ -1,14 +1,18 @@
 import { describe, expect, it } from "vitest";
 
+import type { Finding } from "../ipc/types";
 import { aiRun, checklistItem, finding } from "../test/aiFixtures";
+import { thread } from "../test/fixtures";
 import {
   aiStatusText,
   currentRound,
-  skippedDuplicatesText,
   defaultBody,
   findingPlacement,
   fromEarlierRound,
   groupBySeverity,
+  repeatTarget,
+  skippedChecklistText,
+  skippedDuplicatesText,
   sortFindings,
   splitChecklist,
 } from "./findings";
@@ -107,6 +111,46 @@ describe("findings", () => {
     expect(skippedDuplicatesText(aiRun())).toBeNull();
     expect(skippedDuplicatesText(aiRun({ droppedDuplicates: 2 }))).toBe(
       "2 skipped: already raised in the review",
+    );
+  });
+});
+
+describe("set-aside findings", () => {
+  it("names what a finding repeats", () => {
+    const bobs = thread({ author: "bob-fixture" });
+    const mine = thread({ mine: true, author: "me-fixture" });
+    const f = (repeatOf: Finding["repeatOf"]) => finding({ repeatOf });
+    expect(
+      repeatTarget(
+        f({ reason: "similar", threadId: bobs.threadId, findingId: null }),
+        [bobs, mine],
+      ),
+    ).toBe("bob-fixture's comment");
+    expect(
+      repeatTarget(
+        f({ reason: "agentMarked", threadId: mine.threadId, findingId: null }),
+        [bobs, mine],
+      ),
+    ).toBe("your comment");
+    expect(
+      repeatTarget(
+        f({ reason: "similar", threadId: null, findingId: "x" }),
+        [],
+      ),
+    ).toBe("your posted finding");
+    expect(
+      repeatTarget(
+        f({ reason: "similar", threadId: bobs.threadId, findingId: null }),
+        [],
+      ),
+    ).toBe("an existing comment");
+    expect(repeatTarget(f(null), [])).toBe("an existing comment");
+  });
+
+  it("counts the checklist items left out", () => {
+    expect(skippedChecklistText(aiRun())).toBeNull();
+    expect(skippedChecklistText(aiRun({ skippedChecklist: 1 }))).toBe(
+      "1 checklist item left out: already raised in the review",
     );
   });
 });

@@ -1,7 +1,8 @@
 /**
  * The AI island right of the review (Iris's preview island): the selected
- * review's findings (`FindingsList`, with "Post selected") over its "look
- * here yourself" checklist (`Checklist`). Open or closed is remembered
+ * review's findings (`FindingsList`, with "Post selected"), those set aside
+ * as already raised in the review (`SkippedFindings`, folded), and its
+ * "look here yourself" checklist (`Checklist`). Open or closed is remembered
  * (`layoutStore.aiPanelOpen`; the header's Findings toggle and the
  * toggle-findings key flip it). Closed, or without a review, or with the AI
  * pass off, it takes no space at all.
@@ -15,11 +16,11 @@ import {
 } from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
-import { skippedDuplicatesText } from "../lib/findings";
+import { skippedChecklistText } from "../lib/findings";
 import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import { Checklist } from "./Checklist";
-import { FindingsList } from "./FindingsList";
+import { FindingsList, SkippedFindings } from "./FindingsList";
 import { AiIcon, AiPanelCloseIcon } from "./icons";
 import styles from "./AiPanel.module.css";
 
@@ -37,7 +38,7 @@ function Panel({ reviewId }: { reviewId: string }) {
   const error = useAiStore((s) => s.byReview[reviewId]?.error ?? null);
   const reload = useAiStore((s) => s.reloadOutput);
   const keymap = useKeymap();
-  const skipped = run ? skippedDuplicatesText(run) : null;
+  const skippedChecklist = run ? skippedChecklistText(run) : null;
 
   const note =
     run?.status === "running"
@@ -80,7 +81,7 @@ function Panel({ reviewId }: { reviewId: string }) {
             out: not on a file of this change.
           </p>
         )}
-        {skipped && <p className={styles.note}>{skipped}.</p>}
+        {skippedChecklist && <p className={styles.note}>{skippedChecklist}.</p>}
         {error && (
           <div className={styles.error} role="alert">
             {error.message}{" "}
@@ -90,6 +91,7 @@ function Panel({ reviewId }: { reviewId: string }) {
           </div>
         )}
         <FindingsList reviewId={reviewId} />
+        <SkippedFindings reviewId={reviewId} />
         <Checklist reviewId={reviewId} />
         <p className={styles.hint}>
           Nothing is posted until you press Post selected. Verdicts and the

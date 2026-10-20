@@ -51,6 +51,10 @@
       "github",
       "gitlab"
     ],
+    "RepeatReason": [
+      "agentMarked",
+      "similar"
+    ],
     "ReviewState": [
       "open",
       "merged",
@@ -107,6 +111,7 @@
       "readOnlyGuaranteed",
       "reviewId",
       "round",
+      "skippedChecklist",
       "startedAt",
       "status"
     ],
@@ -134,6 +139,10 @@
       "path",
       "postedAt",
       "postedUrl",
+      "repeatOf",
+      "repeatOf.findingId",
+      "repeatOf.reason",
+      "repeatOf.threadId",
       "reviewId",
       "round",
       "severity",

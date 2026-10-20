@@ -350,3 +350,18 @@ export function useRevealCard(card: string, open: () => void) {
     seen.current = reveal;
   }, [reveal]);
 }
+
+/**
+ * Focus a thread of the review by keyboard rules (select its card, open
+ * it, scroll to it): the "repeats …" link of a set-aside finding.
+ */
+export function focusThread(reviewId: ReviewId, threadId: ThreadId): void {
+  const t = useThreadStore
+    .getState()
+    .byReview[reviewId]?.threads.find((x) => x.threadId === threadId);
+  useFocusStore
+    .getState()
+    .focusItem(reviewId, threadFocus(reviewId, threadId, t?.mine ?? false), {
+      move: true,
+    });
+}

@@ -38,6 +38,25 @@ impl Core {
         ai_store::findings(&self.store, id)
     }
 
+    /// The review's findings set aside as repeats of the review (an existing
+    /// thread or a posted finding makes their point), with what each
+    /// repeats; same order as [`findings`](Core::findings). Empty when the
+    /// AI pass is off.
+    pub fn skipped_findings(&self, id: ReviewId) -> CoreResult<Vec<Finding>> {
+        self.review(id)?;
+        if !self.ai.enabled() {
+            return Ok(Vec::new());
+        }
+        ai_store::skipped_findings(&self.store, id)
+    }
+
+    /// Show a finding set aside as a repeat anyway: from now on it is one
+    /// of [`findings`](Core::findings), to post or dismiss like any other.
+    /// Local only: nothing is written to the platform.
+    pub fn show_finding_anyway(&self, id: FindingId) -> CoreResult<Finding> {
+        ai_store::show_anyway(&self.store, id)
+    }
+
     /// The review's "look here yourself" items, newest round first. Empty
     /// when the AI pass is off.
     pub fn checklist(&self, id: ReviewId) -> CoreResult<Vec<ChecklistItem>> {
@@ -178,6 +197,12 @@ impl Core {
                         "this finding was already posted",
                     )))
                 }
+                Some(f) if f.review_id == id && ai_store::is_skipped(&self.store, f.id)? => {
+                    outcomes.push(Some(failed(
+                        PostErrorKind::InvalidInput,
+                        "this finding was set aside as already raised; show it anyway first",
+                    )))
+                }
                 Some(f) if f.review_id == id => {
                     let (head_sha, base_sha) = ai_store::finding_shas(&self.store, f.id)?;
                     // Old-side lines are numbered against the left side the
@@ -224,7 +249,12 @@ impl Core {
                         let now = Utc::now();
                         // The comment is on the platform either way: a
                         // failed bookkeeping write is only logged.
-                        if let Err(e) = ai_store::mark_posted(&self.store, f.id, &p.url, now) {
+                        let ids = ai_store::PostedIds {
+                            thread: Some(p.provider_thread_id.clone()),
+                            note: Some(p.provider_note_id.clone()),
+                        };
+                        if let Err(e) = ai_store::mark_posted(&self.store, f.id, &p.url, &ids, now)
+                        {
                             tracing::warn!("could not mark a finding as posted: {e}");
                         }
                         FindingPostOutcome::Posted {

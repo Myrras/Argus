@@ -140,6 +140,7 @@ describe("AI pass wrappers", () => {
       droppedFindings: 0,
       droppedVerdicts: 0,
       droppedDuplicates: 0,
+      skippedChecklist: 0,
       readOnlyGuaranteed: true,
     };
     events.emit("ai:state", state);

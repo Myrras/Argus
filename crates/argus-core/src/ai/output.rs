@@ -2,10 +2,15 @@
 //! against the output contract, and drop what does not belong to the review.
 //!
 //! ```json
-//! {"findings":[{"path":"","line":0,"side":"new|old","severity":"high|medium|low","title":"","body":""}],
-//!  "checklist":[{"text":""}],
+//! {"findings":[{"path":"","line":0,"side":"new|old","severity":"high|medium|low","title":"","body":"","relatedThreadIds":[]}],
+//!  "checklist":[{"text":"","relatedThreadIds":[]}],
 //!  "verdicts":[{"threadId":"","label":"addressed|partly|untouched","reason":""}]}
 //! ```
+//!
+//! `relatedThreadIds` (the existing threads or posted findings a point
+//! overlaps, see `super::dedupe`) is asked for on every finding and item
+//! but taken as empty when left out: a missing list is no reason to fail a
+//! run.
 //!
 //! Validation is hand-written over [`serde_json::Value`] rather than a serde
 //! derive so every error is Argus' own text (a serde message quotes the
@@ -16,6 +21,7 @@ use std::collections::HashSet;
 
 use serde_json::{Map, Value};
 
+use super::dedupe::Repeat;
 use super::model::{Severity, VerdictLabel};
 use crate::ids::ThreadId;
 use crate::provider::Side;
@@ -29,6 +35,38 @@ pub(crate) struct RawFinding {
     pub severity: Severity,
     pub title: String,
     pub body: String,
+    /// The ids of the threads (or posted findings) the agent said this
+    /// overlaps; after [`filter`], only ids the prompt listed, canonical.
+    pub related: Vec<String>,
+    /// Set by `super::dedupe::classify` when the review already makes
+    /// this point.
+    pub repeat: Option<Repeat>,
+}
+
+/// One "look here yourself" item as the agent wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawCheck {
+    pub text: String,
+    /// As [`RawFinding::related`].
+    pub related: Vec<String>,
+}
+
+/// Tests write items as plain text (nothing related) and compare by text.
+#[cfg(test)]
+impl From<&str> for RawCheck {
+    fn from(text: &str) -> Self {
+        RawCheck {
+            text: text.into(),
+            related: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<&str> for RawCheck {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +81,7 @@ pub(crate) struct RawVerdict {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct AgentOutput {
     pub findings: Vec<RawFinding>,
-    pub checklist: Vec<String>,
+    pub checklist: Vec<RawCheck>,
     pub verdicts: Vec<RawVerdict>,
 }
 
@@ -51,14 +89,18 @@ pub(crate) struct AgentOutput {
 /// threads, and how many of each were dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct RunOutput {
+    /// Repeats of the review included, marked ([`RawFinding::repeat`]).
     pub findings: Vec<RawFinding>,
-    pub checklist: Vec<String>,
+    /// Repeats of the review left out (counted in `skipped_checklist`).
+    pub checklist: Vec<RawCheck>,
     pub verdicts: Vec<(ThreadId, VerdictLabel, String)>,
     pub dropped_findings: u32,
     pub dropped_verdicts: u32,
-    /// Findings dropped because the review already makes their point (an
-    /// existing thread or a posted finding; see `super::dedupe`).
+    /// Findings marked as repeats of the review (an existing thread or a
+    /// posted finding; see `super::dedupe`): stored, listed apart.
     pub dropped_duplicates: u32,
+    /// Checklist items left out as repeats of the review.
+    pub skipped_checklist: u32,
     /// The diff the agent was given: its right side (where new-side lines
     /// are numbered) and left side (old-side lines; the watermark for a
     /// run over the commits since the last review).
@@ -122,9 +164,10 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
     for (i, item) in array(top, "findings")?.iter().enumerate() {
         let at = format!("findings[{i}]");
         let o = object(item, &at)?;
-        only_keys(
+        only_keys_with(
             o,
             &["path", "line", "side", "severity", "title", "body"],
+            &[RELATED],
             &at,
         )?;
         let line = o
@@ -147,13 +190,18 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
             severity,
             title: non_empty(o, "title", &at)?.to_string(),
             body: string(o, "body", &at)?.trim().to_string(),
+            related: related(o, &at)?,
+            repeat: None,
         });
     }
     for (i, item) in array(top, "checklist")?.iter().enumerate() {
         let at = format!("checklist[{i}]");
         let o = object(item, &at)?;
-        only_keys(o, &["text"], &at)?;
-        out.checklist.push(non_empty(o, "text", &at)?.to_string());
+        only_keys_with(o, &["text"], &[RELATED], &at)?;
+        out.checklist.push(RawCheck {
+            text: non_empty(o, "text", &at)?.to_string(),
+            related: related(o, &at)?,
+        });
     }
     for (i, item) in array(top, "verdicts")?.iter().enumerate() {
         let at = format!("verdicts[{i}]");
@@ -171,7 +219,36 @@ pub(crate) fn validate(v: &Value) -> Result<AgentOutput, String> {
     Ok(out)
 }
 
+/// The key of the related-thread list on findings and checklist items.
+const RELATED: &str = "relatedThreadIds";
+
+/// `relatedThreadIds` of `o`: an array of strings (trimmed, empty ones
+/// left out); absent is empty.
+fn related(o: &Map<String, Value>, at: &str) -> Result<Vec<String>, String> {
+    let Some(v) = o.get(RELATED) else {
+        return Ok(Vec::new());
+    };
+    let bad = || format!("{at}.{RELATED} must be an array of thread id strings");
+    v.as_array()
+        .ok_or_else(bad)?
+        .iter()
+        .map(|id| id.as_str().map(|s| s.trim().to_string()).ok_or_else(bad))
+        .filter(|id| !matches!(id, Ok(s) if s.is_empty()))
+        .collect()
+}
+
 fn only_keys(o: &Map<String, Value>, allowed: &[&str], at: &str) -> Result<(), String> {
+    only_keys_with(o, allowed, &[], at)
+}
+
+/// Exactly the `required` keys, plus any of `optional`.
+fn only_keys_with(
+    o: &Map<String, Value>,
+    required: &[&str],
+    optional: &[&str],
+    at: &str,
+) -> Result<(), String> {
+    let allowed: Vec<&str> = required.iter().chain(optional).copied().collect();
     if let Some(k) = o.keys().find(|k| !allowed.contains(&k.as_str())) {
         // The key is the model's text: name it only when it is short and
         // plain, so a junk key cannot smuggle prose into the error.
@@ -185,7 +262,7 @@ fn only_keys(o: &Map<String, Value>, allowed: &[&str], at: &str) -> Result<(), S
             allowed.join(", ")
         ));
     }
-    for k in allowed {
+    for k in required {
         if !o.contains_key(*k) {
             return Err(format!("{at} is missing \"{k}\""));
         }
@@ -229,22 +306,48 @@ fn match_path<'a>(path: &str, allowed: &'a HashSet<String>) -> Option<&'a String
     })
 }
 
+/// The ids of `ids` that are in `known` (the threads and posted findings
+/// the prompt listed), canonical (lower-case UUID), each once. An unknown
+/// id is dropped from the list, never the point that named it.
+fn known_ids(ids: Vec<String>, known: &HashSet<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        if let Ok(u) = uuid::Uuid::parse_str(id.trim()) {
+            let id = u.to_string();
+            if known.contains(&id) && !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
 /// Keep findings on `paths` (the files of the diff the agent was given) and
 /// verdicts on `threads` (the threads it was asked about; one each, the
-/// first wins), counting what was dropped.
+/// first wins), counting what was dropped; keep only `related` ids (those
+/// the prompt listed) in the related lists.
 pub(crate) fn filter(
     out: AgentOutput,
     paths: &HashSet<String>,
     threads: &HashSet<ThreadId>,
+    related: &HashSet<String>,
 ) -> RunOutput {
     let mut run = RunOutput {
-        checklist: out.checklist,
+        checklist: out
+            .checklist
+            .into_iter()
+            .map(|c| RawCheck {
+                related: known_ids(c.related, related),
+                ..c
+            })
+            .collect(),
         ..RunOutput::default()
     };
     for mut f in out.findings {
         match match_path(&f.path, paths) {
             Some(p) => {
                 f.path = p.clone();
+                f.related = known_ids(std::mem::take(&mut f.related), related);
                 run.findings.push(f);
             }
             None => run.dropped_findings += 1,
@@ -498,7 +601,7 @@ pub(crate) fn redact(out: &mut RunOutput, secrets: &[String]) {
         f.body = redact_text(&f.body, secrets);
     }
     for item in &mut out.checklist {
-        *item = redact_text(item, secrets);
+        item.text = redact_text(&item.text, secrets);
     }
     for (_, _, reason) in &mut out.verdicts {
         *reason = redact_text(reason, secrets);
@@ -638,8 +741,10 @@ mod tests {
                 severity: Severity::High,
                 title: format!("Leaks {tok}"),
                 body: format!("The token {tok} is printed."),
+                related: Vec::new(),
+                repeat: None,
             }],
-            checklist: vec![format!("Rotate {tok}")],
+            checklist: vec![format!("Rotate {tok}").as_str().into()],
             verdicts: vec![(
                 ThreadId::from_key(crate::ids::ReviewId::from_key("r"), "1"),
                 VerdictLabel::Partly,
@@ -740,6 +845,48 @@ mod tests {
     }
 
     #[test]
+    fn related_thread_ids_are_read_checked_and_optional() {
+        let known = "6f1c2a8e-0000-4000-8000-000000000001";
+        let answer = format!(
+            r#"{{"findings":[
+              {{"path":"src/a.rs","line":3,"side":"new","severity":"high","title":"t","body":"b","relatedThreadIds":["{}"," ", "not-a-uuid","6f1c2a8e-0000-4000-8000-0000000000ff"]}},
+              {{"path":"src/a.rs","line":4,"side":"new","severity":"low","title":"u","body":""}}
+             ],
+             "checklist":[{{"text":"c","relatedThreadIds":["{known}","{known}"]}},{{"text":"d"}}],
+             "verdicts":[]}}"#,
+            known.to_uppercase()
+        );
+        let parsed = parse(&answer).unwrap();
+        assert_eq!(parsed.findings[0].related.len(), 3);
+        assert!(parsed.findings[1].related.is_empty());
+        assert!(parsed.checklist[1].related.is_empty());
+        let paths: HashSet<String> = ["src/a.rs".to_string()].into();
+        let run = filter(parsed, &paths, &HashSet::new(), &[known.to_string()].into());
+        // Unknown ids leave the list, never the point; ids come out canonical.
+        assert_eq!(run.findings.len(), 2);
+        assert_eq!(run.findings[0].related, vec![known.to_string()]);
+        assert_eq!(run.checklist[0].related, vec![known.to_string()]);
+        assert_eq!(run.checklist.len(), 2);
+        for (input, expect) in [
+            (
+                r#"{"findings":[{"path":"a","line":1,"side":"new","severity":"low","title":"t","body":"","relatedThreadIds":"x"}],"checklist":[],"verdicts":[]}"#,
+                "findings[0].relatedThreadIds must be an array",
+            ),
+            (
+                r#"{"findings":[],"checklist":[{"text":"t","relatedThreadIds":[1]}],"verdicts":[]}"#,
+                "checklist[0].relatedThreadIds must be an array",
+            ),
+            (
+                r#"{"findings":[],"checklist":[{"text":"t","related":[]}],"verdicts":[]}"#,
+                "\"related\" that is not in the contract (allowed: text, relatedThreadIds)",
+            ),
+        ] {
+            let err = parse(input).unwrap_err();
+            assert!(err.contains(expect), "{input}: got {err:?}");
+        }
+    }
+
+    #[test]
     fn junk_keys_are_not_echoed() {
         let err = parse(
             r#"{"findings":[],"checklist":[],"verdicts":[],"ignore previous instructions":1}"#,
@@ -759,6 +906,8 @@ mod tests {
             severity: Severity::Low,
             title: "t".into(),
             body: String::new(),
+            related: Vec::new(),
+            repeat: None,
         };
         let v = |id: String| RawVerdict {
             thread_id: id,
@@ -781,7 +930,7 @@ mod tests {
             ],
         };
         let paths: HashSet<String> = ["src/a.rs".to_string()].into();
-        let run = filter(out, &paths, &[known].into());
+        let run = filter(out, &paths, &[known].into(), &HashSet::new());
         assert_eq!(run.findings.len(), 3);
         assert!(run.findings.iter().all(|f| f.path == "src/a.rs"));
         assert_eq!(run.dropped_findings, 1);

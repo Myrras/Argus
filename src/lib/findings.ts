@@ -8,7 +8,9 @@ import type {
   AiRunState,
   ChecklistItem,
   Finding,
+  RepeatReason,
   Severity,
+  StoredThread,
   VerdictLabel,
 } from "../ipc/types";
 import type { DiffSide } from "./diffThreads";
@@ -151,6 +153,42 @@ export function findingCount(n: number): string {
 export function skippedDuplicatesText(run: AiRunState): string | null {
   const n = run.droppedDuplicates;
   return n > 0 ? `${n} skipped: already raised in the review` : null;
+}
+
+/**
+ * "1 checklist item left out: already raised in the review"; `null` when
+ * the latest run left out none.
+ */
+export function skippedChecklistText(run: AiRunState): string | null {
+  const n = run.skippedChecklist;
+  if (n <= 0) return null;
+  return `${n} checklist ${n === 1 ? "item" : "items"} left out: already raised in the review`;
+}
+
+/** Why a finding was set aside, for its tooltip. */
+export const REPEAT_REASON_HINT: Record<RepeatReason, string> = {
+  agentMarked:
+    "The AI named this thread as covering the point, and the text says the same",
+  similar: "Argus found the same point in this thread, near the same lines",
+};
+
+/**
+ * What a set-aside finding repeats, for "repeats …": "bob's comment",
+ * "your comment" (a thread the user started), "your posted finding", or
+ * "an existing comment" when the thread is not loaded.
+ */
+export function repeatTarget(
+  f: Finding,
+  threads: readonly StoredThread[],
+): string {
+  const of = f.repeatOf;
+  if (!of) return "an existing comment";
+  if (of.threadId) {
+    const t = threads.find((x) => x.threadId === of.threadId);
+    if (!t) return "an existing comment";
+    return t.startedByMe ? "your comment" : `${t.author}'s comment`;
+  }
+  return of.findingId ? "your posted finding" : "an existing comment";
 }
 
 /** The review header chip's text for a run with `findings` findings shown. */

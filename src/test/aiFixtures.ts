@@ -21,6 +21,7 @@ export function aiRun(overrides: Partial<AiRunState> = {}): AiRunState {
     droppedFindings: 0,
     droppedVerdicts: 0,
     droppedDuplicates: 0,
+    skippedChecklist: 0,
     readOnlyGuaranteed: true,
     ...overrides,
   };
@@ -41,6 +42,7 @@ export function finding(overrides: Partial<Finding> = {}): Finding {
     dismissed: false,
     postedAt: null,
     postedUrl: null,
+    repeatOf: null,
     ...overrides,
   };
 }

@@ -157,10 +157,23 @@ sibling app Iris (`../Iris`).
     `toggleFindings` (`a`, scope `files`) and `toggleFindingSelected` (`x`).
     Only the "Post selected" button posts.
   - Duplicates: the prompt includes every existing thread (all reviewers,
-    open/resolved/outdated, MR-level, posted findings; budgeted), and
-    `ai/dedupe.rs` drops findings that repeat a thread (same path/side within
-    ±2 lines and similarity ≥ 0.5, MR-level ≥ 0.7), counted in
-    `droppedDuplicates`; migration 7 adds `ai_runs.dropped_duplicates`.
+    open/resolved/outdated, MR-level, posted findings by id; "Existing
+    threads" hard-capped at 60k, "Your open threads" at 40k, GitHub
+    conversation entries get no verdict). Each finding and checklist item
+    carries `relatedThreadIds` (validated against the prompt's ids).
+    `ai/dedupe.rs::classify` marks a repeat when the agent marked the thread
+    and the loose (words + identifiers) similarity is ≥ 0.2, or by the net
+    (prose words only: code, fences, identifiers and the commented line's
+    words left out; stem, then EN/NL stop words; ≥ 2 shared words): same
+    path/side within ±2 lines (or the line the thread's hunk maps to on the
+    other side) ≥ 0.5, MR-level or other side ≥ 0.7. Repeats are stored set
+    aside (migration 9: `findings.repeat_reason/_of_thread/_of_finding`,
+    `shown_anyway`, `posted_thread_id/_note_id`;
+    `ai_runs.skipped_checklist`), listed by `list_skipped_findings`, shown
+    by `show_finding_anyway` (local), never posted while set aside; the AI
+    panel folds them under "Skipped as already raised" (`SkippedFindings`).
+    Checklist repeats are dropped and counted. Posted findings match their
+    thread by platform ids, not text.
 - ✅ **Milestone 6 — Local clone.** Core `git/`: with a clone configured per
   repository (`Settings::clone_paths`), the history walk and `Core::file_at`
   read through plain `git` (`rev-list`, `diff-tree`, `cat-file --batch`)

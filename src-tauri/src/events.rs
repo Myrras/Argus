@@ -116,6 +116,7 @@ mod tests {
             dropped_findings: 0,
             dropped_verdicts: 0,
             dropped_duplicates: 0,
+            skipped_checklist: 0,
             read_only_guaranteed: true,
         }
     }

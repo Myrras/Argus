@@ -198,6 +198,8 @@ pub fn run() {
             commands::ai::list_findings,
             commands::ai::list_checklist,
             commands::ai::list_verdicts,
+            commands::ai::list_skipped_findings,
+            commands::ai::show_finding_anyway,
             commands::ai::run_ai,
             commands::ai::cancel_ai,
             commands::ai::dismiss_finding,

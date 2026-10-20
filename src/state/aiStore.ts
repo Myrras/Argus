@@ -10,7 +10,9 @@
  * `postSelected` writes to a platform, and only from the "Post selected"
  * button: selecting, editing, dismissing, ticking the checklist and
  * overriding a verdict are local (the last three stored by Argus, never on
- * GitHub/GitLab). It posts what each finding shows: an open editor's text,
+ * GitHub/GitLab). Findings the run set aside as already raised in the
+ * review are listed apart (`skipped`) and never posted; "Show anyway" makes
+ * one a normal finding (local only). It posts what each finding shows: an open editor's text,
  * else the saved edit, else its own text. While a review posts, Save edit
  * waits; text that changed meanwhile on a posted finding stays in its
  * editor.
@@ -27,11 +29,13 @@ import {
   dismissFinding,
   listChecklist,
   listFindings,
+  listSkippedFindings,
   listVerdicts,
   postFindings,
   runAi,
   setChecklistChecked,
   setVerdictOverride,
+  showFindingAnyway,
   toIpcError,
 } from "../ipc/commands";
 import { onAiState, onReviewChanged } from "../ipc/events";
@@ -68,6 +72,11 @@ import {
 
 export interface ReviewAi {
   findings: Finding[];
+  /**
+   * Set aside as already raised in the review (`repeatOf` says by what);
+   * absent until the first read.
+   */
+  skipped?: Finding[];
   checklist: ChecklistItem[];
   verdicts: Verdict[];
   loading: boolean;
@@ -126,6 +135,8 @@ interface AiStoreState {
   cancel: (id: ReviewId) => Promise<void>;
 
   dismiss: (f: Finding, dismissed: boolean) => Promise<void>;
+  /** "Show anyway": a set-aside finding becomes a normal one (local only). */
+  showAnyway: (f: Finding) => Promise<void>;
   setChecked: (item: ChecklistItem, checked: boolean) => Promise<void>;
   setOverride: (
     reviewId: ReviewId,
@@ -154,6 +165,7 @@ interface AiStoreState {
 
 const EMPTY: ReviewAi = {
   findings: [],
+  skipped: [],
   checklist: [],
   verdicts: [],
   loading: false,
@@ -205,14 +217,16 @@ export const useAiStore = create<AiStoreState>((set, get) => {
       const current = outputReads.begin(id);
       patchReview(id, { loading: true });
       try {
-        const [findings, checklist, verdicts] = await Promise.all([
+        const [findings, skipped, checklist, verdicts] = await Promise.all([
           listFindings(id),
+          listSkippedFindings(id),
           listChecklist(id),
           listVerdicts(id),
         ]);
         if (!current()) return;
         patchReview(id, {
           findings: findings ?? [],
+          skipped: skipped ?? [],
           checklist: checklist ?? [],
           verdicts: verdicts ?? [],
           loading: false,
@@ -275,6 +289,15 @@ export const useAiStore = create<AiStoreState>((set, get) => {
             : "Could not bring the finding back",
           toIpcError(e).message,
         );
+      }
+      await get().reloadOutput(f.reviewId);
+    },
+
+    showAnyway: async (f) => {
+      try {
+        await showFindingAnyway(f.id);
+      } catch (e) {
+        toastError("Could not show the finding", toIpcError(e).message);
       }
       await get().reloadOutput(f.reviewId);
     },
@@ -500,6 +523,15 @@ export function useFindings(reviewId: ReviewId): Finding[] {
   return useAiStore((s) =>
     s.runs[reviewId]?.enabled
       ? (s.byReview[reviewId]?.findings ?? NO_FINDINGS)
+      : NO_FINDINGS,
+  );
+}
+
+/** The review's findings set aside as already raised (none with AI off). */
+export function useSkippedFindings(reviewId: ReviewId): Finding[] {
+  return useAiStore((s) =>
+    s.runs[reviewId]?.enabled
+      ? (s.byReview[reviewId]?.skipped ?? NO_FINDINGS)
       : NO_FINDINGS,
   );
 }

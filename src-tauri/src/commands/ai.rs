@@ -59,6 +59,17 @@ pub async fn list_verdicts(
     blocking(state, move |core| core.verdicts(id)).await
 }
 
+/// The review's findings set aside as already raised in the review, with
+/// what each repeats.
+#[tauri::command]
+pub async fn list_skipped_findings(
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<Vec<Finding>, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    blocking(state, move |core| core.skipped_findings(id)).await
+}
+
 /// Queue a run of the review now; `invalidInput` when the AI pass is off.
 #[tauri::command]
 pub async fn run_ai(state: State<'_, AppState>, review_id: String) -> Result<AiRunState, IpcError> {
@@ -85,6 +96,17 @@ pub async fn dismiss_finding(
 ) -> Result<Finding, IpcError> {
     let id: FindingId = parse_id(&finding_id, "findingId")?;
     blocking(state, move |core| core.dismiss_finding(id, dismissed)).await
+}
+
+/// Show a finding set aside as already raised anyway: it becomes a normal
+/// finding. Local only.
+#[tauri::command]
+pub async fn show_finding_anyway(
+    state: State<'_, AppState>,
+    finding_id: String,
+) -> Result<Finding, IpcError> {
+    let id: FindingId = parse_id(&finding_id, "findingId")?;
+    blocking(state, move |core| core.show_finding_anyway(id)).await
 }
 
 #[tauri::command]

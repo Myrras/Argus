@@ -508,10 +508,13 @@ export interface AiRunState {
   /** Verdicts the latest successful run dropped (unknown thread ids). */
   droppedVerdicts: number;
   /**
-   * Findings the latest successful run dropped because the review already
-   * makes their point (an existing thread, anyone's, or a posted finding).
+   * Findings the latest successful run set aside because the review already
+   * makes their point (an existing thread, anyone's, or a posted finding);
+   * listed by `list_skipped_findings`, never shown as findings.
    */
   droppedDuplicates: number;
+  /** Checklist items the latest successful run left out for that reason. */
+  skippedChecklist: number;
   /**
    * Whether Argus can guarantee the configured agent only reads. `false` for
    * `auggie`, whose user-configured MCP tools cannot be turned off.
@@ -537,6 +540,24 @@ export interface Finding {
   /** Set once the user posted it (`post_findings`). */
   postedAt: Timestamp | null;
   postedUrl: string | null;
+  /**
+   * What the review already says that this repeats: set on a finding set
+   * aside as already raised, and kept once the user shows it anyway.
+   */
+  repeatOf: RepeatOf | null;
+}
+
+/**
+ * `ai::RepeatReason`: the agent listed the thread as related and the text
+ * still says what it says, or Argus' own comparison found it.
+ */
+export type RepeatReason = "agentMarked" | "similar";
+
+/** `ai::RepeatOf`: a thread of the review, or a posted finding. */
+export interface RepeatOf {
+  reason: RepeatReason;
+  threadId: ThreadId | null;
+  findingId: FindingId | null;
 }
 
 /** `ai::ChecklistItem`: "look here yourself". */

@@ -537,3 +537,119 @@ fn with_the_ai_pass_off_tracking_and_history_still_work() {
     assert_eq!(starts.load(Ordering::SeqCst), 0);
     assert_eq!(recorder.writes(), Vec::<&str>::new());
 }
+
+/// A finding that repeats a colleague's thread is set aside, not shown and
+/// never posted; showing it anyway is local, and only then can it be
+/// posted (the one write).
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_finding_set_aside_as_a_repeat_writes_nothing_until_shown_and_posted() {
+    let recorder = Recorder::with_thread(vec![said(
+        "n1",
+        AUTHOR,
+        "The widget cache keeps stale entries after a reload here.",
+        10,
+        11,
+    )]);
+    let agent = Agent::new();
+    let core = core_over(&recorder, agent.settings.clone());
+    core.ai.set_executor(agent.executor());
+    let id = the_review(&core).id;
+    let theirs = ThreadId::from_key(id, MY_THREAD);
+    agent.answer(serde_json::json!({
+        "findings": [
+            // On a line of the diff (postable), marked as the thread's.
+            {"path": PATH, "line": 5, "side": "new", "severity": "high",
+             "title": "Stale widget cache entries survive a reload",
+             "body": "After a reload the cache keeps stale widget entries.",
+             "relatedThreadIds": [theirs.to_string()]},
+            {"path": PATH, "line": 4, "side": "new", "severity": "low",
+             "title": "Five is spelled out", "body": "Use a number.",
+             "relatedThreadIds": []}
+        ],
+        "checklist": [
+            {"text": "Does the widget cache keep stale entries after a reload?",
+             "relatedThreadIds": [theirs.to_string()]},
+            {"text": "Is the rename intended?"}
+        ],
+        "verdicts": []
+    }));
+    assert_eq!(core.on_refresh_report(&report()), vec![id]);
+    assert!(core.ai.wait_idle(Duration::from_secs(20)));
+    let st = core.ai_state(id).unwrap();
+    assert_eq!(st.status, AiRunStatus::Done, "{:?}", st.error);
+    assert_eq!((st.dropped_duplicates, st.skipped_checklist), (1, 1));
+    let shown: Vec<_> = core
+        .findings(id)
+        .unwrap()
+        .into_iter()
+        .map(|f| f.title)
+        .collect();
+    assert_eq!(shown, ["Five is spelled out"]);
+    let skipped = core.skipped_findings(id).unwrap();
+    assert_eq!(skipped.len(), 1);
+    let repeat = skipped[0].repeat_of.clone().unwrap();
+    assert_eq!(repeat.thread_id, Some(theirs));
+    assert_eq!(repeat.reason, super::model::RepeatReason::AgentMarked);
+    let items: Vec<_> = core
+        .checklist(id)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.text)
+        .collect();
+    assert_eq!(items, ["Is the rename intended?"]);
+
+    // Set aside: not postable.
+    let post = |core: &Core| {
+        core.post_findings(
+            id,
+            vec![FindingPost {
+                finding_id: skipped[0].id,
+                body: None,
+            }],
+        )
+        .unwrap()
+        .remove(0)
+        .outcome
+    };
+    assert!(matches!(post(&core), FindingPostOutcome::Failed(_)));
+    assert_eq!(recorder.writes(), Vec::<&str>::new());
+
+    // Shown anyway: a normal finding, still nothing written.
+    let f = core.show_finding_anyway(skipped[0].id).unwrap();
+    assert_eq!(f.repeat_of, Some(repeat));
+    assert!(core.skipped_findings(id).unwrap().is_empty());
+    assert_eq!(core.findings(id).unwrap().len(), 2);
+    assert_eq!(recorder.writes(), Vec::<&str>::new());
+    // A rerun of the round keeps it shown.
+    core.run_ai(id).unwrap();
+    assert!(core.ai.wait_idle(Duration::from_secs(20)));
+    assert_eq!(core.findings(id).unwrap().len(), 2);
+    assert_eq!(recorder.writes(), Vec::<&str>::new());
+
+    // Posting it is the one write.
+    assert!(
+        matches!(post(&core), FindingPostOutcome::Failed(_)),
+        "old id"
+    );
+    let again = core
+        .findings(id)
+        .unwrap()
+        .into_iter()
+        .find(|f| f.title.starts_with("Stale"))
+        .unwrap();
+    let results = core
+        .post_findings(
+            id,
+            vec![FindingPost {
+                finding_id: again.id,
+                body: None,
+            }],
+        )
+        .unwrap();
+    assert!(matches!(
+        results[0].outcome,
+        FindingPostOutcome::Posted { .. }
+    ));
+    assert_eq!(recorder.writes(), ["post_comment"]);
+}
