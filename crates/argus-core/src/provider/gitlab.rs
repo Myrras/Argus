@@ -1,7 +1,8 @@
 //! GitLab, over its REST API with a personal access token.
 //!
 //! The token lives in the OS keychain (service `com.argus.app.gitlab`, the
-//! account is the instance host), read on demand, never logged and never
+//! account is the instance host, `http://host` for plain http off this
+//! machine), read on demand, never logged and never
 //! written to settings. A [`TokenSource`] seam lets tests inject one.
 //!
 //! The HTTP client is blocking and never follows redirects, as in Podium: a
@@ -89,7 +90,8 @@ pub struct KeychainToken {
 impl KeychainToken {
     /// The keychain entry for the instance at `base_url`. Keyed by host, so a
     /// token never goes to a different instance after the URL changes; the
-    /// host as the provider talks to it (see [`token_key`]).
+    /// host as the provider talks to it, and apart for plain http (see
+    /// [`TokenKeys`]).
     pub fn for_base_url(base_url: &str) -> Self {
         Self {
             base_url: base_url.to_string(),
@@ -136,55 +138,140 @@ fn keychain_entry(host: &str) -> CoreResult<keyring::Entry> {
         .map_err(|_| CoreError::Provider("could not open the keychain".into()))
 }
 
-/// The keychain account of the instance at `base_url`: the host of its
-/// normalized URL ([`normalize_base_url`]: lowercased, default port
-/// dropped), as the provider talks to it, so every spelling of one
-/// instance finds one entry. Plus the account Argus used before, the raw
-/// URL's host, when that differs: a token stored there is read once and
-/// moved (see [`read_token`]).
-fn token_key(base_url: &str) -> (String, Option<String>) {
+/// The keychain accounts of the instance at `base_url`.
+struct TokenKeys {
+    /// Where its token is: the host of its normalized URL
+    /// ([`normalize_base_url`]: lowercased, default port dropped), as the
+    /// provider talks to it, so every spelling of one instance finds one
+    /// entry; `http://host` for plain http off this machine
+    /// ([`is_insecure`]), so a token stored for https never goes out
+    /// unencrypted because the URL changed to http.
+    key: String,
+    /// Where a token for it may still be, read once and moved to `key`
+    /// (see [`read_token`]): the raw URL's host Argus used before, and for
+    /// https the same instance's plain-http token (going to https is
+    /// safe). Never any for plain http (see [`migrate_plain_http_token`]).
+    fallbacks: Vec<String>,
+}
+
+fn token_keys(base_url: &str) -> TokenKeys {
     let raw = url_host(base_url.trim()).to_string();
-    match normalize_base_url(base_url) {
-        Some(base) => {
-            let key = url_host(&base).to_string();
-            let legacy = (raw != key && !raw.is_empty()).then_some(raw);
-            (key, legacy)
-        }
-        None => (raw, None),
+    let Some(base) = normalize_base_url(base_url) else {
+        return TokenKeys {
+            key: raw,
+            fallbacks: Vec::new(),
+        };
+    };
+    let host = url_host(&base).to_string();
+    if is_insecure(&base) {
+        return TokenKeys {
+            key: format!("http://{host}"),
+            fallbacks: Vec::new(),
+        };
+    }
+    let mut fallbacks = Vec::new();
+    if raw != host && !raw.is_empty() {
+        fallbacks.push(raw);
+    }
+    fallbacks.push(format!("http://{host}"));
+    TokenKeys {
+        key: host,
+        fallbacks,
     }
 }
 
-/// The token for `base_url`; one still under the old raw-host account is
-/// moved to the normalized one on the way.
+fn nonblank(token: Option<String>) -> Option<String> {
+    token.filter(|t| !t.is_empty())
+}
+
+/// Delete an entry a token was moved from or that a save replaces. A
+/// failure is logged, not returned: the token itself is where it belongs,
+/// and the leftover only matters as a fallback.
+fn delete_leftover(store: &dyn SecretStore, account: &str) {
+    if store.delete(account).is_err() {
+        tracing::warn!("could not remove an old GitLab token entry from the keychain");
+    }
+}
+
+/// The token for `base_url`; one still under a fallback account is moved to
+/// the current one on the way.
 fn read_token(store: &dyn SecretStore, base_url: &str) -> Option<String> {
-    let (key, legacy) = token_key(base_url);
-    let nonblank = |t: Option<String>| t.filter(|t| !t.is_empty());
+    let TokenKeys { key, fallbacks } = token_keys(base_url);
     if let Some(token) = nonblank(store.get(&key)) {
         return Some(token);
     }
-    let legacy = legacy?;
-    let token = nonblank(store.get(&legacy))?;
-    // The old entry goes only once the new one holds the token.
-    if store.set(&key, &token).is_ok() {
-        let _ = store.delete(&legacy);
+    for old in fallbacks {
+        let Some(token) = nonblank(store.get(&old)) else {
+            continue;
+        };
+        // The old entry goes only once the new one holds the token.
+        if store.set(&key, &token).is_ok() {
+            delete_leftover(store, &old);
+        }
+        return Some(token);
     }
-    Some(token)
+    None
 }
 
-/// Store `token` for `base_url`; a blank one deletes it. The old raw-host
-/// entry goes either way: it would otherwise come back as the fallback.
+/// Store `token` for `base_url`; a blank one deletes it. The fallback
+/// entries go either way: they would otherwise come back as the fallback.
+/// Only storing (or deleting) the token itself can fail the save.
 fn write_token(store: &dyn SecretStore, base_url: &str, token: &str) -> CoreResult<()> {
-    let (key, legacy) = token_key(base_url);
+    let TokenKeys { key, fallbacks } = token_keys(base_url);
     let token = token.trim();
     if token.is_empty() {
         store.delete(&key)?;
     } else {
         store.set(&key, token)?;
     }
-    if let Some(legacy) = legacy {
-        store.delete(&legacy)?;
+    for old in fallbacks {
+        delete_leftover(store, &old);
     }
     Ok(())
+}
+
+/// Once, on the first start of a version that keys plain-http tokens apart
+/// (see [`TokenKeys::key`]): a plain-http instance configured before kept
+/// its token under its host. The user set it up that way on purpose and it
+/// works, so the token moves to the instance's http account instead of
+/// being asked for again. Anything else is left alone: an https instance,
+/// or one that already has an http token. Never run again afterwards (the
+/// caller keeps a marker): a later switch from https to http must find no
+/// token.
+fn migrate_plain_http_token(store: &dyn SecretStore, base_url: &str) {
+    if !is_insecure(base_url) {
+        return;
+    }
+    let Some(base) = normalize_base_url(base_url) else {
+        return;
+    };
+    let key = token_keys(&base).key;
+    if nonblank(store.get(&key)).is_some() {
+        return;
+    }
+    let host = url_host(&base).to_string();
+    let raw = url_host(base_url.trim()).to_string();
+    let mut old = vec![host];
+    if !raw.is_empty() && !old.contains(&raw) {
+        old.push(raw);
+    }
+    let Some((from, token)) = old
+        .iter()
+        .find_map(|a| nonblank(store.get(a)).map(|t| (a, t)))
+    else {
+        return;
+    };
+    if store.set(&key, &token).is_err() {
+        tracing::warn!("could not move the GitLab token to its plain-http entry");
+        return;
+    }
+    delete_leftover(store, from);
+}
+
+/// [`migrate_plain_http_token`] on the OS keychain. Touches the keychain
+/// only for a plain-http instance URL.
+pub fn gitlab_migrate_plain_http_token(base_url: &str) {
+    migrate_plain_http_token(&Keychain, base_url);
 }
 
 /// Store the token for the instance at `base_url`; a blank token deletes it.
@@ -1791,17 +1878,118 @@ mod tests {
     }
 
     #[test]
-    fn the_token_key_of_a_plain_http_instance_is_its_normalized_host() {
+    fn a_plain_http_instance_has_a_token_of_its_own() {
         let store = MemStore::default();
         write_token(&store, "http://GitLab.vpn.test:80/", FIXTURE_TOKEN).unwrap();
         assert_eq!(
             read_token(&store, "http://gitlab.vpn.test").as_deref(),
             Some(FIXTURE_TOKEN)
         );
+        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
+        // Loopback http never leaves the machine: keyed as https is.
+        write_token(&store, "http://localhost:8080", FIXTURE_TOKEN).unwrap();
+        assert!(keys(&store).contains(&"localhost:8080".to_string()));
+    }
+
+    #[test]
+    fn switching_an_https_instance_to_http_finds_no_token() {
+        // The token was stored for https: it must not go out unencrypted
+        // because the URL changed.
+        let store = MemStore::default();
+        write_token(&store, "https://gitlab.example.test", FIXTURE_TOKEN).unwrap();
+        assert_eq!(read_token(&store, "http://gitlab.example.test"), None);
+        assert_eq!(read_token(&store, "http://GitLab.example.test:80/"), None);
+        assert_eq!(keys(&store), ["gitlab.example.test"]);
+        // A token entered for http is its own, and the https one stays.
+        write_token(&store, "http://gitlab.example.test", "glpat-fixture-http").unwrap();
         assert_eq!(
-            store.0.lock().unwrap().keys().collect::<Vec<_>>(),
-            ["gitlab.vpn.test"]
+            read_token(&store, "https://gitlab.example.test").as_deref(),
+            Some(FIXTURE_TOKEN)
         );
+    }
+
+    #[test]
+    fn going_from_http_to_https_keeps_the_token() {
+        let store = MemStore::default();
+        write_token(&store, "http://gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
+        assert_eq!(
+            read_token(&store, "https://gitlab.vpn.test").as_deref(),
+            Some(FIXTURE_TOKEN)
+        );
+        // Moved to the https account on the way.
+        assert_eq!(keys(&store), ["gitlab.vpn.test"]);
+    }
+
+    #[test]
+    fn the_one_time_move_keeps_a_working_plain_http_setup() {
+        // Before tokens had a key of their own for plain http, the token of
+        // a deliberately configured http instance was under its host.
+        let store = MemStore::default();
+        store.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
+        migrate_plain_http_token(&store, "http://gitlab.vpn.test");
+        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
+        assert_eq!(
+            read_token(&store, "http://gitlab.vpn.test").as_deref(),
+            Some(FIXTURE_TOKEN)
+        );
+        // An old raw-host spelling moves too.
+        let store = MemStore::default();
+        store.set("GitLab.vpn.test:80", FIXTURE_TOKEN).unwrap();
+        migrate_plain_http_token(&store, "http://GitLab.vpn.test:80");
+        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
+        // An https instance, or one with an http token already, is left as is.
+        let store = MemStore::default();
+        store.set("gitlab.example.test", FIXTURE_TOKEN).unwrap();
+        migrate_plain_http_token(&store, "https://gitlab.example.test");
+        migrate_plain_http_token(&store, "http://localhost");
+        assert_eq!(keys(&store), ["gitlab.example.test"]);
+        store
+            .set("http://gitlab.example.test", "glpat-fixture-http")
+            .unwrap();
+        migrate_plain_http_token(&store, "http://gitlab.example.test");
+        assert_eq!(
+            store.get("http://gitlab.example.test").as_deref(),
+            Some("glpat-fixture-http")
+        );
+        assert_eq!(keys(&store).len(), 2);
+    }
+
+    /// A keychain whose deletes fail (a locked or denied item).
+    #[derive(Default)]
+    struct NoDelete(MemStore);
+
+    impl SecretStore for NoDelete {
+        fn get(&self, account: &str) -> Option<String> {
+            self.0.get(account)
+        }
+        fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
+            self.0.set(account, secret)
+        }
+        fn delete(&self, _: &str) -> CoreResult<()> {
+            Err(CoreError::Provider("could not update the keychain".into()))
+        }
+    }
+
+    #[test]
+    fn a_failed_cleanup_of_an_old_entry_does_not_fail_the_save() {
+        let store = NoDelete::default();
+        store
+            .set("GitLab.example.test:443", "glpat-fixture-old")
+            .unwrap();
+        // The token is stored: that is what the save is about.
+        write_token(&store, "https://GitLab.example.test:443", FIXTURE_TOKEN).unwrap();
+        assert_eq!(
+            read_token(&store, "https://gitlab.example.test").as_deref(),
+            Some(FIXTURE_TOKEN)
+        );
+        // Removing still fails when the token itself cannot go.
+        assert!(write_token(&store, "https://gitlab.example.test", "").is_err());
+    }
+
+    fn keys(store: &MemStore) -> Vec<String> {
+        let mut keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
     }
 
     #[test]

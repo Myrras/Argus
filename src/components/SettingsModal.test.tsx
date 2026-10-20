@@ -257,6 +257,38 @@ describe("SettingsModal — GitLab tab", () => {
     ).toBe(true);
   });
 
+  it("says why a plain http instance asks for its token again", async () => {
+    const note = () =>
+      screen.queryByText(
+        "Plain http needs its own token; enter it to send it unencrypted.",
+      );
+    const http = { baseUrl: "http://gitlab.vpn.test" };
+    backend(settings({ gitlab: http }), false);
+    mockInvoke.mockImplementation(
+      ((answer) => (cmd: string, args?: unknown) =>
+        cmd === "provider_status"
+          ? Promise.resolve(
+              status({
+                gitlab: {
+                  configured: true,
+                  baseUrl: http.baseUrl,
+                  tokenPresent: false,
+                  problem: null,
+                  insecure: true,
+                },
+              }),
+            )
+          : answer(cmd, args as never))(mockInvoke.getMockImplementation()!),
+    );
+    await renderTab("GitLab");
+    await waitFor(() => expect(note()).toBeInTheDocument());
+    // Typing an https URL instead: the note is about plain http only.
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://gitlab.vpn.test" },
+    });
+    expect(note()).not.toBeInTheDocument();
+  });
+
   it("refuses a token without a GitLab URL, and toasts backend errors", async () => {
     await renderTab("GitLab");
     fireEvent.change(screen.getByLabelText("Personal access token"), {

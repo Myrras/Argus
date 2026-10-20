@@ -87,6 +87,28 @@ type ProviderBuilder = Box<dyn Fn(&Settings) -> Vec<Arc<dyn ReviewProvider>> + S
 /// own).
 type TokenWriter = Box<dyn Fn(&str, &str) -> CoreResult<()> + Send + Sync>;
 
+/// The file next to `settings.json` that says the one-time move of a
+/// plain-http GitLab token to its own keychain entry ran (see
+/// [`provider::gitlab::gitlab_migrate_plain_http_token`]).
+const PLAIN_HTTP_TOKEN_MOVED: &str = "gitlab-http-token-moved";
+
+/// Run `f` unless `marker` exists, then create it. A marker that cannot be
+/// written is logged: `f` runs again on the next start, which only matters
+/// if the GitLab URL went from https to http in between.
+fn once(marker: &Path, f: impl FnOnce()) {
+    if marker.exists() {
+        return;
+    }
+    f();
+    let written = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(marker, "done\n"));
+    if written.is_err() {
+        tracing::warn!("could not record the one-time GitLab token move");
+    }
+}
+
 /// The application's single entry point.
 ///
 /// Cheap to share: hold it behind an `Arc` in the shell and clone the handle
@@ -143,6 +165,11 @@ impl Core {
     pub fn open(db_path: &Path, settings_path: &Path) -> CoreResult<Self> {
         let store = Store::open(db_path)?;
         let settings = Settings::load(settings_path);
+        // Before any provider reads the token.
+        once(
+            &settings_path.with_file_name(PLAIN_HTTP_TOKEN_MOVED),
+            || provider::gitlab::gitlab_migrate_plain_http_token(&settings.gitlab.base_url),
+        );
         Ok(Self::with_parts(
             store,
             Some(settings_path.to_path_buf()),
@@ -555,5 +582,32 @@ pub(crate) fn exact_base(
     if let Some(sha) = clone.merge_base(&diff.base_sha, &diff.head_sha) {
         diff.base_sha = sha;
         diff.base_approximate = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn the_plain_http_token_move_runs_once_ever() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join(PLAIN_HTTP_TOKEN_MOVED);
+        let runs = Cell::new(0);
+        once(&marker, || runs.set(runs.get() + 1));
+        once(&marker, || runs.set(runs.get() + 1));
+        assert_eq!(runs.get(), 1);
+        assert!(marker.exists());
+        // Opening a core leaves the marker next to its settings: a later
+        // switch from https to http is never "moved" to plain http.
+        let other = tempfile::tempdir().unwrap();
+        Core::open(
+            &other.path().join("argus.db"),
+            &other.path().join("settings.json"),
+        )
+        .unwrap();
+        assert!(other.path().join(PLAIN_HTTP_TOKEN_MOVED).exists());
     }
 }
