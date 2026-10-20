@@ -88,6 +88,32 @@ describe("pageStops", () => {
     ]);
   });
 
+  it("orders the Conversation as its groups: unresolved, comments, resolved", () => {
+    const done = thread({ anchor: null, resolvable: true, resolved: true });
+    const open = thread({ anchor: null, resolvable: true });
+    const awayDone = thread({
+      resolvable: true,
+      resolved: true,
+      anchor: anchorAt("docs/gone.md", 2),
+    });
+    const stops = pageStops(
+      input({
+        threads: [done, general, open, mineGeneral, awayDone, elsewhere],
+        order: [CONVERSATION],
+      }),
+    );
+    expect(stops.map(name)).toEqual([
+      "conversation",
+      `thread ${open.threadId}`,
+      `thread ${mineGeneral.threadId}`,
+      `thread ${general.threadId}`,
+      `thread ${done.threadId}`,
+      // "On other files" groups the same way.
+      `thread ${elsewhere.threadId}`,
+      `thread ${awayDone.threadId}`,
+    ]);
+  });
+
   it("follows the shown order and leaves out hidden files", () => {
     const stops = pageStops(input({ order: [CONVERSATION, "src/b.rs"] }));
     expect(stops.map(name)).not.toContain("file src/a.rs");

@@ -250,6 +250,12 @@ when it merges.
   to someone else (a mention inside code, like `@Nullable`, is no remark),
   and not a later comment after the author answered someone else, also by
   quote and with a mention ("> their line" then "@carol fixed").
+- The Conversation splits its threads into Unresolved, Comments (entries
+  that cannot be resolved) and Resolved, folded until you open it, also
+  under "On other files". The file tree's Conversation entry shows how many
+  are open, and the review header says "3 unresolved threads" or "All
+  threads resolved". Resolving or reopening a thread moves it at once;
+  `n`/`p` open the Resolved group when they step into it.
 
 ### Changed
 

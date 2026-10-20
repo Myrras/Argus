@@ -5,7 +5,7 @@
  * findings.
  *
  * The page reads top to bottom: the Conversation (its threads, then "On
- * other files"), then each shown file — its header, the threads listed at
+ * other files", each as unresolved, comments, resolved), then each shown file — its header, the threads listed at
  * the top of the card (outdated, then those without a usable line), then
  * the threads and AI findings under their lines, by line. That is the stop
  * order; `n`/`p` step through the threads and findings in it, ↑/↓ through
@@ -26,6 +26,7 @@ import type {
 } from "../ipc/types";
 import {
   conversationThreads,
+  groupedOrder,
   placeThreads,
   threadsOnFile,
 } from "./diffThreads";
@@ -174,7 +175,13 @@ export function pageStops(input: PageInput): FocusItem[] {
   for (const card of input.order) {
     if (card === CONVERSATION_CARD) {
       out.push({ kind: "conversation" });
-      for (const t of [...talk.conversation, ...talk.elsewhere]) {
+      // As the card groups them: unresolved, comments, resolved (M6 + the
+      // resolved split); a folded Resolved group opens when `n`/`p` land
+      // in it (`ConversationCard`).
+      for (const t of [
+        ...groupedOrder(talk.conversation),
+        ...groupedOrder(talk.elsewhere),
+      ]) {
         out.push(threadItem(t, CONVERSATION_CARD, input.since));
       }
       continue;

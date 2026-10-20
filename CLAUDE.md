@@ -54,8 +54,13 @@ sibling app Iris (`../Iris`).
     tree/flat + filter) beside the page (`data-slot="diff"`):
     `ConversationCard` (threads without a code reference, mine first; plus
     "On other files" for anchored threads whose file the list does not show,
-    `diffThreads.conversationThreads`) then one `FileDiffCard` per file,
-    contents loaded lazily (IntersectionObserver or selection; cached per
+    `diffThreads.conversationThreads`; both parts grouped by
+    `diffThreads.groupThreads` into Unresolved, Comments (not resolvable)
+    and Resolved, folded in card state, opened when `n`/`p` land in it via
+    `useRevealCard`; `pageStops` walks the same order; counts:
+    `unresolvedCount` as "N open" in the tree entry and card header,
+    `resolutionLabel` over all threads in the header's status row) then
+    one `FileDiffCard` per file, contents loaded lazily (IntersectionObserver or selection; cached per
     review/sha/path in `codeViewStore`), binary and large (>1500 lines or no
     patch) diffs as cards. `codeViewStore.selected`/`order` hold the
     `CONVERSATION` key first, so j/k stop there before the files.

@@ -172,6 +172,26 @@
   color: var(--success);
 }
 
+/* Unresolved threads, GitLab style: the icon carries the hue, the text
+   stays readable; all resolved reads as done. */
+.resolution {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.resolutionIcon {
+  flex-shrink: 0;
+  color: var(--warning);
+}
+
+.resolution[data-done="true"],
+.resolution[data-done="true"] .resolutionIcon {
+  color: var(--success);
+}
+
 .untouched {
   color: var(--warning);
 }

@@ -8,7 +8,8 @@
  * group, pending comments with "Post all", then the review's verdict slot:
  * "Submit review…"); where the review lives and who wrote it; then its
  * status with the round, the user's review state on the platform, the
- * reasons and what is untouched. Under a narrow island the actions move
+ * reasons, GitLab's "N unresolved threads" (every thread of the review)
+ * and what is untouched. Under a narrow island the actions move
  * below (container query).
  *
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
@@ -19,7 +20,8 @@
 
 import { useState } from "react";
 
-import type { ReviewRecord } from "../ipc/types";
+import type { ReviewRecord, StoredThread } from "../ipc/types";
+import { resolutionLabel, unresolvedCount } from "../lib/diffThreads";
 import { openExternal } from "../lib/links";
 import {
   MY_STATE_LABEL,
@@ -32,9 +34,10 @@ import {
 import { ago, fullTime } from "../lib/time";
 import { useCommentStore, useDrafts } from "../state/commentStore";
 import { useReviewStore } from "../state/reviewStore";
+import { useThreadStore } from "../state/threadStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
-import { ExternalLinkIcon } from "./icons";
+import { ExternalLinkIcon, OpenThreadIcon, ResolvedIcon } from "./icons";
 import { ReviewView } from "./ReviewView";
 import { SubmitReviewModal } from "./SubmitReviewModal";
 import { WelcomeScreen } from "./WelcomeScreen";
@@ -186,6 +189,7 @@ function ReviewHeader({
               {REASON_LABEL[reason]}
             </Badge>
           ))}
+          <Resolution reviewId={r.id} />
           {untouched && <span className={styles.untouched}>{untouched}</span>}
           {r.lastReviewedAt && (
             <span
@@ -203,5 +207,28 @@ function ReviewHeader({
         onClose={() => setConfirming(false)}
       />
     </header>
+  );
+}
+
+const NO_THREADS: StoredThread[] = [];
+
+/**
+ * "3 unresolved threads" or "All threads resolved", over every thread of
+ * the review (anchored ones too); nothing while they load or when none can
+ * be resolved. Follows the thread store, so a resolve moves it at once.
+ */
+function Resolution({ reviewId }: { reviewId: ReviewRecord["id"] }) {
+  const threads = useThreadStore(
+    (s) => s.byReview[reviewId]?.threads ?? NO_THREADS,
+  );
+  const label = resolutionLabel(threads);
+  if (!label) return null;
+  const done = unresolvedCount(threads) === 0;
+  const Icon = done ? ResolvedIcon : OpenThreadIcon;
+  return (
+    <span className={styles.resolution} data-done={done}>
+      <Icon size={13} className={styles.resolutionIcon} />
+      {label}
+    </span>
   );
 }

@@ -181,7 +181,11 @@ describe("ReviewDetail", () => {
     // No Threads / Files tabs any more.
     expect(screen.queryByRole("tablist")).toBeNull();
     const conversation = screen.getByRole("region", { name: "Conversation" });
-    // The review-level thread sits in the Conversation, resolved.
+    // The review-level thread sits in the Conversation, resolved: in the
+    // Resolved group, folded until clicked.
+    fireEvent.click(
+      await within(conversation).findByRole("button", { name: /^Resolved/ }),
+    );
     const general = await within(conversation).findByRole("article", {
       name: "Thread by rev-fixture",
     });
@@ -297,6 +301,10 @@ describe("ReviewDetail", () => {
     });
     render(<ReviewDetail now={NOW} />);
     const conversation = screen.getByRole("region", { name: "Conversation" });
+    // Resolved, so folded in its group first.
+    fireEvent.click(
+      await within(conversation).findByRole("button", { name: /^Resolved/ }),
+    );
     fireEvent.click(
       await within(conversation).findByRole("button", {
         name: "Reply to rev-fixture's thread",

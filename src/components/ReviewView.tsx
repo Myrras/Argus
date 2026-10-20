@@ -22,6 +22,7 @@ import {
   conversationThreads,
   threadCounts,
   threadsOnFile,
+  unresolvedCount,
 } from "../lib/diffThreads";
 import { filterFiles, orderFiles } from "../lib/fileTree";
 import { withHint } from "../lib/keymap";
@@ -170,6 +171,7 @@ export function ReviewView({
   const cardRef = (key: string) => (el: HTMLElement | null) => setCard(key, el);
   const conversationEntry = {
     count: talkCount,
+    open: unresolvedCount([...talk.conversation, ...talk.elsewhere]),
     selected: selected === CONVERSATION,
     onSelect: () => pick(CONVERSATION),
   };

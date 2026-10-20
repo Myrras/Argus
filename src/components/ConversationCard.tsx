@@ -4,18 +4,32 @@
  * everyone else's folded, in the same thread style as the inline threads.
  * Under "On other files", anchored threads whose file the file list does not
  * show (so no thread is ever out of reach).
+ *
+ * Both parts split the way GitLab and GitHub do (`diffThreads.groupThreads`):
+ * Unresolved, then Comments (entries nothing can resolve: a GitHub PR
+ * conversation entry, a GitLab single comment), then Resolved, folded until
+ * clicked; each group keeps the mine-first order. The fold is this card's
+ * own state, so it resets per review. A keyboard move onto a thread in a
+ * folded Resolved group opens it (`useRevealCard`), so `n`/`p` never land
+ * on a thread that is not shown.
  */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import type { IpcError, ProviderId, StoredThread } from "../ipc/types";
 import { CONVERSATION_CARD } from "../lib/focusModel";
-import { useRevealCard } from "../state/focusStore";
-import { threadCounts } from "../lib/diffThreads";
-import { ThreadCount } from "./FileStatusMark";
-import { CaretIcon, ThreadsIcon } from "./icons";
+import { useFocusStore, useRevealCard } from "../state/focusStore";
+import {
+  groupThreads,
+  threadCounts,
+  unresolvedCount,
+} from "../lib/diffThreads";
+import { OpenCount, ThreadCount } from "./FileStatusMark";
+import { CaretIcon, OpenThreadIcon, ResolvedIcon, ThreadsIcon } from "./icons";
 import { ListedThread, ThreadBlock } from "./ThreadBlock";
 import styles from "./ConversationCard.module.css";
+
+type Part = "conversation" | "elsewhere";
 
 export function ConversationCard({
   conversation,
@@ -40,9 +54,26 @@ export function ConversationCard({
   cardRef: (el: HTMLElement | null) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
-  // A keyboard move to one of its threads opens it (M6).
-  useRevealCard(CONVERSATION_CARD, () => setCollapsed(false));
-  const count = threadCounts([...conversation, ...elsewhere]);
+  const [resolvedOpen, setResolvedOpen] = useState<Record<Part, boolean>>({
+    conversation: false,
+    elsewhere: false,
+  });
+  const showResolved = (part: Part, open: boolean) =>
+    setResolvedOpen((s) => ({ ...s, [part]: open }));
+  // A keyboard move to one of its threads opens it (M6), and the Resolved
+  // group that holds it.
+  useRevealCard(CONVERSATION_CARD, () => {
+    setCollapsed(false);
+    const item = useFocusStore.getState().item;
+    if (item?.kind !== "thread") return;
+    const held = (list: readonly StoredThread[]) =>
+      list.some((t) => t.threadId === item.threadId && t.resolved);
+    if (held(conversation)) showResolved("conversation", true);
+    if (held(elsewhere)) showResolved("elsewhere", true);
+  });
+  const all = [...conversation, ...elsewhere];
+  const count = threadCounts(all);
+  const open = unresolvedCount(all);
   const empty = conversation.length === 0 && elsewhere.length === 0;
 
   return (
@@ -81,6 +112,7 @@ export function ConversationCard({
         >
           Conversation
         </button>
+        <OpenCount count={open} />
         <ThreadCount {...count} />
       </header>
       {!collapsed && (
@@ -99,31 +131,47 @@ export function ConversationCard({
           ) : (
             <>
               {conversation.length > 0 && (
-                <div className={styles.threads}>
-                  {conversation.map((t) => (
-                    <ThreadBlock
-                      key={t.threadId}
-                      thread={t}
-                      provider={provider}
-                      now={now}
-                    />
-                  ))}
+                <div
+                  className={styles.threads}
+                  data-testid="conversation-threads"
+                >
+                  <ThreadGroups
+                    threads={conversation}
+                    resolvedOpen={resolvedOpen.conversation}
+                    onResolvedOpen={(o) => showResolved("conversation", o)}
+                    render={(t) => (
+                      <ThreadBlock
+                        key={t.threadId}
+                        thread={t}
+                        provider={provider}
+                        now={now}
+                      />
+                    )}
+                  />
                 </div>
               )}
               {elsewhere.length > 0 && (
-                <div className={styles.elsewhere}>
+                <div
+                  className={styles.elsewhere}
+                  data-testid="elsewhere-threads"
+                >
                   <h3 className={styles.subTitle}>
                     On other files{" "}
                     <span className={styles.subCount}>{elsewhere.length}</span>
                   </h3>
-                  {elsewhere.map((t) => (
-                    <ListedThread
-                      key={t.threadId}
-                      thread={t}
-                      provider={provider}
-                      now={now}
-                    />
-                  ))}
+                  <ThreadGroups
+                    threads={elsewhere}
+                    resolvedOpen={resolvedOpen.elsewhere}
+                    onResolvedOpen={(o) => showResolved("elsewhere", o)}
+                    render={(t) => (
+                      <ListedThread
+                        key={t.threadId}
+                        thread={t}
+                        provider={provider}
+                        now={now}
+                      />
+                    )}
+                  />
                 </div>
               )}
             </>
@@ -131,5 +179,114 @@ export function ConversationCard({
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * One part's threads as Unresolved, Comments and Resolved, each with its
+ * header and count; empty groups are left out. Resolved folds.
+ */
+function ThreadGroups({
+  threads,
+  resolvedOpen,
+  onResolvedOpen,
+  render,
+}: {
+  threads: readonly StoredThread[];
+  resolvedOpen: boolean;
+  onResolvedOpen: (open: boolean) => void;
+  render: (t: StoredThread) => React.ReactNode;
+}) {
+  const g = groupThreads(threads);
+  return (
+    <>
+      {g.unresolved.length > 0 && (
+        <Group kind="unresolved" label="Unresolved" count={g.unresolved.length}>
+          {g.unresolved.map(render)}
+        </Group>
+      )}
+      {g.comments.length > 0 && (
+        <Group kind="comments" label="Comments" count={g.comments.length}>
+          {g.comments.map(render)}
+        </Group>
+      )}
+      {g.resolved.length > 0 && (
+        <Group
+          kind="resolved"
+          label="Resolved"
+          count={g.resolved.length}
+          fold={{ open: resolvedOpen, onToggle: onResolvedOpen }}
+        >
+          {resolvedOpen && g.resolved.map(render)}
+        </Group>
+      )}
+    </>
+  );
+}
+
+const GROUP_ICON = {
+  unresolved: OpenThreadIcon,
+  comments: ThreadsIcon,
+  resolved: ResolvedIcon,
+} as const;
+
+function Group({
+  kind,
+  label,
+  count,
+  fold,
+  children,
+}: {
+  kind: keyof typeof GROUP_ICON;
+  label: string;
+  count: number;
+  /** A foldable group: its header is the toggle. */
+  fold?: { open: boolean; onToggle: (open: boolean) => void };
+  children: React.ReactNode;
+}) {
+  const id = useId();
+  const Icon = GROUP_ICON[kind];
+  const countLabel = `${count} ${count === 1 ? "thread" : "threads"}`;
+  const head = (
+    <>
+      <Icon size={13} className={styles.groupIcon} />
+      <span id={id} className={styles.groupLabel}>
+        {label}
+      </span>
+      <span className={styles.groupCount} aria-label={countLabel}>
+        {count}
+      </span>
+      {/* Trailing, so the group icons line up down the card. */}
+      {fold && (
+        <CaretIcon size={12} className={styles.caret} data-open={fold.open} />
+      )}
+    </>
+  );
+  return (
+    <div
+      role="group"
+      aria-labelledby={id}
+      className={styles.group}
+      data-group={kind}
+    >
+      {fold ? (
+        <button
+          type="button"
+          className={`ghost ${styles.groupHead}`}
+          aria-expanded={fold.open}
+          title={
+            fold.open
+              ? "Fold the resolved threads"
+              : "Show the resolved threads"
+          }
+          onClick={() => fold.onToggle(!fold.open)}
+        >
+          {head}
+        </button>
+      ) : (
+        <div className={styles.groupHead}>{head}</div>
+      )}
+      {children}
+    </div>
   );
 }
