@@ -18,7 +18,6 @@ import {
   ChevronRight,
   CircleAlert,
   CircleCheck,
-  CircleStop,
   Columns2,
   Copy,
   ExternalLink,
@@ -99,7 +98,7 @@ export const AiIcon = icon(Sparkles);
 /** Start, rerun and stop the AI pass (the header's icon buttons). */
 export const RunIcon = icon(Play);
 export const RerunIcon = icon(RotateCw);
-export const StopIcon = icon(CircleStop);
+export const StopIcon = icon(Square, { size: 12, fill: "currentColor" });
 
 // The code view's toolbar. The diff layouts follow GitLab's inline /
 // parallel glyphs: one column of stacked rows, or two columns.
