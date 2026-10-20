@@ -8,8 +8,10 @@
  *   write-only: it goes to `set_gitlab_token` (`backendSettingsStore`
  *   `.setGitlabToken`) and is never part of the `Settings` sent to
  *   `update_settings`; the dialog only shows whether one is stored.
- * - AI: analysis on/off, and the local clone per repository (cards in Iris's
- *   Editors look, the folder picked with the native dialog).
+ * - AI: analysis on/off, the local clone per repository (cards in Iris's
+ *   Editors look, the folder picked with the native dialog), and the review
+ *   skill per repository (`ReviewSkillsSection`: a filterable picker in the
+ *   repository's card, applied at once).
  * - Editors: which application opens a review's file from its local clone
  *   (Open in editor): a default editor and per-extension overrides, Iris's
  *   Editors tab (`editorOverrides`, `defaultEditor` in `settings.json`).
@@ -60,6 +62,7 @@ import { useThemeStore, type ThemeMode } from "../state/themeStore";
 import { toastSuccess } from "../state/toastStore";
 import { AddIcon, CheckIcon, MinusIcon } from "./icons";
 import { Modal } from "./Modal";
+import { ReviewSkillsSection } from "./ReviewSkillPicker";
 import { ShortcutsTab } from "./ShortcutsTab";
 import styles from "./SettingsModal.module.css";
 
@@ -198,6 +201,7 @@ function TabBody({ tab }: { tab: SettingsTabId }) {
         <>
           <AiTab />
           <ClonesSection />
+          <ReviewSkillsSection />
         </>
       );
     case "editors":

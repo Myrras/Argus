@@ -396,8 +396,11 @@ describe("SettingsModal — AI tab", () => {
         },
       ]),
     );
+    // Its card (the review skill section lists the repository too).
     expect(
-      await screen.findByText("github.com/acme-fixture/widgets"),
+      await screen.findByRole("button", {
+        name: "Edit the clone of github.com/acme-fixture/widgets",
+      }),
     ).toBeInTheDocument();
   });
 

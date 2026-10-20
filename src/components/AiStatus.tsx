@@ -1,7 +1,9 @@
 /**
  * The AI pass' state in the review header, one compact group: a chip (the
  * sparkle or a spinner, then "6 findings", "Running…", "Failed"; the full
- * state and a failure's reason in its tooltip and for screen readers), an
+ * state and a failure's reason in its tooltip and for screen readers, and
+ * in the tooltip what the last run was given: rules files, review skill,
+ * worktree, and anything that did not go as set up), an
  * icon button for Run again / Retry / Cancel, and the toggle of the AI
  * island (panel icon, with the findings count while the chip shows none).
  * Loads the review's run and output when it opens. With the AI pass off it
@@ -16,6 +18,7 @@ import { useEffect } from "react";
 import type { ReviewId, ReviewRecord } from "../ipc/types";
 import {
   aiChipText,
+  aiContextLines,
   aiStatusText,
   skippedSummary,
   skippedText,
@@ -90,13 +93,16 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
         role="status"
         aria-live="polite"
         title={[
-          aiStatusText(run, active),
-          run.adapter &&
-            `${run.adapter}${run.round !== null ? `, round ${run.round}` : ""}`,
-          skippedText(skipped),
-        ]
-          .filter(Boolean)
-          .join(" — ")}
+          [
+            aiStatusText(run, active),
+            run.adapter &&
+              `${run.adapter}${run.round !== null ? `, round ${run.round}` : ""}`,
+            skippedText(skipped),
+          ]
+            .filter(Boolean)
+            .join(" — "),
+          ...aiContextLines(run.context),
+        ].join("\n")}
       >
         {busy ? (
           <span className={`spinner ${styles.spinner}`} aria-hidden />

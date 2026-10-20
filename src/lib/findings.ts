@@ -10,11 +10,13 @@ import type {
   Finding,
   RelatedRef,
   RepeatReason,
+  RunContext,
   Severity,
   StoredThread,
   VerdictLabel,
 } from "../ipc/types";
 import type { DiffSide } from "./diffThreads";
+import { SOURCE_LABEL } from "./reviewSkills";
 
 export const SEVERITIES: Severity[] = ["high", "medium", "low"];
 
@@ -252,6 +254,24 @@ export function aiChipText(run: AiRunState, findings: number): string {
     default:
       return "Not run";
   }
+}
+
+/**
+ * What the last successful run was given besides the diff, one line each,
+ * for the AI chip's tooltip: the rules files, the review skill, the
+ * worktree, and what did not go as set up. Empty without a context.
+ */
+export function aiContextLines(context: RunContext | null): string[] {
+  if (!context) return [];
+  const skill = context.skill
+    ? `${context.skill.name} (${SOURCE_LABEL[context.skill.source]})`
+    : "none";
+  return [
+    `Rules: ${context.rulesFiles.length > 0 ? context.rulesFiles.join(", ") : "none found"}`,
+    `Review skill: ${skill}`,
+    ...(context.worktree ? ["Read a worktree at the review's head"] : []),
+    ...context.notes,
+  ];
 }
 
 /** The review header chip's full text for a run with `findings` findings shown. */
