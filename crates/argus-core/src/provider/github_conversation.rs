@@ -10,24 +10,30 @@
 //!
 //! 0. **An Argus reply**: Argus ends its replies with a marker naming the
 //!    thread (an HTML comment on its own last line, invisible on GitHub,
-//!    see [`reply_text`]). It is honoured only when it names an earlier
-//!    entry of this PR's conversation: a marker copied from another PR, or
-//!    naming nothing before it, is ignored.
+//!    see [`reply_text`]). It is honoured only on the user's own entries
+//!    (being invisible, anyone else could file a comment under the user's
+//!    thread with it) and only when it names an earlier entry of this PR's
+//!    conversation: a marker copied from another PR, or naming nothing
+//!    before it, is ignored.
 //! 1. **A quote reply** (GitHub's "Quote reply"): an entry opening with a
-//!    `>` block whose every line is a whole line of an earlier entry joins
-//!    that entry's thread. Preferred is the latest entry that wrote the
-//!    lines itself, else the latest that quoted them. A quote of one line
-//!    must be at least [`QUOTE_MIN`] characters ("> ok", "> +1" match far
-//!    too much); an alert (`> [!NOTE]`) and an indented `>` (code) are not
-//!    quotes.
+//!    `>` block whose every line is a line of an earlier entry joins that
+//!    entry's thread. Preferred is the latest entry that wrote the lines
+//!    itself, else the latest that quoted them. A quoted line is a whole
+//!    line, or (a selection quoted) at least [`QUOTE_PART`] characters of
+//!    one starting at a word; list bullets are ignored, as GitHub writes a
+//!    quoted item back with its own. A quote of one line must be at least
+//!    [`QUOTE_MIN`] characters ("> ok", "> +1" match far too much); an
+//!    alert (`> [!NOTE]`) and an indented `>` (code) are not quotes.
 //! 2. **The PR author answering**: the PR author's first entry after the
 //!    user wrote joins the thread the user last wrote in. On GitHub the
 //!    author answers a remark with a plain new comment, so this is the
 //!    user's thread getting a reply, which round detection counts as "the
 //!    author replied" (as a reply in a GitLab MR-level discussion of the
-//!    user's is). Only the first: a later "Rebased." answers nothing. Chat
+//!    user's is). Only the very next one, wherever it is filed: after an
+//!    answer by quote elsewhere, a later "Rebased." answers nothing. Chat
 //!    commands (`/retest`) and remarks to someone else (`@dependabot
-//!    rebase`, "PTAL @carol") are not answers and do not count.
+//!    rebase`, "PTAL @carol") are not answers and do not count; what is in
+//!    code (`` `@param` ``, a fenced `@Nullable`) is neither.
 //! 3. Anything else (the user's own plain comments, other reviewers', bots')
 //!    is a thread of its own, as a GitLab comment outside a thread is.
 //!
@@ -52,9 +58,10 @@ const REVIEW: &str = "pullrequestreview-";
 /// The longest quoted line a reply carries (characters).
 const QUOTE_MAX: usize = 200;
 
-/// A quoted line at least this long may be a line [`quote`] cut (older
-/// Argus replies have no marker): it matches a line it begins.
-const QUOTE_CUT: usize = QUOTE_MAX * 9 / 10;
+/// A quoted line at least this long may be part of a line: a selection
+/// quoted with GitHub's "Quote reply", or a line [`quote`] cut (older Argus
+/// replies have no marker). It matches a line it is in, from a word on.
+const QUOTE_PART: usize = 24;
 
 /// The shortest one-line quote that files a reply (characters).
 const QUOTE_MIN: usize = 12;
@@ -152,6 +159,7 @@ pub(super) fn threads(mut entries: Vec<Entry>, me: &str, pr_author: &str) -> Vec
     let mut awaiting: Option<usize> = None;
     for e in entries {
         let by_marker = reply_marker(&e.body)
+            .filter(|_| same_user(&e.author, me))
             .and_then(|id| placed.iter().find(|p| p.id == id))
             .map(|p| p.thread);
         let by_quote = || {
@@ -200,9 +208,11 @@ pub(super) fn threads(mut entries: Vec<Entry>, me: &str, pr_author: &str) -> Vec
                 threads.len() - 1
             }
         };
+        // The author's next answer, wherever it went, is the one: a later
+        // plain comment no longer answers the user.
         if same_user(&e.author, me) {
             awaiting = Some(index);
-        } else if same_user(&e.author, pr_author) && awaiting == Some(index) {
+        } else if author_answering || (same_user(&e.author, pr_author) && awaiting == Some(index)) {
             awaiting = None;
         }
         let (own, quoted) = split_lines(&e.body);
@@ -216,19 +226,42 @@ pub(super) fn threads(mut entries: Vec<Entry>, me: &str, pr_author: &str) -> Vec
     threads
 }
 
-/// A line as quotes are compared: trimmed, without the zero-width spaces
-/// [`quote`] puts after an `@`.
+/// A line as quotes are compared: trimmed, without a list bullet (`-`,
+/// `*`, `+`, `1.`, `1)`) and without the zero-width spaces [`quote`] puts
+/// after an `@`.
 fn normalize(line: &str) -> String {
-    line.trim()
-        .chars()
-        .filter(|c| *c != ZERO_WIDTH_SPACE)
-        .collect()
+    let line = line.trim();
+    let line = without_bullet(line).unwrap_or(line);
+    line.chars().filter(|c| *c != ZERO_WIDTH_SPACE).collect()
 }
 
-/// Whether a quoted line `q` is the line `line`: the whole line, or the
-/// start of it for a line [`quote`] cut.
+/// `line` after its list bullet and the space behind it; `None` for a line
+/// that is no list item.
+fn without_bullet(line: &str) -> Option<&str> {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    let rest = match digits {
+        0 => line.strip_prefix(['-', '*', '+'])?,
+        1..=9 => line[digits..].strip_prefix(['.', ')'])?,
+        _ => return None,
+    };
+    rest.strip_prefix([' ', '\t']).map(str::trim_start)
+}
+
+/// Whether a quoted line `q` is (from) the line `line`: the whole line, or
+/// at least [`QUOTE_PART`] characters of it that start at a word.
 fn line_matches(line: &str, q: &str) -> bool {
-    line == q || (q.chars().count() >= QUOTE_CUT && line.starts_with(q))
+    if line == q {
+        return true;
+    }
+    if q.chars().count() < QUOTE_PART {
+        return false;
+    }
+    line.match_indices(q).any(|(i, _)| {
+        !line[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
 }
 
 /// The quote text of a block-quote line; `None` for any other line. Up to
@@ -298,13 +331,91 @@ fn quote_files_a_reply(quote: &[String]) -> bool {
 /// Whether an entry by the PR author can be an answer to the user: not
 /// chat commands only (`/retest`), and not addressed to someone else (it
 /// mentions others and not the user: `@dependabot rebase`, "PTAL @carol").
+/// Code is neither (`@Nullable`, `` `@types/node` ``): only the prose
+/// around it is read, and code alone is an answer.
 fn answers_the_user(body: &str, me: &str) -> bool {
-    let (own, _) = split_lines(body);
-    if own.is_empty() || own.iter().all(|l| l.starts_with('/')) {
+    let (prose, has_code) = without_code(body);
+    let (own, _) = split_lines(&prose);
+    if own.is_empty() {
+        return has_code;
+    }
+    if own.iter().all(|l| l.starts_with('/')) {
         return false;
     }
     let mentions: Vec<&str> = own.iter().flat_map(|l| mentions(l)).collect();
     mentions.is_empty() || mentions.iter().any(|m| same_user(m, me))
+}
+
+/// `body` without its fenced code blocks (```` ``` ```` or `~~~`, up to
+/// three spaces in; an unclosed one runs to the end) and inline code spans,
+/// and whether it had any.
+fn without_code(body: &str) -> (String, bool) {
+    let mut out = String::with_capacity(body.len());
+    let mut had = false;
+    // The open fence: its character and length.
+    let mut fence: Option<(char, usize)> = None;
+    for line in body.lines() {
+        let rest = line.trim_start_matches(' ');
+        let indent = line.len() - rest.len();
+        let run = |c: char| rest.chars().take_while(|x| *x == c).count();
+        if let Some((c, n)) = fence {
+            if indent < 4 && run(c) >= n && rest.trim_start_matches(c).trim().is_empty() {
+                fence = None;
+            }
+            continue;
+        }
+        if indent < 4 {
+            if let Some(c) = ['`', '~'].into_iter().find(|c| run(*c) >= 3) {
+                fence = Some((c, run(c)));
+                had = true;
+                continue;
+            }
+        }
+        let (text, inline) = without_inline_code(line);
+        had |= inline;
+        out.push_str(&text);
+        out.push('\n');
+    }
+    (out, had)
+}
+
+/// `line` with each inline code span (a run of backticks up to the next
+/// run as long) replaced by a space, and whether it had any. A run with no
+/// closing one is text.
+fn without_inline_code(line: &str) -> (String, bool) {
+    let ticks = |s: &str| s.bytes().take_while(|b| *b == b'`').count();
+    let mut out = String::with_capacity(line.len());
+    let mut had = false;
+    let mut rest = line;
+    while let Some(start) = rest.find('`') {
+        let n = ticks(&rest[start..]);
+        let after = &rest[start + n..];
+        let mut from = 0;
+        let mut close = None;
+        while let Some(i) = after[from..].find('`') {
+            let at = from + i;
+            let m = ticks(&after[at..]);
+            if m == n {
+                close = Some(at);
+                break;
+            }
+            from = at + m;
+        }
+        match close {
+            Some(at) => {
+                out.push_str(&rest[..start]);
+                out.push(' ');
+                rest = &after[at + n..];
+                had = true;
+            }
+            None => {
+                out.push_str(&rest[..start + n]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    (out, had)
 }
 
 /// The `@login`s in a line (not an e-mail address: the `@` starts a word).
@@ -759,6 +870,191 @@ mod tests {
             AUTHOR,
         );
         assert_eq!(t.len(), 1);
+    }
+
+    #[test]
+    fn a_marker_counts_only_on_the_users_own_entries() {
+        // The marker is invisible on GitHub: anyone can file a comment
+        // under the user's thread with it. Only the user's (Argus's) own
+        // replies are filed by it.
+        let t = threads(
+            vec![
+                comment(1, ME, 0, "Why a constant?"),
+                comment(
+                    2,
+                    "mallory-fixture",
+                    1,
+                    "unrelated\n\n<!-- argus:reply-to issuecomment-1 -->",
+                ),
+            ],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(
+            shape(&t),
+            [
+                ("issuecomment-1".into(), ids(&["issuecomment-1"])),
+                ("issuecomment-2".into(), ids(&["issuecomment-2"])),
+            ]
+        );
+        // Shown as GitHub shows it: without the hidden line.
+        assert_eq!(t[1].notes[0].body, "unrelated");
+        // Nor can the PR author answer the user by it.
+        let t = threads(
+            vec![
+                comment(1, "carol-fixture", 0, "CI fails on lint."),
+                comment(2, ME, 1, "Why a constant?"),
+                comment(
+                    3,
+                    AUTHOR,
+                    2,
+                    "Fixed.\n\n<!-- argus:reply-to issuecomment-1 -->",
+                ),
+            ],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(
+            shape(&t),
+            [
+                ("issuecomment-1".into(), ids(&["issuecomment-1"])),
+                (
+                    "issuecomment-2".into(),
+                    ids(&["issuecomment-2", "issuecomment-3"])
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_authors_answer_elsewhere_ends_the_wait_for_one() {
+        // The author's first entry after the user is the answer, wherever
+        // it is filed: a later "Rebased." does not answer the user.
+        let t = threads(
+            vec![
+                comment(
+                    1,
+                    "carol-fixture",
+                    0,
+                    "CI fails on the lint job, please check.",
+                ),
+                comment(2, ME, 1, "Why a constant?"),
+                comment(
+                    3,
+                    AUTHOR,
+                    2,
+                    "> CI fails on the lint job, please check.\n\nFixed.",
+                ),
+                comment(4, AUTHOR, 3, "Rebased on main."),
+            ],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(
+            shape(&t),
+            [
+                (
+                    "issuecomment-1".into(),
+                    ids(&["issuecomment-1", "issuecomment-3"])
+                ),
+                ("issuecomment-2".into(), ids(&["issuecomment-2"])),
+                ("issuecomment-4".into(), ids(&["issuecomment-4"])),
+            ]
+        );
+    }
+
+    #[test]
+    fn mentions_and_commands_in_code_are_not_remarks_to_someone_else() {
+        for answer in [
+            "Yes, annotated it:\n```java\n@Nullable\nString name;\n```",
+            "Fixed, see `@types/node` bump.",
+            "Documented it with `@param ttl`.",
+            "~~~\n@Override\n~~~\nlike that",
+            "```\n/retest\n```",
+            "Moved to `@carol-fixture`'s helper, @rev-fixture.",
+        ] {
+            let t = threads(
+                vec![
+                    comment(1, ME, 0, "Can this be null?"),
+                    comment(2, AUTHOR, 1, answer),
+                ],
+                ME,
+                AUTHOR,
+            );
+            assert_eq!(
+                shape(&t),
+                [(
+                    "issuecomment-1".into(),
+                    ids(&["issuecomment-1", "issuecomment-2"])
+                )],
+                "{answer}"
+            );
+        }
+        // A mention outside the code still addresses someone else.
+        for other in ["`x` is fine, PTAL @carol-fixture", "```\nx\n```\n/retest"] {
+            let t = threads(
+                vec![
+                    comment(1, ME, 0, "Can this be null?"),
+                    comment(2, AUTHOR, 1, other),
+                ],
+                ME,
+                AUTHOR,
+            );
+            assert_eq!(t.len(), 2, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_quote_of_part_of_a_line_files_the_reply() {
+        // GitHub's "Quote reply" on a selection quotes just that.
+        let root = "Should the TTL come from settings instead of a constant? It is hard-coded.";
+        for (quote, joins) in [
+            ("> Should the TTL come from settings", true),
+            ("> the TTL come from settings instead", true),
+            // Too short to tell, or cut mid-word.
+            ("> the TTL come from", false),
+            ("> ould the TTL come from settings instead", false),
+        ] {
+            let t = threads(
+                vec![
+                    comment(1, ME, 0, root),
+                    comment(2, "carol-fixture", 1, &format!("{quote}\n\nAgreed.")),
+                ],
+                ME,
+                AUTHOR,
+            );
+            assert_eq!(t.len() == 1, joins, "{quote}");
+        }
+    }
+
+    #[test]
+    fn a_quoted_list_item_matches_whatever_its_bullet() {
+        // GitHub's "Quote reply" writes a list item back with its own bullet.
+        let t = threads(
+            vec![
+                comment(
+                    1,
+                    ME,
+                    0,
+                    "A few things:\n- the TTL should come from settings\n- naming",
+                ),
+                comment(
+                    2,
+                    "carol-fixture",
+                    1,
+                    "> * the TTL should come from settings\n\nAgreed.",
+                ),
+            ],
+            ME,
+            AUTHOR,
+        );
+        assert_eq!(
+            shape(&t),
+            [(
+                "issuecomment-1".into(),
+                ids(&["issuecomment-1", "issuecomment-2"])
+            )]
+        );
     }
 
     #[test]

@@ -207,10 +207,12 @@ when it merges.
   Close Window (⌘W).
 - GitHub pull request conversation comments and review summaries now show in
   the Conversation section and count for rounds and the AI pass. Replies
-  you post from Argus stay in their thread. Quote replies count only when
-  they quote whole lines (one short line like "> ok" is no reply), and only
-  the author's first real answer after your comment counts as a reply to
-  you: not `/retest`, `@dependabot rebase` or a remark to someone else.
+  you post from Argus stay in their thread. Quote replies count when they
+  quote whole lines or a selection of one (one short line like "> ok" is no
+  reply), and only the author's very next real answer after your comment
+  counts as a reply to you: not `/retest`, `@dependabot rebase` or a remark
+  to someone else (a mention inside code, like `@Nullable`, is no remark),
+  and not a later comment after the author answered someone else.
 
 ## [0.1.0] - 2026-10-16
 

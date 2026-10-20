@@ -21,7 +21,7 @@
     "id": 8006,
     "html_url": "https://github.com/acme-fixture/widgets/pull/12#issuecomment-8006",
     "user": { "login": "carol-fixture", "id": 1003, "type": "User" },
-    "body": "> Should the TTL come from settings instead of a constant?\n\nAgreed, settings is better.",
+    "body": "> Should the TTL come from settings\n\nAgreed, settings is better.",
     "created_at": "2026-10-10T17:00:00Z",
     "updated_at": "2026-10-10T17:00:00Z",
     "author_association": "CONTRIBUTOR"
