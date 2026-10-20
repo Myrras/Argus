@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { useEffect, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/platform", () => ({ isMac: false, isWindows: false }));
@@ -18,9 +19,15 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 
+import { registerDiffEditor, threadBlockKey } from "../lib/diffEditors";
+import { runFlowAction } from "../lib/keyboardFlow";
 import { useAppShortcuts } from "../lib/useAppShortcuts";
 import { usePageFocus } from "../lib/usePageFocus";
-import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
+import {
+  clearContentsCache,
+  CONVERSATION,
+  useCodeViewStore,
+} from "../state/codeViewStore";
 import { useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useHistoryStore } from "../state/historyStore";
@@ -176,6 +183,73 @@ describe("ThreadBlock and the focus", () => {
     act(() => useFocusStore.getState().setZone("list"));
     fireEvent.keyDown(card, { key: "Enter" });
     expect(card).toHaveAttribute("data-open", "false");
+  });
+});
+
+describe("revealing a thread far down a file", () => {
+  // Line 900 of a long file: CodeMirror renders it only once scrolled near.
+  const far = thread({
+    reviewId: r.id,
+    author: "erin-fixture",
+    anchor: { ...thread().anchor!, pathNew: "src/cache.rs", lineNew: 900 },
+  });
+
+  /** The file card; its editor renders the thread when asked to scroll. */
+  function Card() {
+    const [shown, setShown] = useState(false);
+    useEffect(
+      () =>
+        registerDiffEditor("src/cache.rs", {
+          reveal: (key) => {
+            if (key !== threadBlockKey(far.threadId)) return false;
+            setTimeout(() => setShown(true));
+            return true;
+          },
+        }),
+      [],
+    );
+    return (
+      <section data-file-card="file" data-path="src/cache.rs">
+        <button type="button" data-focus-target>
+          src/cache.rs
+        </button>
+        {shown && <ThreadBlock thread={far} provider="github" now={NOW} />}
+      </section>
+    );
+  }
+
+  beforeEach(() => {
+    clearContentsCache();
+    useThreadStore.setState({
+      byReview: { [r.id]: { threads: [t, far], loading: false, error: null } },
+    });
+  });
+
+  it("loads the file, scrolls its editor there and focuses the thread", async () => {
+    const scrolled: Element[] = [];
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    render(
+      <>
+        <Shell />
+        <Card />
+      </>,
+    );
+    act(() => void runFlowAction("nextOpenThread", r.id, null));
+    act(() => void runFlowAction("nextOpenThread", r.id, null));
+    const card = await screen.findByRole("article", {
+      name: "Thread by erin-fixture",
+    });
+    await waitFor(() => expect(card).toHaveFocus());
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "file_contents",
+      expect.objectContaining({ path: "src/cache.rs" }),
+    );
+    // Never the file card in its place.
+    expect(scrolled.some((el) => el.matches("[data-file-card]"))).toBe(false);
+    Element.prototype.scrollIntoView = original;
   });
 });
 

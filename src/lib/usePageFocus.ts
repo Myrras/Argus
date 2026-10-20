@@ -1,37 +1,20 @@
 /**
  * The review page side of the focus model: after a keyboard move
  * (`focusStore.moveSeq`) put the DOM focus on the focused item — a thread or
- * finding card, or a file's (the Conversation's) header button — and scroll
- * a thread or finding to the middle. Real DOM focus is what a screen reader
+ * finding card, or a file's (the Conversation's) header button — and, for a
+ * thread or finding, scroll its own card to the top of the page column
+ * (`lib/revealItem`: it loads the file, asks the file's editor to render
+ * the line, and waits for the card). Real DOM focus is what a screen reader
  * announces; the ring is the item's `data-focused` / `:focus-visible`.
- *
- * A thread or finding in a file whose diff is still loading is not in the
- * DOM yet: it is looked for a while (like the AI panel's "scroll to
- * finding"), then the card is scrolled to instead.
  */
 
 import { useEffect } from "react";
 
 import type { ReviewId } from "../ipc/types";
+import { prefetchFile } from "../state/codeViewStore";
 import { useFocusStore } from "../state/focusStore";
-import { CONVERSATION_CARD, cardOf, type FocusItem } from "./focusModel";
-
-const TRIES = 40;
-const EVERY_MS = 50;
-
-/** The card (`data-file-card`) of a file path or the Conversation. */
-function cardElement(card: string): HTMLElement | null {
-  if (card === CONVERSATION_CARD) {
-    return document.querySelector<HTMLElement>(
-      '[data-file-card="conversation"]',
-    );
-  }
-  const cards = document.querySelectorAll<HTMLElement>(
-    '[data-file-card="file"]',
-  );
-  for (const el of cards) if (el.dataset.path === card) return el;
-  return null;
-}
+import { cardOf, type FocusItem } from "./focusModel";
+import { cardElement, pageRevealEnv, revealItem } from "./revealItem";
 
 /** The element that takes the DOM focus for `item`, if rendered. */
 export function focusElement(item: FocusItem): HTMLElement | null {
@@ -58,27 +41,28 @@ export function usePageFocus(reviewId: ReviewId) {
     if (moveSeq === 0) return;
     const { item, reviewId: at } = useFocusStore.getState();
     if (!item || at !== reviewId || item.kind === "line") return;
-    let tries = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = () => {
-      const el = focusElement(item);
-      if (el) {
-        el.focus({ preventScroll: true });
-        // Files: the view already scrolls a newly selected card to its top.
-        if (item.kind === "thread" || item.kind === "finding") {
-          el.scrollIntoView?.({ block: "center" });
-        }
-        return;
-      }
-      tries += 1;
-      if (tries < TRIES) {
-        timer = setTimeout(tick, EVERY_MS);
-      } else {
-        cardElement(cardOf(item))?.scrollIntoView?.({ block: "start" });
-      }
-    };
+    if (item.kind === "conversation" || item.kind === "file") {
+      // The view already scrolls a newly selected card to its top; after it.
+      const timer = setTimeout(
+        () => focusElement(item)?.focus({ preventScroll: true }),
+        0,
+      );
+      return () => clearTimeout(timer);
+    }
+    let cancel: (() => void) | null = null;
     // After the view's own scroll to the newly selected card.
-    timer = setTimeout(tick, 0);
-    return () => clearTimeout(timer);
+    const timer = setTimeout(() => {
+      cancel = revealItem(
+        item,
+        pageRevealEnv(item, {
+          element: focusElement,
+          load: (path) => prefetchFile(reviewId, path),
+        }),
+      );
+    }, 0);
+    return () => {
+      clearTimeout(timer);
+      cancel?.();
+    };
   }, [moveSeq, reviewId]);
 }

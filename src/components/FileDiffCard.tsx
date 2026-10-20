@@ -54,7 +54,11 @@ import {
   threadCounts,
   type DiffSide,
 } from "../lib/diffThreads";
-import { loadContents, useCodeViewStore } from "../state/codeViewStore";
+import {
+  loadFileSides,
+  useCodeViewStore,
+  waitsForLoadAnyway,
+} from "../state/codeViewStore";
 import {
   clearCommentableCache,
   loadCommentable,
@@ -80,9 +84,6 @@ import styles from "./FileDiffCard.module.css";
 const DiffEditor = lazy(() =>
   import("./DiffEditor").then((m) => ({ default: m.DiffEditor })),
 );
-
-/** Above this many changed lines a diff waits for "Load anyway". */
-export const LARGE_DIFF_LINES = 1500;
 
 type Contents =
   | { state: "idle" }
@@ -184,7 +185,7 @@ export const FileDiffCard = memo(function FileDiffCard({
     return () => io.disconnect();
   }, [near]);
 
-  const large = f.tooLarge || f.additions + f.deletions > LARGE_DIFF_LINES;
+  const large = waitsForLoadAnyway(f);
   const wanted =
     !collapsed && !f.binary && (!large || forced) && (near || selected);
 
@@ -204,15 +205,7 @@ export const FileDiffCard = memo(function FileDiffCard({
     if (!wanted || started.current === loadKey) return;
     started.current = loadKey;
     setContents({ state: "loading" });
-    const base =
-      f.status === "added"
-        ? Promise.resolve("")
-        : loadContents(review.reviewId, review.baseSha, f.oldPath ?? f.path);
-    const head =
-      f.status === "removed"
-        ? Promise.resolve("")
-        : loadContents(review.reviewId, review.headSha, f.path);
-    Promise.all([base, head]).then(
+    loadFileSides(review, f).then(
       ([original, modified]) => {
         if (started.current === loadKey) {
           setContents({ state: "ready", original, modified });

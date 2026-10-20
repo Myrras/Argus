@@ -61,6 +61,7 @@ import {
   type DiffSide,
   type Placement,
 } from "../lib/diffThreads";
+import { registerDiffEditor, threadBlockKey } from "../lib/diffEditors";
 import type { DiffLayout } from "../state/layoutStore";
 import { useThemeStore } from "../state/themeStore";
 
@@ -157,7 +158,7 @@ class BlocksWidget extends WidgetType {
 
 /** A thread's block key: the thread alone, so new notes keep its state. */
 function threadKey(t: StoredThread): string {
-  return `t:${t.threadId}`;
+  return threadBlockKey(t.threadId);
 }
 
 /**
@@ -518,6 +519,19 @@ function group(
   return out;
 }
 
+/** Each block key's editor index and line. */
+function locate(
+  perView: readonly LineBlocks[],
+): Map<string, { view: number; line: number }> {
+  const out = new Map<string, { view: number; line: number }>();
+  perView.forEach((lines, view) => {
+    for (const [line, blocks] of lines) {
+      for (const b of blocks) out.set(b.key, { view, line });
+    }
+  });
+  return out;
+}
+
 /** Expand every collapsed stretch of `view` that holds one of `lines`. */
 function uncollapseAt(view: EditorView, side: DiffSide, lines: number[]) {
   const info = getChunks(view.state);
@@ -571,6 +585,8 @@ export function DiffEditor({
   const host = useRef<HTMLDivElement>(null);
   const mode = useThemeStore((s) => s.mode);
   const views = useRef<EditorView[]>([]);
+  // Where each block sits (editor index, line), for `reveal`.
+  const where = useRef(new Map<string, { view: number; line: number }>());
   const theme = useRef(new Compartment());
   const language = useRef(new Compartment());
   // The latest props for the (re)build effect without rebuilding on each.
@@ -660,6 +676,7 @@ export function DiffEditor({
       uncollapseAt(b, "b", [...onB.keys()]);
       a.dispatch({ effects: setBlocks.of(onA) });
       b.dispatch({ effects: setBlocks.of(onB) });
+      where.current = locate([onA, onB]);
     } else {
       // Unified: base-side blocks go where those lines show on the head.
       const [view] = vs;
@@ -676,8 +693,33 @@ export function DiffEditor({
       }
       uncollapseAt(view, "b", [...lines.keys()]);
       view.dispatch({ effects: setBlocks.of(lines) });
+      where.current = locate([lines]);
     }
   }, [placements, items, original, modified, layout]);
+
+  // A keyboard move to a block far down: CodeMirror renders only lines
+  // near the viewport, so scroll there first (`lib/revealItem`). The
+  // effect walks up to the page column, the scroller here.
+  useEffect(
+    () =>
+      registerDiffEditor(path, {
+        reveal: (key) => {
+          const at = where.current.get(key);
+          const view = at ? views.current[at.view] : undefined;
+          if (!at || !view) return false;
+          const doc = view.state.doc;
+          const line = doc.line(Math.min(at.line, doc.lines));
+          view.dispatch({
+            effects: EditorView.scrollIntoView(line.to, {
+              y: "start",
+              yMargin: 80,
+            }),
+          });
+          return true;
+        },
+      }),
+    [path],
+  );
 
   // The "+" lines, the selection and the focused line.
   useEffect(() => {

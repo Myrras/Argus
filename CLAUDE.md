@@ -265,8 +265,13 @@ sibling app Iris (`../Iris`).
   `lib/focusModel`): the Conversation, a file, a thread, a finding or a diff
   line, replacing the per-kind "last clicked" (it keeps
   `historyStore.focused`, `aiStore.focused` and `commentStore.focus` in
-  step). `usePageFocus` moves the DOM focus and scrolls; the item shows a
-  focus ring (`data-focused`). Actions in `lib/keyboardFlow` (nothing there
+  step). `usePageFocus` moves the DOM focus and, for a thread or finding,
+  reveals it (`lib/revealItem`: joins the file's load,
+  `codeViewStore.prefetchFile`; asks the file's `DiffEditor` via
+  `lib/diffEditors` to scroll the block's line into view, as CodeMirror
+  renders only lines near the viewport; waits for the block, then puts its
+  top under the sticky headers; the card only if none can show); the item
+  shows a focus ring (`data-focused`). Actions in `lib/keyboardFlow` (nothing there
   posts: a reply or comment only opens a composer; `s` resolves, the
   thread's own reversible write). `CommandPalette` (fuzzy
   `lib/fuzzy`, rows `lib/palette`: every action, review actions, Go to

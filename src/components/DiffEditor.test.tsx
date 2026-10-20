@@ -18,6 +18,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { StoredThread } from "../ipc/types";
 import type { Placement } from "../lib/diffThreads";
 
+import { EditorView } from "@codemirror/view";
+
+import { diffEditorFor, threadBlockKey } from "../lib/diffEditors";
 import { thread } from "../test/fixtures";
 import { DiffEditor } from "./DiffEditor";
 
@@ -318,5 +321,99 @@ describe("DiffEditor", () => {
     const enter = fireEvent.keyDown(content, { key: "Enter" });
     expect(enter).toBe(false);
     expect(onComment).toHaveBeenCalledWith("b", 2, 2, false);
+  });
+});
+
+describe("DiffEditor: revealing a block", () => {
+  // Line 2 ends at 19 in `original` ("fn b() {}") and at 20 in `modified`
+  // ("fn b2() {}"): the position tells the side apart.
+  const scrolledTo = () => {
+    const scroll = vi.spyOn(EditorView, "scrollIntoView");
+    const dispatch = vi.spyOn(EditorView.prototype, "dispatch");
+    return {
+      pos: () => scroll.mock.calls[scroll.mock.calls.length - 1]?.[0],
+      doc: () => {
+        const effect =
+          scroll.mock.results[scroll.mock.results.length - 1]?.value;
+        const i = dispatch.mock.calls.findIndex((c) => {
+          const spec = c[0] as { effects?: unknown } | undefined;
+          return spec?.effects === effect;
+        });
+        return (
+          dispatch.mock.contexts[i] as EditorView | undefined
+        )?.state.doc.toString();
+      },
+    };
+  };
+
+  it.each([
+    ["split", "a", 19, original],
+    ["split", "b", 20, modified],
+    ["unified", "b", 20, modified],
+    // Unified: an old-side block sits where that line shows on the head.
+    ["unified", "a", 20, modified],
+  ] as const)(
+    "%s: scrolls the %s side's editor to the block's line",
+    async (layout, side, pos, doc) => {
+      const t = thread({ author: "rev-fixture" });
+      const spy = scrolledTo();
+      render(
+        <DiffEditor
+          path="src/reveal.rs"
+          original={original}
+          modified={modified}
+          layout={layout}
+          placements={[{ thread: t, side, line: 2 }]}
+          renderThread={() => <p>thread</p>}
+        />,
+      );
+      await screen.findByText("thread");
+      const editor = diffEditorFor("src/reveal.rs");
+      expect(editor).not.toBeNull();
+      expect(editor!.reveal(threadBlockKey(t.threadId))).toBe(true);
+      expect(spy.pos()).toBe(pos);
+      expect(spy.doc()).toBe(doc);
+    },
+  );
+
+  it("reveals an item by its key and refuses an unknown block", async () => {
+    render(
+      <DiffEditor
+        path="src/items.rs"
+        original={original}
+        modified={modified}
+        layout="unified"
+        placements={[]}
+        renderThread={() => null}
+        items={[
+          {
+            key: "finding:f1",
+            side: "b",
+            line: 3,
+            render: () => <p>finding</p>,
+          },
+        ]}
+      />,
+    );
+    await screen.findByText("finding");
+    const editor = diffEditorFor("src/items.rs")!;
+    expect(editor.reveal("finding:f1")).toBe(true);
+    expect(editor.reveal("t:missing")).toBe(false);
+  });
+
+  it("is gone from the registry once unmounted", async () => {
+    const { unmount } = render(
+      <DiffEditor
+        path="src/gone.rs"
+        original={original}
+        modified={modified}
+        layout="unified"
+        placements={[]}
+        renderThread={() => null}
+      />,
+    );
+    await waitFor(() => expect(diffEditorFor("src/gone.rs")).not.toBeNull());
+    unmount();
+    expect(diffEditorFor("src/gone.rs")).toBeNull();
   });
 });

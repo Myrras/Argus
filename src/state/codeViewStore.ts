@@ -16,7 +16,7 @@ import {
   toIpcError,
 } from "../ipc/commands";
 import { onReviewChanged } from "../ipc/events";
-import type { IpcError, ReviewFiles, ReviewId } from "../ipc/types";
+import type { FileEntry, IpcError, ReviewFiles, ReviewId } from "../ipc/types";
 import { latestOnly } from "../lib/latest";
 
 /**
@@ -186,6 +186,45 @@ export function loadContents(
     p.catch(() => contents.delete(key));
   }
   return p;
+}
+
+/** Above this many changed lines a diff waits for "Load anyway". */
+export const LARGE_DIFF_LINES = 1500;
+
+/** No editor shows this file until "Load anyway" (or ever: binary). */
+export function waitsForLoadAnyway(f: FileEntry): boolean {
+  return f.tooLarge || f.additions + f.deletions > LARGE_DIFF_LINES;
+}
+
+/** A file's base and head text for its diff ("" for the missing side). */
+export function loadFileSides(
+  review: ReviewFiles,
+  f: FileEntry,
+): Promise<[string, string]> {
+  const base =
+    f.status === "added"
+      ? Promise.resolve("")
+      : loadContents(review.reviewId, review.baseSha, f.oldPath ?? f.path);
+  const head =
+    f.status === "removed"
+      ? Promise.resolve("")
+      : loadContents(review.reviewId, review.headSha, f.path);
+  return Promise.all([base, head]);
+}
+
+/**
+ * Start (or join) the load of a shown file's two sides, as its card would:
+ * a keyboard move to one of its threads waits for it. Null when no editor
+ * would show the file (unknown, binary, large) — nothing to wait for.
+ */
+export function prefetchFile(
+  id: ReviewId,
+  path: string,
+): Promise<[string, string]> | null {
+  const files = useCodeViewStore.getState().byReview[id]?.files;
+  const f = files?.files.find((x) => x.path === path);
+  if (!files || !f || f.binary || waitsForLoadAnyway(f)) return null;
+  return loadFileSides(files, f);
 }
 
 /** Tests: forget every cached file. */
