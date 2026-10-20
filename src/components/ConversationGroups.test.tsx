@@ -241,9 +241,10 @@ describe("the Conversation's resolved split", () => {
 
   it("counts the open threads in the tree and the header", async () => {
     await opened();
-    // The Conversation entry: its unresolved threads (the file's are not).
+    // The Conversation entry: only my open threads (carol's and the file's
+    // are not mine).
     const entry = within(tree()).getByRole("button", { name: /Conversation/ });
-    expect(within(entry).getByText("3 open")).toBeInTheDocument();
+    expect(within(entry).getByText("1 open")).toBeInTheDocument();
     // The header: every thread of the review, anchored ones included.
     expect(screen.getByText("4 unresolved threads")).toBeVisible();
   });
@@ -289,10 +290,11 @@ describe("the Conversation's resolved split", () => {
     );
     const resolved = group(talk(), "Resolved");
     expect(within(resolved).getByLabelText("2 threads")).toBeVisible();
+    // Carol's isn't mine: the tree's count stays, the header's drops.
     expect(
       within(
         within(tree()).getByRole("button", { name: /Conversation/ }),
-      ).getByText("2 open"),
+      ).getByText("1 open"),
     ).toBeInTheDocument();
     expect(screen.getByText("3 unresolved threads")).toBeVisible();
 

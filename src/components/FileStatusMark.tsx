@@ -69,13 +69,36 @@ export function ThreadCount({ total, mine }: { total: number; mine: number }) {
   );
 }
 
+/** A file's open threads of the user's, in the tree; nothing when none. */
+export function MyOpenThreads({ count }: { count: number }) {
+  if (count === 0) return null;
+  const label = `${count} open ${count === 1 ? "thread" : "threads"} of yours`;
+  return (
+    <span
+      className={styles.threads}
+      data-mine="true"
+      title={label}
+      aria-label={label}
+    >
+      {count}
+    </span>
+  );
+}
+
 /**
  * "2 open": the unresolved threads (resolvable, not resolved) of the
- * Conversation; nothing when there are none.
+ * Conversation; nothing when there are none. `label` overrides the tooltip.
  */
-export function OpenCount({ count }: { count: number }) {
+export function OpenCount({
+  count,
+  label: given,
+}: {
+  count: number;
+  label?: string;
+}) {
   if (count === 0) return null;
-  const label = `${count} unresolved ${count === 1 ? "thread" : "threads"}`;
+  const label =
+    given ?? `${count} unresolved ${count === 1 ? "thread" : "threads"}`;
   return (
     <span className={styles.open} title={label}>
       {count} open

@@ -20,7 +20,7 @@ function props(over: Partial<FileTreeProps> = {}): FileTreeProps {
     files,
     mode: "tree",
     selected: null,
-    counts: new Map([["src/cache/store.rs", { total: 2, mine: 1 }]]),
+    counts: new Map([["src/cache/store.rs", 2]]),
     onSelect: vi.fn(),
     onToggleViewed: vi.fn(),
     ...over,
@@ -79,7 +79,8 @@ describe("FileTree", () => {
       <FileTree
         {...props({
           conversation: {
-            count: { total: 3, mine: 1 },
+            open: 1,
+            total: 3,
             selected: true,
             onSelect,
           },
@@ -91,6 +92,36 @@ describe("FileTree", () => {
     expect(first).toHaveAttribute("aria-selected", "true");
     fireEvent.click(within(first).getByRole("button"));
     expect(onSelect).toHaveBeenCalled();
+  });
+
+  it("shows a badge only for files with open threads of yours", () => {
+    render(<FileTree {...props()} />);
+    const badge = within(tree()).getByLabelText("2 open threads of yours");
+    expect(badge).toHaveTextContent("2");
+    expect(within(tree()).getAllByLabelText(/threads? of yours/)).toHaveLength(
+      1,
+    );
+  });
+
+  it("shows the Conversation's open count of yours, no total pill", () => {
+    render(
+      <FileTree
+        {...props({
+          conversation: {
+            open: 2,
+            total: 5,
+            selected: false,
+            onSelect: vi.fn(),
+          },
+        })}
+      />,
+    );
+    const first = within(tree()).getAllByRole("treeitem")[0];
+    expect(first).toHaveTextContent(/^Conversation2 open$/);
+    expect(within(first).getByText("2 open")).toHaveAttribute(
+      "title",
+      "2 open threads of yours, 5 threads in all",
+    );
   });
 
   it("says when nothing matches, unless told not to", () => {
