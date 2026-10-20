@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CoreError, CoreResult};
 use crate::ids::{ReviewId, ThreadId};
-use crate::provider::{Anchor, Note, ProviderId, ReviewRef, ReviewState, Thread};
+use crate::provider::{Anchor, MyReviewState, Note, ProviderId, ReviewRef, ReviewState, Thread};
 use crate::review::{ReviewStatus, RoundReason};
 
 /// How long a call waits for a lock another connection holds.
@@ -193,6 +193,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE threads ADD COLUMN resolvable INTEGER NOT NULL DEFAULT 0;
     UPDATE threads SET resolvable = 1 WHERE anchor_json IS NOT NULL;
     "#,
+    // 13: the user's own review state on the platform, and when (and at
+    // which head) they last submitted a review there: the platform's
+    // reviewer state decides whether a review waits on the user. Written by
+    // fetches; a stored review gets them on its next fetch.
+    r#"
+    ALTER TABLE reviews ADD COLUMN my_review_state TEXT NOT NULL DEFAULT 'notReviewer';
+    ALTER TABLE reviews ADD COLUMN my_reviewed_at TEXT;
+    ALTER TABLE reviews ADD COLUMN my_reviewed_sha TEXT;
+    "#,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus
@@ -219,6 +228,15 @@ pub struct ReviewRecord {
     /// The user's review is requested right now.
     pub requested: bool,
     pub rerequested_at: Option<DateTime<Utc>>,
+    /// The user's own review state on the platform, as of the last fetch.
+    pub my_review_state: MyReviewState,
+    /// When the user last submitted a review on the platform, and at which
+    /// head (see [`ReviewDetail::my_reviewed_at`]): counts as a watermark
+    /// when it is later than Argus' own.
+    ///
+    /// [`ReviewDetail::my_reviewed_at`]: crate::provider::ReviewDetail::my_reviewed_at
+    pub my_reviewed_at: Option<DateTime<Utc>>,
+    pub my_reviewed_sha: Option<String>,
     /// The last list call still returned it. An open review that dropped
     /// off (no longer requested, nothing commented) is kept but not active.
     pub listed: bool,
@@ -490,6 +508,28 @@ impl Store {
         Ok(())
     }
 
+    /// Mark every path of `files` (path → content sha) viewed at that
+    /// content, in one transaction.
+    pub fn set_viewed_all(
+        &self,
+        review: ReviewId,
+        files: &HashMap<String, String>,
+        at: DateTime<Utc>,
+    ) -> CoreResult<()> {
+        self.transaction(|conn| {
+            for (path, content_sha) in files {
+                conn.execute(
+                    "INSERT INTO viewed_files (review_id, path, content_sha, viewed_at)
+                     VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT(review_id, path) DO UPDATE SET
+                        content_sha = excluded.content_sha, viewed_at = excluded.viewed_at",
+                    params![review.to_string(), path, content_sha, at],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
     /// Drop the viewed mark of `path` (a no-op when there is none).
     pub fn clear_viewed(&self, review: ReviewId, path: &str) -> CoreResult<()> {
         self.conn().execute(
@@ -555,9 +595,10 @@ pub(crate) fn write_review(
             "INSERT INTO reviews (id, provider, host, repo, number, title, author, url, state,
                 draft, head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at,
                 round, round_reasons, status, untouched_threads, requested, rerequested_at,
-                listed, viewer, fingerprint, updated_at, fetched_at)
+                listed, viewer, fingerprint, updated_at, fetched_at, my_review_state,
+                my_reviewed_at, my_reviewed_sha)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
              ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title, author = excluded.author, url = excluded.url,
                 state = excluded.state, draft = excluded.draft, head_sha = excluded.head_sha,
@@ -567,7 +608,9 @@ pub(crate) fn write_review(
                 requested = excluded.requested, rerequested_at = excluded.rerequested_at,
                 listed = excluded.listed, viewer = excluded.viewer,
                 fingerprint = excluded.fingerprint, updated_at = excluded.updated_at,
-                fetched_at = excluded.fetched_at"
+                fetched_at = excluded.fetched_at, my_review_state = excluded.my_review_state,
+                my_reviewed_at = excluded.my_reviewed_at,
+                my_reviewed_sha = excluded.my_reviewed_sha"
         ),
         params![
             r.id.to_string(),
@@ -596,6 +639,9 @@ pub(crate) fn write_review(
             r.fingerprint,
             r.review.updated_at,
             r.fetched_at,
+            r.my_review_state.as_str(),
+            r.my_reviewed_at,
+            r.my_reviewed_sha,
         ],
     )?;
     Ok(())
@@ -827,7 +873,7 @@ fn migrate(conn: &mut Connection) -> CoreResult<()> {
 const REVIEW_COLUMNS: &str = "id, provider, host, repo, number, title, author, url, state, draft,
     head_sha, base_sha, last_reviewed_sha, last_reviewed_at, approved_at, round, round_reasons,
     status, untouched_threads, requested, rerequested_at, listed, viewer, fingerprint,
-    updated_at, fetched_at";
+    updated_at, fetched_at, my_review_state, my_reviewed_at, my_reviewed_sha";
 
 fn review_row(r: &Row<'_>) -> rusqlite::Result<ReviewRecord> {
     let id: String = r.get(0)?;
@@ -860,6 +906,10 @@ fn review_row(r: &Row<'_>) -> rusqlite::Result<ReviewRecord> {
         untouched_threads: r.get(18)?,
         requested: r.get(19)?,
         rerequested_at: r.get(20)?,
+        my_review_state: MyReviewState::parse(&r.get::<_, String>(26)?)
+            .ok_or_else(|| invalid("review state"))?,
+        my_reviewed_at: r.get(27)?,
+        my_reviewed_sha: r.get(28)?,
         listed: r.get(21)?,
         viewer: r.get(22)?,
         fingerprint: r.get(23)?,

@@ -173,3 +173,19 @@
   text-align: center;
   color: var(--text-faint);
 }
+
+/* A review just approved from Argus, before it leaves the tab. */
+.approved {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--success);
+  animation: approvedIn var(--dur-2) var(--ease-out);
+}
+
+@keyframes approvedIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}

@@ -67,7 +67,9 @@ pub use poll::{RefreshError, RefreshReport};
 pub use post::{
     CommentableLines, NewComment, PostError, PostErrorKind, PostResult, PostedComment, PostedNote,
 };
-pub use provider::{GithubStatus, GitlabProblem, GitlabStatus, ProviderStatus};
+pub use provider::{
+    GithubStatus, GitlabProblem, GitlabStatus, MyReviewState, ProviderStatus, ReviewVerdict,
+};
 pub use review::{ReviewStatus, RoundReason};
 pub use settings::Settings;
 pub use store::{ReviewRecord, StoredThread};

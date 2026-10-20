@@ -8,11 +8,12 @@
  * Iris's `GoToField` pattern (the field keeps the focus, the active option
  * is its `aria-activedescendant`).
  *
- * Writing to a platform never runs from here unasked: "Approve…" opens the
- * same `ApproveModal` as the header's button, and "Post all…" a
- * confirmation first (`PaletteConfirms`). "Resolve thread" / "Unresolve
- * thread" (the focused thread, when its platform can resolve it) is the
- * thread button's own action, reversible, so it runs on Enter.
+ * Writing to a platform never runs from here unasked: "Submit review…" and
+ * "Approve…" open the same `SubmitReviewModal` as the header's button (the
+ * latter with Approve chosen), and "Post all…" a confirmation first
+ * (`PaletteConfirms`). "Resolve thread" / "Unresolve thread" (the focused
+ * thread, when its platform can resolve it) is the thread button's own
+ * action, reversible, so it runs on Enter.
  */
 
 import {
@@ -38,11 +39,7 @@ import { PROVIDER_LABEL, STATUS_LABEL, TABS, reviewRef } from "../lib/reviews";
 import { runShortcut } from "../lib/useAppShortcuts";
 import { useKeymap } from "../lib/useKeymap";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
-import {
-  useCommentStore,
-  useDrafts,
-  usePostableCount,
-} from "../state/commentStore";
+import { useCommentStore, usePostableCount } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
@@ -50,7 +47,7 @@ import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import { useThreadStore } from "../state/threadStore";
 import { toastInfo } from "../state/toastStore";
 import { Modal } from "./Modal";
-import { ApproveModal } from "./ReviewDetail";
+import { SubmitReviewModal } from "./SubmitReviewModal";
 import styles from "./CommandPalette.module.css";
 
 const PLACEHOLDER: Record<Mode, string> = {
@@ -110,16 +107,13 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
         stay: true,
         run: () => setMode("files"),
       });
-      if (
-        review.status === "needsReview" ||
-        review.status === "needsReReview"
-      ) {
+      if (review.state === "open") {
         out.push({
-          id: "review:mark",
+          id: "review:submit",
           section: "Commands",
-          label: "Mark round reviewed",
-          detail: "Remembers the current head as reviewed",
-          run: () => void useReviewStore.getState().markReviewed(id),
+          label: "Submit review…",
+          detail: `Approve or request changes on ${PROVIDER_LABEL[review.provider]}; asks first`,
+          run: () => ask({ kind: "submit", reviewId: id }),
         });
       }
       if (review.state === "open" && !review.approvedAt) {
@@ -128,7 +122,7 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
           section: "Commands",
           label: "Approve…",
           detail: `Asks first; on ${PROVIDER_LABEL[review.provider]}`,
-          run: () => ask({ kind: "approve", reviewId: id }),
+          run: () => ask({ kind: "submit", reviewId: id, verdict: "approve" }),
         });
       }
       if (thread?.resolvable) {
@@ -465,12 +459,11 @@ function PaletteConfirms() {
   const review = useReviewStore((s) =>
     confirm ? s.reviews.find((r) => r.id === confirm.reviewId) : undefined,
   );
-  const drafts = useDrafts(confirm?.reviewId ?? "");
   if (!confirm || !review) return null;
-  return confirm.kind === "approve" ? (
-    <ApproveModal
+  return confirm.kind === "submit" ? (
+    <SubmitReviewModal
       review={review}
-      pending={drafts.length}
+      verdict={confirm.verdict ?? null}
       open
       onClose={closeConfirm}
     />

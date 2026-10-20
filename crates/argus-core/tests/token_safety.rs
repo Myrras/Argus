@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 
 use argus_core::post::{DiffLine, LineKind, PlacedComment};
 use argus_core::provider::{
-    DiffRange, GithubProvider, GitlabProvider, ProviderId, ReviewProvider, ReviewRef, Side,
-    StaticToken,
+    DiffRange, GithubProvider, GitlabProvider, ProviderId, ReviewProvider, ReviewRef,
+    ReviewVerdict, Side, StaticToken,
 };
 use argus_core::store::Store;
 use argus_core::Core;
@@ -187,6 +187,15 @@ fn every_error(p: &dyn ReviewProvider, r: &ReviewRef) -> Vec<(&'static str, Stri
             post("set_thread_resolved", e);
         }
     }
+    for verdict in [
+        ReviewVerdict::Approve,
+        ReviewVerdict::RequestChanges,
+        ReviewVerdict::Comment,
+    ] {
+        if let Err(e) = p.submit_review(r, verdict, HEAD, Some("Summary")) {
+            post("submit_review", e);
+        }
+    }
     out
 }
 
@@ -202,10 +211,11 @@ fn github_errors_with(status: &str, stderr: &str) {
             std::fs::write(dir.path().join("stdout"), body.replace("{T}", GH_TOKEN)).unwrap();
             std::fs::write(dir.path().join("stderr"), stderr.replace("{T}", GH_TOKEN)).unwrap();
             let errors = every_error(&gh, &github_pr());
-            // All but `thread_resolutions` (no such call on GitHub) fail.
+            // All but `thread_resolutions` (no such call on GitHub) fail,
+            // the three verdicts of `submit_review` included.
             assert_eq!(
                 errors.len(),
-                12,
+                15,
                 "{account:?} {body} / {stderr}: {errors:?}"
             );
             for (what, text) in errors {
@@ -440,6 +450,82 @@ fn gitlab_errors_never_carry_the_token() {
         }
     }
     assert!(checked > 1000);
+}
+
+/// Submit review's own GitLab path past its reads: the instance and the
+/// reviewer check answer, then the quick action, its check and the summary
+/// note fail with the token in the body (or GitLab's 202 summary echoes it).
+#[test]
+fn gitlab_submit_errors_never_carry_the_token() {
+    let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
+    let fail = route.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for sock in listener.incoming() {
+            let Ok(mut sock) = sock else { continue };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => raw.extend_from_slice(&buf[..n]),
+                }
+            }
+            let head = String::from_utf8_lossy(&raw).into_owned();
+            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+            let (status, body) = if path.starts_with("/api/v4/version") {
+                ("200 OK".to_string(), r#"{"version":"17.5.0"}"#.to_string())
+            } else if path.starts_with("/api/v4/user") {
+                (
+                    "200 OK".to_string(),
+                    r#"{"id":42,"username":"rev-fixture"}"#.to_string(),
+                )
+            } else if path.contains("/reviewers") {
+                (
+                    "200 OK".to_string(),
+                    r#"[{"user":{"id":42,"username":"rev-fixture"},"state":"unreviewed"}]"#
+                        .to_string(),
+                )
+            } else {
+                fail.lock().unwrap().clone()
+            };
+            let out = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            let _ = sock.write_all(out.as_bytes());
+        }
+    });
+    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let mut checked = 0;
+    let mut cases: Vec<(String, String)> = Vec::new();
+    for body in bodies() {
+        for status in [
+            "400 Bad Request",
+            "403 Forbidden",
+            "409 Conflict",
+            "500 Internal Server Error",
+        ] {
+            cases.push((status.into(), body.replace("{T}", GL_TOKEN)));
+        }
+    }
+    // Run, but the state did not move: GitLab's summary is forwarded.
+    cases.push((
+        "202 Accepted".into(),
+        format!(r#"{{"commands_changes":{{}},"summary":["Could not: {GL_TOKEN}"]}}"#),
+    ));
+    for (status, body) in cases {
+        *route.lock().unwrap() = (status.clone(), body.clone());
+        for verdict in [ReviewVerdict::Approve, ReviewVerdict::RequestChanges] {
+            let err = gl
+                .submit_review(&gitlab_mr(&base), verdict, HEAD, Some("Summary"))
+                .unwrap_err();
+            assert_clean(GL_TOKEN, "submit_review", &format!("{err} / {err:?}"));
+            checked += 1;
+        }
+    }
+    assert!(checked > 100);
 }
 
 #[test]

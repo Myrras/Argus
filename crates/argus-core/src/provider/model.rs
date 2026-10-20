@@ -123,6 +123,94 @@ pub enum ReviewerState {
     Dismissed,
 }
 
+/// Where the current user's own review stands on the platform: what
+/// decides whether a review is waiting on them (see `review::classify`).
+///
+/// GitLab: the user's `/reviewers` entry (`unreviewed`, `review_started`,
+/// `requested_changes`, `reviewed`/`unapproved`, `approved`). GitHub: in
+/// `requested_reviewers` means awaiting (GitHub drops a reviewer from it on
+/// any submitted review, and puts them back on a re-request); otherwise
+/// the user's latest standing review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MyReviewState {
+    /// Requested and not given yet ("Awaiting review" on GitLab), also
+    /// after a re-request.
+    AwaitingReview,
+    /// GitLab: the user has a review in progress (pending comments).
+    ReviewStarted,
+    RequestedChanges,
+    /// Reviewed without a verdict (GitHub "commented" or a dismissed
+    /// review; GitLab "reviewed" or an approval taken back).
+    Commented,
+    Approved,
+    /// Not a reviewer of it (Argus lists it because the user commented).
+    #[default]
+    NotReviewer,
+}
+
+impl MyReviewState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MyReviewState::AwaitingReview => "awaitingReview",
+            MyReviewState::ReviewStarted => "reviewStarted",
+            MyReviewState::RequestedChanges => "requestedChanges",
+            MyReviewState::Commented => "commented",
+            MyReviewState::Approved => "approved",
+            MyReviewState::NotReviewer => "notReviewer",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "awaitingReview" => Some(MyReviewState::AwaitingReview),
+            "reviewStarted" => Some(MyReviewState::ReviewStarted),
+            "requestedChanges" => Some(MyReviewState::RequestedChanges),
+            "commented" => Some(MyReviewState::Commented),
+            "approved" => Some(MyReviewState::Approved),
+            "notReviewer" => Some(MyReviewState::NotReviewer),
+            _ => None,
+        }
+    }
+
+    /// The platform says the user's review is owed (again).
+    pub fn owes_review(self) -> bool {
+        matches!(
+            self,
+            MyReviewState::AwaitingReview | MyReviewState::ReviewStarted
+        )
+    }
+
+    /// The user submitted a verdict that leaves the next move to the
+    /// author.
+    pub fn submitted_without_approval(self) -> bool {
+        matches!(
+            self,
+            MyReviewState::RequestedChanges | MyReviewState::Commented
+        )
+    }
+}
+
+/// What "Submit review" sets on the platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewVerdict {
+    Approve,
+    RequestChanges,
+    /// GitHub only: a review without a verdict (its summary required).
+    Comment,
+}
+
+impl ReviewVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewVerdict::Approve => "approve",
+            ReviewVerdict::RequestChanges => "requestChanges",
+            ReviewVerdict::Comment => "comment",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reviewer {
@@ -177,6 +265,26 @@ pub struct ReviewDetail {
     /// The current user's approval stands on the platform (and was not
     /// re-requested since).
     pub approved_by_me: bool,
+    /// The user's own review state on the platform.
+    #[serde(default)]
+    pub my_review_state: MyReviewState,
+    /// When the user last submitted a review on the platform (an approval,
+    /// a change request, a comment review), and the head it was given at:
+    /// a review given on GitHub or GitLab itself counts as reviewed, like
+    /// one from Argus. GitHub: the latest submitted review's `submitted_at`
+    /// and `commit_id`. GitLab: the latest "approved this merge request" /
+    /// "requested changes" system note of the user's (for a `reviewed`
+    /// state without one, their latest comment), at the diff version that
+    /// was current then.
+    #[serde(default)]
+    pub my_reviewed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub my_reviewed_sha: Option<String>,
+    /// When the user's review was last requested, as the platform records
+    /// it (GitLab: the newest "requested review from @me" system note).
+    /// `None` when the platform does not say (GitHub).
+    #[serde(default)]
+    pub review_requested_at: Option<DateTime<Utc>>,
 }
 
 /// A review's head, base and commits: what a head check and the history

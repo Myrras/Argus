@@ -1,5 +1,5 @@
-//! Review commands: the list, one review, refreshing and marking a round
-//! reviewed.
+//! Review commands: the list, one review and refreshing. (Submitting a
+//! review is a write: `commands::post::submit_review`.)
 
 use tauri::{AppHandle, State};
 
@@ -63,17 +63,4 @@ pub fn last_refresh(state: State<'_, AppState>) -> Option<RefreshReport> {
         .lock()
         .expect("last refresh lock poisoned")
         .clone()
-}
-
-/// The user finished this round: the watermark moves to the current head.
-#[tauri::command]
-pub async fn mark_reviewed(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    review_id: String,
-) -> Result<ReviewRecord, IpcError> {
-    let id = parse_review_id(&review_id)?;
-    let record = blocking(state, move |core| core.mark_reviewed(id)).await?;
-    events::emit_changed(&app, record.id);
-    Ok(record)
 }

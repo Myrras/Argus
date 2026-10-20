@@ -87,7 +87,12 @@ const files = reviewFiles({
   ],
 });
 
-const WRITES = ["post_comments", "reply_to_thread", "approve_review"];
+const WRITES = [
+  "post_comments",
+  "reply_to_thread",
+  "approve_review",
+  "submit_review",
+];
 const writes = () =>
   mockInvoke.mock.calls.filter(([cmd]) => WRITES.includes(cmd as string));
 
@@ -199,7 +204,7 @@ describe("ReviewDetail", () => {
     expect(rows[0]).toHaveTextContent("Conversation");
   });
 
-  it("shows status, round and reasons, and marks the round reviewed", async () => {
+  it("shows status, round, reasons and the user's review state", async () => {
     render(<ReviewDetail now={NOW} />);
     expect(
       screen.getByRole("heading", { name: "Add widget caching" }),
@@ -210,14 +215,20 @@ describe("ReviewDetail", () => {
     expect(screen.getByText("Needs re-review")).toBeInTheDocument();
     expect(screen.getByText("New commits")).toBeInTheDocument();
     expect(screen.getByText("1 of your threads untouched")).toBeInTheDocument();
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "Mark round reviewed" }),
-    );
-    expect(mockInvoke).toHaveBeenCalledWith("mark_reviewed", {
-      reviewId: r.id,
-    });
+    expect(screen.getByText("Awaiting your review")).toBeInTheDocument();
+    // The local-only "Mark round reviewed" is gone.
+    expect(
+      screen.queryByRole("button", { name: "Mark round reviewed" }),
+    ).toBeNull();
+    // Submit review only opens the dialog.
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    expect(
+      screen.getByRole("dialog", {
+        name: `Submit review — acme-fixture/widgets#${r.number}`,
+      }),
+    ).toBeInTheDocument();
     await screen.findAllByRole("article");
+    expect(writes()).toEqual([]);
   });
 
   it("opens the review in the browser", async () => {
@@ -227,19 +238,15 @@ describe("ReviewDetail", () => {
     await screen.findAllByRole("article");
   });
 
-  it("disables marking when nothing is new", async () => {
-    const waiting = {
-      ...r,
-      status: "waitingOnAuthor" as const,
-      roundReasons: [],
-    };
+  it("offers Submit review only on an open review", async () => {
+    const merged = { ...r, state: "merged" as const };
     useReviewStore.setState(
-      { ...initialReviews, reviews: [waiting], selectedId: waiting.id },
+      { ...initialReviews, reviews: [merged], selectedId: merged.id },
       true,
     );
     render(<ReviewDetail now={NOW} />);
     expect(
-      screen.getByRole("button", { name: "Mark round reviewed" }),
+      screen.getByRole("button", { name: "Submit review…" }),
     ).toBeDisabled();
     await screen.findAllByRole("article");
   });
@@ -334,31 +341,35 @@ describe("ReviewDetail", () => {
     ]);
   });
 
-  it("approves only after confirming, at the head it names", async () => {
-    useCommentStore.setState({
-      drafts: { [r.id]: [draft("d1", 1, "Unposted")] },
+  /** Open Submit review from the header; the dialog. */
+  async function openSubmit() {
+    render(<ReviewDetail now={NOW} />);
+    await screen.findAllByRole("article");
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    return screen.getByRole("dialog", {
+      name: `Submit review — acme-fixture/widgets#${r.number}`,
     });
+  }
+
+  const submitCalls = () => writes().filter(([cmd]) => cmd === "submit_review");
+
+  it("approves at the head it names; a refusal shows inline", async () => {
     let fail = true;
     backend({
-      approve_review: () => {
+      submit_review: () => {
         if (fail) {
           throw { kind: "headMoved", message: "The review got new commits." };
         }
         return { ...r, approvedAt: "2026-10-16T12:00:00Z", status: "approved" };
       },
     });
-    render(<ReviewDetail now={NOW} />);
-    await screen.findAllByRole("article");
-    fireEvent.click(screen.getByRole("button", { name: "Approve…" }));
-    const dialog = screen.getByRole("dialog", {
-      name: "Approve acme-fixture/widgets#" + r.number,
-    });
+    const dialog = await openSubmit();
     expect(within(dialog).getByText(r.headSha.slice(0, 7))).toBeInTheDocument();
+    // Nothing chosen yet: nothing to submit.
     expect(
-      within(dialog).getByText(/1 pending comment is not posted/),
-    ).toBeInTheDocument();
-    expect(writes()).toEqual([]);
-
+      within(dialog).getByRole("button", { name: "Submit review" }),
+    ).toBeDisabled();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "The review got new commits.",
@@ -367,24 +378,186 @@ describe("ReviewDetail", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(writes()).toEqual([
-      ["approve_review", { reviewId: r.id, headSha: r.headSha }],
-      ["approve_review", { reviewId: r.id, headSha: r.headSha }],
+      [
+        "submit_review",
+        {
+          reviewId: r.id,
+          headSha: r.headSha,
+          verdict: "approve",
+          summary: null,
+        },
+      ],
+      [
+        "submit_review",
+        {
+          reviewId: r.id,
+          headSha: r.headSha,
+          verdict: "approve",
+          summary: null,
+        },
+      ],
     ]);
-    // Approving never posts the drafts.
+  });
+
+  it("requests changes with a summary, which GitHub requires", async () => {
+    backend({ submit_review: () => ({ ...r, status: "waitingOnAuthor" }) });
+    const dialog = await openSubmit();
+    // GitHub offers a comment review too.
+    expect(
+      within(dialog).getByRole("radio", { name: /Comment/ }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: /Request changes/ }),
+    );
+    const button = within(dialog).getByRole("button", {
+      name: "Request changes",
+    });
+    expect(button).toBeDisabled();
+    expect(within(dialog).getByText("Required")).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Summary" }), {
+      target: { value: "Please **add** a test." },
+    });
+    fireEvent.click(within(dialog).getByRole("tab", { name: "Preview" }));
+    expect(within(dialog).getByText("add").tagName).toBe("STRONG");
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(submitCalls()).toEqual([
+      [
+        "submit_review",
+        {
+          reviewId: r.id,
+          headSha: r.headSha,
+          verdict: "requestChanges",
+          summary: "Please **add** a test.",
+        },
+      ],
+    ]);
+  });
+
+  it("offers GitLab only approve or request changes, summary optional", async () => {
+    const gl = {
+      ...r,
+      provider: "gitlab" as const,
+      host: "gitlab.example.test",
+    };
+    useReviewStore.setState(
+      { ...initialReviews, reviews: [gl], selectedId: gl.id },
+      true,
+    );
+    backend({ submit_review: () => ({ ...gl, status: "waitingOnAuthor" }) });
+    render(<ReviewDetail now={NOW} />);
+    await screen.findAllByRole("article");
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByRole("radio", { name: /Comment/ })).toBeNull();
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: /Request changes/ }),
+    );
+    expect(
+      within(dialog).getByRole("button", { name: "Request changes" }),
+    ).toBeEnabled();
+  });
+
+  it("posts the pending comments first, then submits", async () => {
+    useCommentStore.setState({
+      drafts: { [r.id]: [draft("d1", 1, "Posts fine")] },
+    });
+    const posted: PostResult = {
+      status: "posted",
+      url: "https://github.com/acme-fixture/widgets/pull/1#r9",
+      providerThreadId: "9",
+      providerNoteId: "9",
+      path: "src/cache.rs",
+      side: "new",
+      line: 1,
+      startLine: null,
+      headSha: r.headSha,
+    };
+    backend({
+      post_comments: () => [posted],
+      submit_review: () => ({ ...r, status: "approved" }),
+    });
+    const dialog = await openSubmit();
+    const box = within(dialog).getByRole("checkbox", {
+      name: "Post 1 pending comment with it",
+    });
+    expect(box).toBeChecked();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(writes().map(([cmd]) => cmd)).toEqual([
+      "post_comments",
+      "submit_review",
+    ]);
+    expect(useCommentStore.getState().drafts[r.id] ?? []).toEqual([]);
+  });
+
+  it("a refused draft aborts the submit and says why", async () => {
+    useCommentStore.setState({
+      drafts: {
+        [r.id]: [draft("d1", 1, "Posts fine"), draft("d2", 2, "Gets refused")],
+      },
+    });
+    backend({
+      post_comments: () => [
+        {
+          status: "posted",
+          url: "u",
+          providerThreadId: "9",
+          providerNoteId: "9",
+          path: "src/cache.rs",
+          side: "new",
+          line: 1,
+          startLine: null,
+          headSha: r.headSha,
+        },
+        {
+          status: "failed",
+          kind: "lineNotInDiff",
+          message: "That line is not in the diff any more.",
+        },
+      ],
+    });
+    const dialog = await openSubmit();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Not submitted: 1 pending comment was not posted.",
+    );
+    expect(alert).toHaveTextContent(
+      "src/cache.rs:2 — That line is not in the diff any more.",
+    );
+    expect(submitCalls()).toEqual([]);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("can leave the drafts out", async () => {
+    useCommentStore.setState({
+      drafts: { [r.id]: [draft("d1", 1, "Later")] },
+    });
+    backend({ submit_review: () => ({ ...r, status: "approved" }) });
+    const dialog = await openSubmit();
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "Post 1 pending comment with it",
+      }),
+    );
+    expect(
+      within(dialog).getByText("1 pending comment stays unposted."),
+    ).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(writes().map(([cmd]) => cmd)).toEqual(["submit_review"]);
     expect(useCommentStore.getState().drafts[r.id]).toHaveLength(1);
   });
 
-  it("cancelling the approval writes nothing", async () => {
+  it("cancelling Submit review writes nothing", async () => {
     backend();
-    render(<ReviewDetail now={NOW} />);
-    await screen.findAllByRole("article");
-    fireEvent.click(screen.getByRole("button", { name: "Approve…" }));
-    fireEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", {
-        name: "Cancel",
-      }),
-    );
+    const dialog = await openSubmit();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(writes()).toEqual([]);
-    expect(screen.queryByText(/pending comment/)).toBeNull();
   });
 });

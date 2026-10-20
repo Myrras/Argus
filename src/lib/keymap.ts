@@ -59,7 +59,9 @@ export type ActionId =
   | "showShortcuts"
   // Open in editor
   | "openInEditor"
-  | "showInFinder";
+  | "showInFinder"
+  // Submit review
+  | "submitReview";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
@@ -338,6 +340,15 @@ export const ACTIONS: ActionDef[] = [
     scope: "files",
     defaults: ["Mod+Alt+KeyR"],
     note: "Shows the focused file of your local clone in the file manager.",
+  },
+  // Submit review: opens the dialog; only its button writes.
+  {
+    id: "submitReview",
+    label: "Submit review…",
+    group: "Comments",
+    scope: "files",
+    defaults: ["Shift+KeyS"],
+    note: "Opens Submit review (Approve / Request changes). It writes only from the dialog's button.",
   },
 ];
 

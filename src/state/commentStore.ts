@@ -49,6 +49,13 @@ import {
   useToastStore,
 } from "./toastStore";
 
+/** What "Post all" did: counts, or why nothing could be tried. */
+export interface PostAllOutcome {
+  posted: number;
+  failed: number;
+  error: PostError | null;
+}
+
 /** A pending comment: queued with "Add to review", sent with "Post all". */
 export interface Draft {
   id: string;
@@ -137,7 +144,11 @@ interface CommentState {
   editDraft: (reviewId: ReviewId, id: string) => void;
   removeDraft: (reviewId: ReviewId, id: string) => void;
   /** "Post all": every draft of the review, one by one. */
-  postAll: (reviewId: ReviewId) => Promise<void>;
+  /**
+   * Resolves to what happened (null when nothing was posted: none to post,
+   * or the review is posting already); Submit review aborts on a failure.
+   */
+  postAll: (reviewId: ReviewId) => Promise<PostAllOutcome | null>;
   /** Post one (failed) draft again. */
   retryDraft: (reviewId: ReviewId, id: string) => Promise<void>;
 
@@ -568,7 +579,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
     },
 
     postAll: async (reviewId) => {
-      if (get().posting[reviewId]) return;
+      if (get().posting[reviewId]) return null;
       // A draft's open edit is what the user sees of it: post that text
       // (the stored draft keeps its own until it posts), or leave the draft
       // out when the edit was emptied.
@@ -584,7 +595,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
           "Write something in its edit or cancel it.",
         );
       }
-      if (drafts.length === 0) return;
+      if (drafts.length === 0) return null;
       const r = await post(reviewId, drafts);
       if (r.error) {
         toastError("Could not post the comments", r.error.message);
@@ -596,6 +607,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
           "They stay as drafts with the reason; edit them or post again.",
         );
       }
+      return r;
     },
 
     retryDraft: async (reviewId, id) => {

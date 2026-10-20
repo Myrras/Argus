@@ -13,6 +13,7 @@
 
 mod anchor;
 mod api;
+mod submit;
 
 #[cfg(test)]
 mod tests;
@@ -185,6 +186,9 @@ pub enum PostErrorKind {
     LineNotInDiff,
     /// The review got new commits between reading its diff and posting.
     HeadMoved,
+    /// The platform (this instance's version) has no API for the write,
+    /// e.g. requesting changes on a GitLab before 17.2. Nothing was written.
+    Unsupported,
 }
 
 impl PostErrorKind {
@@ -201,6 +205,7 @@ impl PostErrorKind {
             PostErrorKind::PostRejected => "postRejected",
             PostErrorKind::LineNotInDiff => "lineNotInDiff",
             PostErrorKind::HeadMoved => "headMoved",
+            PostErrorKind::Unsupported => "unsupported",
         }
     }
 }

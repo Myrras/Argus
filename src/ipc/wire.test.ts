@@ -34,6 +34,8 @@ import type {
   RepeatReason,
   ReviewFiles,
   ReviewRecord,
+  ReviewVerdict,
+  MyReviewState,
   ReviewState,
   ReviewStatus,
   RoundReason,
@@ -110,6 +112,9 @@ const record: ReviewRecord = {
   untouchedThreads: 1,
   requested: true,
   rerequestedAt: T,
+  myReviewState: "requestedChanges",
+  myReviewedAt: T,
+  myReviewedSha: "c1",
   listed: true,
   viewer: "rev-fixture",
   fetchedAt: T,
@@ -467,7 +472,21 @@ const postErrorKinds = [
   "postRejected",
   "lineNotInDiff",
   "headMoved",
+  "unsupported",
 ] as const satisfies readonly PostErrorKind[];
+const myReviewStates = [
+  "awaitingReview",
+  "reviewStarted",
+  "requestedChanges",
+  "commented",
+  "approved",
+  "notReviewer",
+] as const satisfies readonly MyReviewState[];
+const reviewVerdicts = [
+  "approve",
+  "requestChanges",
+  "comment",
+] as const satisfies readonly ReviewVerdict[];
 const lineStatusKinds = [
   "located",
   "deleted",
@@ -537,6 +556,8 @@ const covered: true[] = [
   true satisfies Covers<Severity, typeof severities>,
   true satisfies Covers<VerdictLabel, typeof verdictLabels>,
   true satisfies Covers<RepeatReason, typeof repeatReasons>,
+  true satisfies Covers<MyReviewState, typeof myReviewStates>,
+  true satisfies Covers<ReviewVerdict, typeof reviewVerdicts>,
 ];
 
 const enums: Record<string, readonly string[]> = {
@@ -557,6 +578,8 @@ const enums: Record<string, readonly string[]> = {
   Severity: severities,
   VerdictLabel: verdictLabels,
   RepeatReason: repeatReasons,
+  MyReviewState: myReviewStates,
+  ReviewVerdict: reviewVerdicts,
 };
 
 describe("wire shapes (types.ts vs the Rust snapshot)", () => {

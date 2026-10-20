@@ -1,20 +1,24 @@
 /**
  * The keyboard overlays (M6): the command palette (⌘K) and the shortcut
- * help (?), at most one at a time, and the confirmations the palette opens
- * for the actions that write to a platform (Approve…, Post all…) — the
- * palette never posts by itself.
+ * help (?), at most one at a time, and the dialogs the palette and keys
+ * open for the actions that write to a platform (Submit review…, Approve…,
+ * Post all…) — neither ever posts by itself.
  */
 
 import { create } from "zustand";
 
-import type { ReviewId } from "../ipc/types";
+import type { ReviewId, ReviewVerdict } from "../ipc/types";
 
 export type Overlay = "palette" | "help";
 
-export interface Confirm {
-  kind: "approve" | "postAll";
-  reviewId: ReviewId;
-}
+export type Confirm =
+  | {
+      /** The Submit review dialog, with `verdict` chosen (Approve…). */
+      kind: "submit";
+      reviewId: ReviewId;
+      verdict?: ReviewVerdict;
+    }
+  | { kind: "postAll"; reviewId: ReviewId };
 
 interface OverlayState {
   open: Overlay | null;

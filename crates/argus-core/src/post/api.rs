@@ -170,53 +170,14 @@ impl Core {
         }))
     }
 
-    /// Approve a review on its platform (a separate, explicit action; never
-    /// a merge), pinned to `seen_head`: the head the user reviewed and was
-    /// shown in the confirmation. Fails with [`PostErrorKind::HeadMoved`]
-    /// (nothing written) when the stored or the platform's head is another
-    /// one, so new commits are never approved unseen.
+    /// Approve a review on its platform (never a merge), pinned to
+    /// `seen_head`: [`submit_review`](Self::submit_review) with
+    /// [`ReviewVerdict::Approve`] and no summary. Returns the review as
+    /// stored afterwards.
     ///
-    /// Then refreshes it: `approved_at` is set (by the platform's approval
-    /// showing up, or right away when it does not show yet), which takes
-    /// the review out of the active lists, and the watermark moves. Returns
-    /// the review as stored afterwards.
+    /// [`ReviewVerdict::Approve`]: crate::provider::ReviewVerdict::Approve
     pub fn approve_review(&self, id: ReviewId, seen_head: &str) -> Result<ReviewRecord, PostError> {
-        let record = self.review(id)?;
-        let provider = self.provider_for(&record)?;
-        if seen_head.trim().is_empty() {
-            return Err(PostError::new(
-                PostErrorKind::InvalidInput,
-                "no head to approve",
-            ));
-        }
-        let moved = || {
-            PostError::new(
-                PostErrorKind::HeadMoved,
-                "The review got new commits since you looked; review them before approving.",
-            )
-        };
-        // Either way the stored review is refreshed, so the view the user
-        // retries from shows the head that is there now.
-        if seen_head != record.head_sha {
-            self.refresh_after_head_moved(provider.as_ref(), &record);
-            return Err(moved());
-        }
-        // The platform's head now: GitHub would approve an older commit
-        // without complaint (GitLab refuses by itself, see its `approve`).
-        if provider.fetch_head(&record.review)?.head_sha != seen_head {
-            self.refresh_after_head_moved(provider.as_ref(), &record);
-            return Err(moved());
-        }
-        provider.approve(&record.review, seen_head)?;
-        Ok(match self.after_write(provider.as_ref(), &record, true) {
-            Ok(next) => next,
-            Err(e) => {
-                // Approved on the platform all the same; the next refresh
-                // catches up.
-                tracing::debug!("storing the approval failed: {e}");
-                record
-            }
-        })
+        self.submit_review(id, crate::provider::ReviewVerdict::Approve, seen_head, None)
     }
 
     /// The lines of `path` a new comment can go on, per hunk of the review's
@@ -308,7 +269,11 @@ impl Core {
     /// After a [`PostErrorKind::HeadMoved`] refusal: store the platform's
     /// review as it is now, so a retry starts from the new head instead of
     /// failing until the next poll. Logged only: the refusal is the answer.
-    fn refresh_after_head_moved(&self, provider: &dyn ReviewProvider, record: &ReviewRecord) {
+    pub(super) fn refresh_after_head_moved(
+        &self,
+        provider: &dyn ReviewProvider,
+        record: &ReviewRecord,
+    ) {
         if let Err(e) = self.refresh_review(provider, record.id, Utc::now()) {
             tracing::debug!("refreshing after a moved head failed: {e}");
         }
@@ -329,7 +294,7 @@ impl Core {
 
     /// After a successful write: refresh the review through the poll's own
     /// path (so the new thread or note is stored), then move the watermark.
-    fn after_write(
+    pub(super) fn after_write(
         &self,
         provider: &dyn ReviewProvider,
         before: &ReviewRecord,
@@ -471,15 +436,8 @@ pub(crate) fn advance_after_write(
         next.approved_at = Some(now);
     }
     let round = review::classify(&RoundInput {
-        state: next.state,
-        head_sha: &next.head_sha,
-        last_reviewed_sha: next.last_reviewed_sha.as_deref(),
-        last_reviewed_at: next.last_reviewed_at,
-        approved_at: next.approved_at,
-        rerequested_at: next.rerequested_at,
-        threads,
-        me: &next.viewer,
         seen_at: Some(seen_at),
+        ..RoundInput::of(&next, threads)
     });
     // As in `review::advance`: entering re-review starts a round.
     if round.status == ReviewStatus::NeedsReReview && record.status != ReviewStatus::NeedsReReview {

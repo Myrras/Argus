@@ -100,7 +100,7 @@ import { clearContentsCache, useCodeViewStore } from "./state/codeViewStore";
 import { clearCommentableCache, useCommentStore } from "./state/commentStore";
 import { useHistoryStore } from "./state/historyStore";
 import { useLayoutStore } from "./state/layoutStore";
-import { useReviewStore } from "./state/reviewStore";
+import { APPROVED_LINGER_MS, useReviewStore } from "./state/reviewStore";
 import { useSettingsRequestStore } from "./state/settingsRequestStore";
 import { useThreadStore } from "./state/threadStore";
 import { useToastStore } from "./state/toastStore";
@@ -131,6 +131,7 @@ const WRITES = [
   "post_comments",
   "reply_to_thread",
   "approve_review",
+  "submit_review",
   "post_findings",
   "resolve_thread",
 ];
@@ -299,7 +300,7 @@ function makeBackend(opts: { ai: boolean }) {
         };
       });
     },
-    approve_review: (a) => {
+    submit_review: (a) => {
       if (a.headSha !== A.headSha) {
         throw { kind: "headMoved", message: "The review got new commits." };
       }
@@ -521,25 +522,39 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     // The posted one came back as a thread (the store re-read on the event).
     expect(await within(diff).findByText("Why uppercase?")).toBeInTheDocument();
 
-    // Approve, after confirming the head: the review leaves the list.
-    fireEvent.click(screen.getByRole("button", { name: "Approve…" }));
+    // Submit review → Approve, leaving the refused draft out: the review
+    // shows "Approved ✓" for a moment, then leaves the list.
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
     const dialog = screen.getByRole("dialog", {
-      name: `Approve acme-fixture/widgets#${A.number}`,
+      name: `Submit review — acme-fixture/widgets#${A.number}`,
     });
+    fireEvent.click(
+      within(dialog).getByRole("checkbox", {
+        name: "Post 1 pending comment with it",
+      }),
+    );
     expect(
-      within(dialog).getByText(/1 pending comment is not posted/),
+      within(dialog).getByText("1 pending comment stays unposted."),
     ).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
-    await waitFor(() =>
-      expect(within(sidebar()).queryByText("Fixture A")).toBeNull(),
+    expect(
+      await within(sidebar()).findByText("Approved ✓"),
+    ).toBeInTheDocument();
+    expect(within(sidebar()).getByText("Fixture A")).toBeInTheDocument();
+    await waitFor(
+      () => expect(within(sidebar()).queryByText("Fixture A")).toBeNull(),
+      { timeout: APPROVED_LINGER_MS + 2000 },
     );
     expect(writes().map(([cmd]) => cmd)).toEqual([
       "post_comments",
-      "approve_review",
+      "submit_review",
     ]);
-    expect(mockInvoke).toHaveBeenCalledWith("approve_review", {
+    expect(mockInvoke).toHaveBeenCalledWith("submit_review", {
       reviewId: A.id,
       headSha: A.headSha,
+      verdict: "approve",
+      summary: null,
     });
   });
 
@@ -596,7 +611,7 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     handlers.refresh_reviews = () => {
       throw { kind: "githubUnavailable", message: "GitHub is not available." };
     };
-    handlers.approve_review = () => {
+    handlers.submit_review = () => {
       throw { kind: "headMoved", message: "The review got new commits." };
     };
     render(<App />);
@@ -613,14 +628,15 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     );
 
     await openReview("Fixture A");
-    fireEvent.click(screen.getByRole("button", { name: "Approve…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
     const dialog = screen.getByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
     expect(await within(dialog).findByRole("alert")).toHaveTextContent(
       "The review got new commits.",
     );
     expect(
-      await within(notifications).findByText("Could not approve"),
+      await within(notifications).findByText("Could not submit the review"),
     ).toBeInTheDocument();
     // Still listed: nothing was approved.
     await waitFor(() => expect(useReviewStore.getState().approving).toBeNull());

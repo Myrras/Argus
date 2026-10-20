@@ -17,7 +17,12 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import type { RefreshReport } from "../ipc/types";
-import { subscribeReviewEvents, useReviewStore } from "./reviewStore";
+import { reviewsInTab } from "../lib/reviews";
+import {
+  APPROVED_LINGER_MS,
+  subscribeReviewEvents,
+  useReviewStore,
+} from "./reviewStore";
 import { useToastStore } from "./toastStore";
 
 const mockInvoke = vi.mocked(invoke);
@@ -136,22 +141,103 @@ describe("reviewStore", () => {
     ]);
   });
 
-  it("marks a round reviewed, then re-reads the list", async () => {
-    const marked = { ...a, status: "waitingOnAuthor" as const };
+  it("submits a review on the platform, then re-reads the list", async () => {
+    const submitted = {
+      ...a,
+      status: "waitingOnAuthor" as const,
+      myReviewState: "requestedChanges" as const,
+    };
     mockInvoke.mockImplementation((cmd: string) =>
-      Promise.resolve(cmd === "mark_reviewed" ? marked : [marked, b, c]),
+      Promise.resolve(cmd === "submit_review" ? submitted : [submitted, b, c]),
     );
-    await useReviewStore.getState().markReviewed(a.id);
-    expect(mockInvoke).toHaveBeenCalledWith("mark_reviewed", {
+    const err = await useReviewStore
+      .getState()
+      .submit(a.id, a.headSha, "requestChanges", "Please add a test.");
+    expect(err).toBeNull();
+    expect(mockInvoke).toHaveBeenCalledWith("submit_review", {
       reviewId: a.id,
+      headSha: a.headSha,
+      verdict: "requestChanges",
+      summary: "Please add a test.",
     });
     expect(useReviewStore.getState().reviews[0].status).toBe("waitingOnAuthor");
-    expect(useReviewStore.getState().marking).toBeNull();
+    expect(useReviewStore.getState().approving).toBeNull();
+    // Not an approval: nothing lingers.
+    expect(useReviewStore.getState().justApproved).toEqual({});
     expect(useToastStore.getState().toasts).toMatchObject([
       {
         kind: "success",
-        message: `Marked acme-fixture/widgets#${a.number} reviewed`,
+        message: `Requested changes on acme-fixture/widgets#${a.number} at ${a.headSha.slice(0, 7)}`,
       },
+    ]);
+    // A blank summary goes as none.
+    await useReviewStore.getState().submit(a.id, a.headSha, "approve", "  ");
+    expect(mockInvoke).toHaveBeenLastCalledWith("list_reviews");
+    expect(mockInvoke).toHaveBeenCalledWith("submit_review", {
+      reviewId: a.id,
+      headSha: a.headSha,
+      verdict: "approve",
+      summary: null,
+    });
+  });
+
+  it("keeps an approved review in its tab for a moment, then lets it go", async () => {
+    vi.useFakeTimers();
+    try {
+      const approved = {
+        ...a,
+        status: "approved" as const,
+        approvedAt: "2026-10-16T12:00:00Z",
+      };
+      // The list leaves approved reviews out, as the backend's does.
+      mockInvoke.mockImplementation((cmd: string) =>
+        Promise.resolve(cmd === "submit_review" ? approved : [b, c]),
+      );
+      await useReviewStore.getState().approve(a.id, a.headSha);
+      const inTab = () => {
+        const s = useReviewStore.getState();
+        return reviewsInTab(s.reviews, "needsReview", s.justApproved).map(
+          (r) => r.title,
+        );
+      };
+      expect(inTab()).toEqual(["A", "B"]);
+      vi.advanceTimersByTime(APPROVED_LINGER_MS - 1);
+      expect(inTab()).toEqual(["A", "B"]);
+      vi.advanceTimersByTime(1);
+      expect(inTab()).toEqual(["B"]);
+
+      // Later the platform drops the approval: back in a tab as usual.
+      useReviewStore.setState({
+        reviews: [{ ...a, status: "needsReReview", approvedAt: null }, b, c],
+      });
+      const s = useReviewStore.getState();
+      expect(
+        reviewsInTab(s.reviews, "needsReReview", s.justApproved).map(
+          (r) => r.title,
+        ),
+      ).toEqual(["A"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed submit keeps the review where it is", async () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === "submit_review"
+        ? Promise.reject({
+            kind: "unsupported",
+            message:
+              "Your GitLab doesn't support requesting changes via the API",
+          })
+        : Promise.resolve([a, b, c]),
+    );
+    const err = await useReviewStore
+      .getState()
+      .submit(a.id, a.headSha, "requestChanges");
+    expect(err).toMatchObject({ kind: "unsupported" });
+    expect(useReviewStore.getState().justApproved).toEqual({});
+    expect(useToastStore.getState().toasts).toMatchObject([
+      { kind: "error", message: "Could not submit the review" },
     ]);
   });
 
@@ -242,7 +328,7 @@ describe("reviewStore", () => {
   it("a second approval while one runs is refused, not reported done", async () => {
     let finish: (v: unknown) => void = () => {};
     mockInvoke.mockImplementation((cmd: string) =>
-      cmd === "approve_review"
+      cmd === "submit_review"
         ? new Promise((r) => (finish = r))
         : Promise.resolve([a, b, c]),
     );

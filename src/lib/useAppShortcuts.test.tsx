@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { invoke } from "@tauri-apps/api/core";
 
 import { useCommentStore } from "../state/commentStore";
+import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { review } from "../test/fixtures";
@@ -72,6 +73,27 @@ describe("useAppShortcuts", () => {
       body: "",
     });
     expect(vi.mocked(invoke)).not.toHaveBeenCalled();
+  });
+
+  it("⇧S opens Submit review for the open review; it posts nothing", () => {
+    renderHook(() => useAppShortcuts());
+    // No review open: left alone.
+    expect(
+      press({ key: "S", code: "KeyS", shiftKey: true }).defaultPrevented,
+    ).toBe(false);
+    useReviewStore.setState({ selectedId: a.id });
+    expect(
+      press({ key: "S", code: "KeyS", shiftKey: true }).defaultPrevented,
+    ).toBe(true);
+    expect(useOverlayStore.getState().confirm).toEqual({
+      kind: "submit",
+      reviewId: a.id,
+    });
+    expect(vi.mocked(invoke)).not.toHaveBeenCalledWith(
+      "submit_review",
+      expect.anything(),
+    );
+    useOverlayStore.getState().closeConfirm();
   });
 
   it("moves through the list, opens and switches lists", () => {

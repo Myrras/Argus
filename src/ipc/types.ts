@@ -28,6 +28,22 @@ export type ReviewStatus =
   | "closedWithoutApproval"
   | "approved";
 
+/**
+ * `provider::MyReviewState`: the user's own review state on the platform
+ * (GitLab's reviewer state; GitHub's review request and latest review). It
+ * decides whether a review waits on the user.
+ */
+export type MyReviewState =
+  | "awaitingReview"
+  | "reviewStarted"
+  | "requestedChanges"
+  | "commented"
+  | "approved"
+  | "notReviewer";
+
+/** `provider::ReviewVerdict`: what Submit review sets ("comment": GitHub). */
+export type ReviewVerdict = "approve" | "requestChanges" | "comment";
+
 /** `review::RoundReason`: why a review needs the user again. */
 export type RoundReason = "newCommits" | "authorReplied" | "reRequested";
 
@@ -65,6 +81,10 @@ export interface ReviewRecord {
   untouchedThreads: number;
   requested: boolean;
   rerequestedAt: Timestamp | null;
+  myReviewState: MyReviewState;
+  /** The user's latest review submitted on the platform, and its head. */
+  myReviewedAt: Timestamp | null;
+  myReviewedSha: string | null;
   listed: boolean;
   /** The user's username on this review's platform. */
   viewer: string;
@@ -234,7 +254,9 @@ export type PostErrorKind =
   /** The line is not (any more) in the current diff. */
   | "lineNotInDiff"
   /** The review got new commits between reading and writing. */
-  | "headMoved";
+  | "headMoved"
+  /** The platform has no API for it (requesting changes before GitLab 17.2). */
+  | "unsupported";
 
 /** `post::PostError`: `{ kind, message }`, the shape of `IpcError`. */
 export interface PostError {

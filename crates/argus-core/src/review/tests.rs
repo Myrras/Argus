@@ -1,4 +1,5 @@
 use super::*;
+use crate::provider::MyReviewState;
 use crate::testutil::{at, detail, note, thread, AUTHOR, ME};
 
 const OTHER: &str = "dana-fixture";
@@ -319,6 +320,9 @@ fn untouched_threads_with_line_walks() {
         threads: &all,
         me: ME,
         seen_at: None,
+        my_state: MyReviewState::NotReviewer,
+        platform_reviewed_sha: None,
+        platform_reviewed_at: None,
     };
 
     // Watermark h1, head h3: the walk says thread 1's lines were left
@@ -523,6 +527,9 @@ fn a_note_written_over_an_older_view_answers_only_what_that_view_showed() {
         threads: &threads,
         me: ME,
         seen_at,
+        my_state: MyReviewState::NotReviewer,
+        platform_reviewed_sha: None,
+        platform_reviewed_at: None,
     };
     let unseen = classify(&input(Some(at(11, 0))));
     assert_eq!(unseen.reasons, [RoundReason::AuthorReplied]);
@@ -626,6 +633,9 @@ fn the_untouched_count_agrees_with_a_reply_kept_unanswered() {
         threads: &threads,
         me: ME,
         seen_at: None,
+        my_state: MyReviewState::NotReviewer,
+        platform_reviewed_sha: None,
+        platform_reviewed_at: None,
     };
     // Read as the notes say, the 11:08 note answered the reply.
     assert_eq!(untouched_agreeing(&input, &[], None), 1);
@@ -645,4 +655,174 @@ fn the_untouched_count_agrees_with_a_reply_kept_unanswered() {
         untouched_agreeing(&input, &[RoundReason::AuthorReplied], None),
         0
     );
+}
+
+// ------------------------------------------- the platform's reviewer state
+
+/// A fetch where the platform has the user's review in `state`.
+fn with_state(head: &str, state: MyReviewState) -> ReviewDetail {
+    let mut d = detail(head);
+    d.my_review_state = state;
+    d.requested_from_me = state.owes_review();
+    d
+}
+
+#[test]
+fn awaiting_review_with_no_review_given_needs_review() {
+    let d = with_state("h1", MyReviewState::AwaitingReview);
+    let r = step(None, &d, &[], at(10, 10));
+    assert_eq!(r.status, ReviewStatus::NeedsReview);
+    assert!(r.round_reasons.is_empty());
+    assert_eq!(r.my_review_state, MyReviewState::AwaitingReview);
+    // Posting (or an old local mark) moves Argus' watermark, but the
+    // platform still owes the first review: it stays "Needs review".
+    let marked = mark_reviewed(&r, &[], at(10, 12));
+    assert_eq!(marked.status, ReviewStatus::NeedsReview);
+    let again = step(Some(&marked), &d, &[], at(10, 13));
+    assert_eq!(again.status, ReviewStatus::NeedsReview);
+    assert!(again.is_active());
+}
+
+/// !15210: marked reviewed locally at the head, requested at both fetches
+/// (so no false→true edge), and GitLab's "requested review from @me" note
+/// dated after the mark. It needs the user again, whatever the watermark.
+#[test]
+fn a_re_request_after_the_watermark_needs_re_review_without_an_edge() {
+    let mut d = with_state("h1", MyReviewState::AwaitingReview);
+    // The first request, before anything of the user's.
+    d.review_requested_at = Some(at(10, 9));
+    let first = step(None, &d, &[], at(10, 10));
+    assert_eq!(first.status, ReviewStatus::NeedsReview);
+    let marked = mark_reviewed(&first, &[], at(10, 11));
+    assert_eq!(marked.last_reviewed_sha.as_deref(), Some("h1"));
+    assert_eq!(marked.status, ReviewStatus::NeedsReview);
+
+    // Re-requested at 11:00 the next day: still requested, same head.
+    d.review_requested_at = Some(at(11, 11));
+    let next = step(Some(&marked), &d, &[], at(11, 12));
+    assert!(marked.requested && next.requested, "no transition to catch");
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::ReRequested]);
+    assert_eq!(next.rerequested_at, Some(at(11, 11)));
+    assert_eq!(next.round, 2);
+    // It stays so on later polls, and the round does not count up again.
+    let later = step(Some(&next), &d, &[], at(11, 15));
+    assert_eq!(later.status, ReviewStatus::NeedsReReview);
+    assert_eq!(later.round, 2);
+}
+
+#[test]
+fn owed_again_after_a_review_on_the_platform_needs_re_review() {
+    // GitHub: the user commented on h1 on the 10th, the author pushed h2
+    // and asked again. No local watermark at all.
+    let mut d = with_state("h2", MyReviewState::AwaitingReview);
+    d.my_reviewed_at = Some(at(10, 12));
+    d.my_reviewed_sha = Some("h1".into());
+    let r = step(None, &d, &[], at(11, 9));
+    assert_eq!(r.status, ReviewStatus::NeedsReReview);
+    assert_eq!(
+        r.round_reasons,
+        [RoundReason::NewCommits, RoundReason::ReRequested]
+    );
+    // The same head as reviewed: re-requested only.
+    let mut same = d.clone();
+    same.head_sha = "h1".into();
+    let r = step(None, &same, &[], at(11, 9));
+    assert_eq!(r.round_reasons, [RoundReason::ReRequested]);
+}
+
+#[test]
+fn changes_requested_on_the_platform_wait_on_the_author_until_new_commits() {
+    // Requested on GitLab itself at h1, 10-10 12:00; Argus never marked it.
+    let mut d = with_state("h1", MyReviewState::RequestedChanges);
+    d.my_reviewed_at = Some(at(10, 12));
+    d.my_reviewed_sha = Some("h1".into());
+    let r = step(None, &d, &[], at(10, 13));
+    assert_eq!(r.status, ReviewStatus::WaitingOnAuthor);
+    assert!(r.is_active());
+    assert_eq!(r.last_reviewed_sha, None, "Argus' own watermark untouched");
+
+    // The author pushes h2: re-review, for the new commits.
+    let mut pushed = d.clone();
+    pushed.head_sha = "h2".into();
+    let next = step(Some(&r), &pushed, &[], at(11, 9));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::NewCommits]);
+
+    // Or the author answers in the user's thread after that review.
+    let mine = thread(
+        "1",
+        ME,
+        "h1",
+        vec![note("1", ME, at(10, 11)), note("2", AUTHOR, at(10, 14))],
+    );
+    let replied = step(Some(&r), &d, &[mine], at(10, 15));
+    assert_eq!(replied.status, ReviewStatus::NeedsReReview);
+    assert_eq!(replied.round_reasons, [RoundReason::AuthorReplied]);
+}
+
+#[test]
+fn the_later_of_argus_and_the_platform_is_the_watermark() {
+    // Marked in Argus at h1 (10-10 10:00); later commented on GitHub at h2.
+    let (r, _) = reviewed();
+    let mut d = with_state("h2", MyReviewState::Commented);
+    d.my_reviewed_at = Some(at(11, 9));
+    d.my_reviewed_sha = Some("h2".into());
+    let next = step(Some(&r), &d, &[], at(11, 10));
+    assert_eq!(next.status, ReviewStatus::WaitingOnAuthor);
+    // An older platform review leaves Argus' newer watermark in charge.
+    let mut older = with_state("h2", MyReviewState::Commented);
+    older.my_reviewed_at = Some(at(9, 9));
+    older.my_reviewed_sha = Some("h0".into());
+    let next = step(Some(&r), &older, &[], at(11, 10));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(next.round_reasons, [RoundReason::NewCommits]);
+}
+
+#[test]
+fn a_verdict_without_a_date_waits_on_the_author() {
+    let d = with_state("h1", MyReviewState::Commented);
+    let r = step(None, &d, &[], at(10, 10));
+    assert_eq!(r.status, ReviewStatus::WaitingOnAuthor);
+    let d = with_state("h1", MyReviewState::NotReviewer);
+    assert_eq!(
+        step(None, &d, &[], at(10, 10)).status,
+        ReviewStatus::NeedsReview
+    );
+}
+
+#[test]
+fn an_approval_leaves_and_comes_back_when_reset() {
+    let mut d = with_state("h1", MyReviewState::Approved);
+    d.approved_by_me = true;
+    d.my_reviewed_at = Some(at(10, 12));
+    d.my_reviewed_sha = Some("h1".into());
+    let approved = step(None, &d, &[], at(10, 13));
+    assert_eq!(approved.status, ReviewStatus::Approved);
+    assert!(!approved.is_active());
+
+    // A push resets the approval and asks again: back in the lists.
+    let mut reset = with_state("h2", MyReviewState::AwaitingReview);
+    reset.my_reviewed_at = Some(at(10, 12));
+    reset.my_reviewed_sha = Some("h1".into());
+    let back = step(Some(&approved), &reset, &[], at(11, 9));
+    assert_eq!(back.approved_at, None);
+    assert_eq!(back.status, ReviewStatus::NeedsReReview);
+    assert_eq!(
+        back.round_reasons,
+        [RoundReason::NewCommits, RoundReason::ReRequested]
+    );
+    assert!(back.is_active());
+}
+
+#[test]
+fn the_request_time_never_moves_back() {
+    let mut d = with_state("h1", MyReviewState::AwaitingReview);
+    d.review_requested_at = Some(at(11, 9));
+    let r = step(None, &d, &[], at(11, 10));
+    assert_eq!(r.rerequested_at, Some(at(11, 9)));
+    // A later read that dates nothing (the notes failed) keeps it.
+    d.review_requested_at = None;
+    let next = step(Some(&r), &d, &[], at(11, 11));
+    assert_eq!(next.rerequested_at, Some(at(11, 9)));
 }

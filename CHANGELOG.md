@@ -18,8 +18,8 @@ when it merges.
   the `gh` CLI and a GitLab token kept in the system keychain. Four tabs with
   counts: Needs review, Needs re-review, Waiting on author, and Closed without
   my approval. Each item shows its platform, repository and number, title,
-  author and age; right-click one to open it, copy its link or mark its round
-  reviewed (the menu also works with the arrow keys). The window has the same floating-panel look as Podium and Iris,
+  author and age; right-click one to open it, copy its link or submit your
+  review (the menu also works with the arrow keys). The window has the same floating-panel look as Podium and Iris,
   with a resizable sidebar and dark, light and retro themes.
 - Review rounds: Argus remembers where you last reviewed each item. Items that
   need another look say why (new commits, the author replied, or your review
@@ -27,8 +27,14 @@ when it merges.
   Threads you started or replied in count as yours: they are shown first,
   tracked for rounds (a reply after your last comment there counts, and so
   does one you had not seen yet when you posted from Argus) and judged by
-  the AI. "Mark round reviewed" moves the item to Waiting on
-  author, with a confirmation; items you approved drop off the list.
+  the AI. Your review state on GitHub or GitLab decides the tabs: while
+  the platform says your review is owed ("Awaiting review", a pending
+  review request) the item is in Needs review, or in Needs re-review
+  (re-requested) once you reviewed it before, also when the re-request came
+  without anything else changing. After you request changes or comment it
+  waits on the author until new commits or a reply; reviews you give on
+  GitHub or GitLab itself count too. Items you approved drop off the list
+  and come back when the approval is reset.
 - A detail view per review, on one scrolling page like a platform's "Files
   changed" tab combined with its conversation, better organised: its title,
   a link that opens it in the browser, status and round, then a
@@ -46,8 +52,8 @@ when it merges.
   Conversation. Each thread on code can expand its then/now history in
   place. Viewed marks are kept per review and clear when the file changes
   again, with "N of M files viewed" above the page. From the second round,
-  "Since my last review" shows only what changed since you last marked a
-  round reviewed. Binary files and very large diffs stay folded ("Load
+  "Since my last review" shows only what changed since you last reviewed in
+  Argus. Binary files and very large diffs stay folded ("Load
   anyway"), and files load as you scroll to them. `j`/`k` move through the
   Conversation and the files, `v` marks the selected file viewed.
 - Commenting from the diff: hover a line to see its `+` (only on lines the
@@ -68,11 +74,18 @@ when it merges.
   can resolve, also in the command palette. If the platform refuses (some
   GitLab setups only let the author or a maintainer resolve), its reason
   shows and the thread stays as it was.
-- Approving: an Approve button in the review header, separate from posting,
-  asks first and names the commit you are approving. If the review got new
-  commits since you looked, the approval is refused so nothing unseen gets
-  approved; pending comments are not posted with it (the dialog says how
-  many). An approved review leaves the lists. Argus never merges.
+- Submit review (the header button, the list's right-click menu, the
+  palette, or ⇧S) replaces "Mark round reviewed": choose Approve or Request
+  changes (on GitHub also Comment), add an optional summary (markdown, with
+  a Preview) and Argus sets your review state on the platform, at the
+  commit the dialog names. "Post N pending comments with it" sends your
+  pending comments first; if one is refused nothing is submitted and the
+  dialog lists why. If the review got new commits since you looked, the
+  submit is refused so nothing unseen gets judged. Approving also marks
+  every file viewed. An approved review shows "Approved ✓" for a few
+  seconds, then leaves the lists. GitLab needs 17.2 or later to request
+  changes; an older one says so before anything is sent. Argus never
+  merges.
 - Comments render as markdown: headings, lists, task lists, tables, quotes,
   links (they open in your browser, relative ones such as GitLab
   attachments resolved against the review) and code blocks highlighted by language
@@ -174,8 +187,8 @@ when it merges.
   (in the review list they still move the cursor, in the code they still
   pick a line); `s` resolves or reopens the focused thread.
 - Command palette (⌘K / Ctrl+K): every action with its shortcut, plus Go to
-  review… and Go to file…. Approve… and Post all… still ask before anything
-  is sent.
+  review… and Go to file…. Submit review…, Approve… and Post all… still ask
+  before anything is sent.
 - `?` shows all keyboard shortcuts and where they work.
 - Refresh is now ⇧R (or ⌘R / Ctrl+R): plain `r` replies to the focused
   thread. If you set your own Refresh key, it still works.
