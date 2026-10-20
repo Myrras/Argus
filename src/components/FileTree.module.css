@@ -99,3 +99,19 @@
   flex-shrink: 0;
   color: var(--accent);
 }
+
+/* Open in editor: on the row under the pointer or with the focus. */
+.fileAction {
+  display: none;
+  flex-shrink: 0;
+}
+
+.fileAction:empty {
+  display: none !important;
+}
+
+.fileItem:hover .fileAction,
+.fileItem:focus-within .fileAction,
+.fileItem[data-selected="true"] .fileAction {
+  display: inline-flex;
+}

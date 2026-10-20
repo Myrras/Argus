@@ -4,6 +4,9 @@
  * folders with single-child chains compacted, or a flat path list. Per file
  * its status, +/− counts, thread count (accent when some are the user's) and
  * a Viewed checkbox. Selecting an entry scrolls the page to it.
+ *
+ * Open in editor: `fileAction` renders a per-file button (shown on hover or
+ * focus, `OpenInEditorButton`) and `onFileContextMenu` the file menu.
  */
 
 import { useState } from "react";
@@ -30,6 +33,10 @@ export interface FileTreeProps {
     selected: boolean;
     onSelect: () => void;
   };
+  /** A per-file action before the Viewed box (Open in editor). */
+  fileAction?: (file: FileEntry) => React.ReactNode;
+  /** Right-click on a file row (the Open in editor menu). */
+  onFileContextMenu?: (file: FileEntry, e: React.MouseEvent) => void;
 }
 
 export function FileTree(props: FileTreeProps) {
@@ -140,6 +147,8 @@ function FileRow({
   counts,
   onSelect,
   onToggleViewed,
+  fileAction,
+  onFileContextMenu,
 }: FileTreeProps & { file: FileEntry; depth: number; label: string }) {
   const count = counts.get(f.path) ?? { total: 0, mine: 0 };
   const isSelected = selected === f.path;
@@ -150,6 +159,9 @@ function FileRow({
       className={styles.fileItem}
       data-selected={isSelected}
       data-viewed={f.viewed}
+      onContextMenu={
+        onFileContextMenu ? (e) => onFileContextMenu(f, e) : undefined
+      }
     >
       <button
         type="button"
@@ -163,6 +175,7 @@ function FileRow({
         <ThreadCount {...count} />
         <LineStats additions={f.additions} deletions={f.deletions} />
       </button>
+      {fileAction && <span className={styles.fileAction}>{fileAction(f)}</span>}
       <input
         type="checkbox"
         className={styles.viewed}

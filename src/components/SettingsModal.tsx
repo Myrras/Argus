@@ -10,6 +10,9 @@
  *   `update_settings`; the dialog only shows whether one is stored.
  * - AI: analysis on/off, and the local clone per repository (cards in Iris's
  *   Editors look, the folder picked with the native dialog).
+ * - Editors: which application opens a review's file from its local clone
+ *   (Open in editor): a default editor and per-extension overrides, Iris's
+ *   Editors tab (`editorOverrides`, `defaultEditor` in `settings.json`).
  * - Shortcuts: rebind the keyboard shortcuts (`ShortcutsTab`, `lib/keymap`).
  *
  * The family's save model: switches and steppers apply at once; text fields
@@ -29,6 +32,14 @@ import {
   withClone,
   withoutClone,
 } from "../lib/clonePaths";
+import {
+  appName,
+  normalizeExtension,
+  overrideError,
+  withOverride,
+  withoutOverride,
+} from "../lib/editorOverrides";
+import { isMac, isWindows } from "../lib/platform";
 import {
   HTTP_TOKEN_NOTE,
   INSECURE_NOTE,
@@ -62,6 +73,7 @@ const TABS: [SettingsTabId, string][] = [
   ["github", "GitHub"],
   ["gitlab", "GitLab"],
   ["ai", "AI"],
+  ["editors", "Editors"],
   ["shortcuts", "Shortcuts"],
 ];
 
@@ -188,6 +200,8 @@ function TabBody({ tab }: { tab: SettingsTabId }) {
           <ClonesSection />
         </>
       );
+    case "editors":
+      return <EditorsTab />;
     case "shortcuts":
       return <ShortcutsTab />;
   }
@@ -724,6 +738,226 @@ function ClonesSection() {
             Add clone
           </button>
         </div>
+      )}
+    </section>
+  );
+}
+
+// -- Editors (Open in editor), ported from Iris's Editors tab ----------------
+
+/** The row being added (`original` null) or edited. */
+interface EditorDraft {
+  original: string | null;
+  ext: string;
+  app: string;
+}
+
+/** Native picker for an application: `.app` bundles on macOS, `.exe` on Windows. */
+async function pickApplication(): Promise<string | null> {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({
+    multiple: false,
+    directory: false,
+    title: "Choose an application",
+    defaultPath: isMac ? "/Applications" : undefined,
+    filters: isMac
+      ? [{ name: "Applications", extensions: ["app"] }]
+      : isWindows
+        ? [{ name: "Programs", extensions: ["exe"] }]
+        : undefined,
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+function EditorsTab() {
+  const settings = useBackendSettingsStore((s) => s.settings);
+  const save = useBackendSettingsStore((s) => s.save);
+  const [draft, setDraft] = useState<EditorDraft | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const overrides = settings?.editorOverrides ?? {};
+  const rows = Object.entries(overrides).sort(([a], [b]) => a.localeCompare(b));
+  const defaultEditor = settings?.defaultEditor ?? null;
+
+  const edit = (next: EditorDraft | null) => {
+    setDraft(next);
+    setError(null);
+  };
+  const choose = async () => {
+    if (!draft) return;
+    try {
+      const app = await pickApplication();
+      if (app) setDraft({ ...draft, app });
+    } catch (e) {
+      setError(toIpcError(e).message);
+    }
+  };
+  const chooseDefault = async () => {
+    try {
+      const app = await pickApplication();
+      if (app) void save({ defaultEditor: app });
+    } catch (e) {
+      setError(toIpcError(e).message);
+    }
+  };
+  const submit = () => {
+    if (!draft) return;
+    const ext = normalizeExtension(draft.ext);
+    const problem = overrideError(ext, draft.app, overrides, draft.original);
+    if (problem) {
+      setError(problem);
+      return;
+    }
+    edit(null);
+    void save({
+      editorOverrides: withOverride(overrides, ext, draft.app, draft.original),
+    });
+  };
+
+  return (
+    <section className={styles.section}>
+      <h3 className={styles.sectionLabel}>Editors</h3>
+      <small className={styles.rowHelp}>
+        Open in editor opens a review&apos;s file from your local clone
+        (Settings → AI) in the application set for its extension, else the
+        default editor, else your system&apos;s default app.
+      </small>
+      <div className={styles.card}>
+        <div className={styles.cardHeader}>
+          <span className={styles.cardName}>Default editor</span>
+          <span
+            className={styles.cardDetail}
+            title={defaultEditor ?? undefined}
+          >
+            {defaultEditor ? appName(defaultEditor) : "System default"}
+          </span>
+          <div className={`${styles.cardActions} ${styles.pushRight}`}>
+            <button
+              type="button"
+              disabled={!settings}
+              aria-label="Choose the default editor"
+              onClick={() => void chooseDefault()}
+            >
+              Choose…
+            </button>
+            {defaultEditor && (
+              <button
+                type="button"
+                aria-label="Use the system default"
+                onClick={() => void save({ defaultEditor: null })}
+              >
+                Reset
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+      {settings && rows.length === 0 && !draft && (
+        <p className={styles.empty}>No editors per extension set.</p>
+      )}
+      {rows.map(([ext, app]) => (
+        <div key={ext} className={styles.card}>
+          <div className={styles.cardHeader}>
+            <span className={styles.cardName}>.{ext}</span>
+            <span className={styles.cardDetail} title={app}>
+              {appName(app)}
+            </span>
+            <div className={`${styles.cardActions} ${styles.pushRight}`}>
+              <button
+                type="button"
+                aria-label={`Edit the .${ext} editor`}
+                onClick={() => edit({ original: ext, ext, app })}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                aria-label={`Remove the .${ext} editor`}
+                onClick={() =>
+                  void save({
+                    editorOverrides: withoutOverride(overrides, ext),
+                  })
+                }
+              >
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      ))}
+      {draft ? (
+        <form
+          className={styles.card}
+          aria-label={draft.original ? "Edit editor" : "New editor"}
+          onSubmit={(e) => {
+            e.preventDefault();
+            submit();
+          }}
+        >
+          <span className={styles.cardName}>
+            {draft.original ? `Edit .${draft.original}` : "New editor"}
+          </span>
+          <div className={styles.field}>
+            <label htmlFor="editor-ext">Extension</label>
+            <input
+              id="editor-ext"
+              type="text"
+              value={draft.ext}
+              placeholder="md"
+              autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              onChange={(e) => setDraft({ ...draft, ext: e.target.value })}
+            />
+          </div>
+          <div className={styles.field}>
+            <label htmlFor="editor-app">Application</label>
+            <div className={styles.fieldRow}>
+              <input
+                id="editor-app"
+                type="text"
+                readOnly
+                value={draft.app}
+                placeholder="Not chosen"
+                title={draft.app}
+              />
+              <button type="button" onClick={() => void choose()}>
+                Choose…
+              </button>
+            </div>
+          </div>
+          {error && (
+            <p className={styles.error} role="alert">
+              {error}
+            </p>
+          )}
+          <div className={styles.editActions}>
+            <button type="button" onClick={() => edit(null)}>
+              Cancel
+            </button>
+            <button type="submit" className="primary">
+              Save
+            </button>
+          </div>
+        </form>
+      ) : (
+        <>
+          {error && (
+            <p className={styles.error} role="alert">
+              {error}
+            </p>
+          )}
+          <div className={styles.editActions}>
+            <button
+              type="button"
+              disabled={!settings}
+              onClick={() => edit({ original: null, ext: "", app: "" })}
+            >
+              Add editor
+            </button>
+          </div>
+        </>
       )}
     </section>
   );

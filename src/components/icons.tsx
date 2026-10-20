@@ -20,6 +20,7 @@ import {
   CircleCheck,
   Copy,
   ExternalLink,
+  FilePenLine,
   FileSymlink,
   FileX,
   FolderTree,
@@ -111,3 +112,6 @@ export const LinesRemovedIcon = icon(ListX);
 export const FileGoneIcon = icon(FileX);
 export const ResolvedIcon = icon(CircleCheck);
 export const UnresolvedIcon = icon(RotateCcw);
+
+// Open in editor: a review's file from the local clone.
+export const OpenInEditorIcon = icon(FilePenLine, { size: 13 });

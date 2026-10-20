@@ -84,8 +84,9 @@ describe("SettingsModal — Shortcuts tab", () => {
   it("takes a bare key, unlike Iris (Argus has no type-to-select)", () => {
     renderTab();
     record("Open review");
-    press({ key: "o", code: "KeyO" });
-    expect(keys("Open review")).toEqual(["O"]);
+    // A key no action uses (O opens the file in the editor).
+    press({ key: "y", code: "KeyY" });
+    expect(keys("Open review")).toEqual(["Y"]);
   });
 
   it("records Option combinations by the physical key", () => {
@@ -157,12 +158,12 @@ describe("SettingsModal — Shortcuts tab", () => {
     record("Refresh");
     press({ key: "j", code: "KeyJ", metaKey: true });
     record("Open review");
-    press({ key: "o", code: "KeyO" });
+    press({ key: "y", code: "KeyY" });
     expect(screen.getByRole("button", { name: "Reset all" })).toBeEnabled();
 
     fireEvent.click(reset("Refresh"));
     expect(keys("Refresh")).toEqual(["⇧R", "⌘R"]);
-    expect(stored()).toEqual({ openReview: ["KeyO"] });
+    expect(stored()).toEqual({ openReview: ["KeyY"] });
 
     fireEvent.click(screen.getByRole("button", { name: "Reset all" }));
     expect(keys("Open review")).toEqual(["↩"]);

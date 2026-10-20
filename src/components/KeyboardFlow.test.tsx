@@ -24,6 +24,7 @@ import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useHistoryStore } from "../state/historyStore";
+import { useLocalFileStore } from "../state/localFileStore";
 import { useOverlayStore } from "../state/overlayStore";
 import { useReviewStore } from "../state/reviewStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
@@ -381,5 +382,45 @@ describe("ShortcutHelp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Change shortcuts…" }));
     expect(useOverlayStore.getState().open).toBeNull();
     expect(useSettingsRequestStore.getState().request).toBe("shortcuts");
+  });
+});
+
+describe("Open in editor in the palette and the help", () => {
+  it("is listed with its key and opens the focused file", async () => {
+    useLocalFileStore.setState({
+      byReview: {
+        [r.id]: {
+          "src/cache.rs": {
+            path: "src/cache.rs",
+            absolutePath: "/Users/fixture/widgets/src/cache.rs",
+            exists: true,
+            cloneHead: null,
+            matchesReviewHead: false,
+          },
+        },
+      },
+    });
+    useFocusStore.setState({ item: { kind: "file", path: "src/cache.rs" } });
+    render(<Shell />);
+    const field = openPalette();
+    fireEvent.change(field, { target: { value: "open in editor" } });
+    const first = screen.getAllByRole("option")[0];
+    expect(first).toHaveTextContent("Open in editor");
+    expect(within(first).getByText("O")).toBeInTheDocument();
+    fireEvent.keyDown(field, { key: "Enter" });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("open_in_editor", {
+        reviewId: r.id,
+        path: "src/cache.rs",
+        useDefault: false,
+      }),
+    );
+    noWrites();
+
+    press({ key: "?", code: "Slash", shiftKey: true });
+    const help = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+    const review = within(help).getByRole("region", { name: "In a review" });
+    expect(within(review).getByText("Open in editor")).toBeVisible();
+    expect(within(review).getByText("Show in Finder / Explorer")).toBeVisible();
   });
 });

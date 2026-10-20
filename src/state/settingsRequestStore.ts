@@ -8,11 +8,11 @@ import { create } from "zustand";
 
 /**
  * Settings tabs: General (theme, reduced motion, refresh interval), GitHub
- * and GitLab (the providers), AI (analysis and local clones) and Shortcuts
- * (rebindable keys).
+ * and GitLab (the providers), AI (analysis and local clones), Editors (which
+ * app opens a clone's file) and Shortcuts (rebindable keys).
  */
 export type SettingsTabId =
-  "general" | "github" | "gitlab" | "ai" | "shortcuts";
+  "general" | "github" | "gitlab" | "ai" | "editors" | "shortcuts";
 
 interface SettingsRequestState {
   request: SettingsTabId | null;

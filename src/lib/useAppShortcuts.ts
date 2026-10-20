@@ -43,6 +43,7 @@ import {
   ownsEnter,
   type ActionId,
 } from "./keymap";
+import { runLocalFileAction } from "./localFiles";
 import { currentKeymap } from "./useKeymap";
 
 /** Inside a dialog (Settings) the keys belong to it. */
@@ -128,7 +129,11 @@ function runFilesAction(
       if (!useAiStore.getState().runs[review]?.enabled) return false;
       return useAiStore.getState().toggleFocused(review);
     default:
-      return runFlowAction(action, review, target, key) ?? false;
+      return (
+        runFlowAction(action, review, target, key) ??
+        runLocalFileAction(action, review) ??
+        false
+      );
   }
 }
 

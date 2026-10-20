@@ -20,6 +20,9 @@
  * AI findings (`aiStore`) sit under their line like threads
  * (`FindingBlock`), or under "AI findings on this file" when their line is
  * not in the diff shown; dismissed ones only with "Show dismissed".
+ *
+ * Open in editor: with a local clone, the header has the editor button
+ * (`OpenInEditorButton`) and right-click opens the file menu.
  */
 
 import {
@@ -70,6 +73,7 @@ import { Badge } from "./Badge";
 import { FileStatusMark, LineStats, ThreadCount } from "./FileStatusMark";
 import { CaretIcon } from "./icons";
 import { ListedThread, ThreadBlock } from "./ThreadBlock";
+import { OpenInEditorButton } from "./OpenInEditorButton";
 import styles from "./FileDiffCard.module.css";
 
 // CodeMirror and its languages load with the first diff, not at startup.
@@ -110,6 +114,7 @@ export const FileDiffCard = memo(function FileDiffCard({
   onSelect: select,
   onToggleViewed: toggleViewed,
   cardRef,
+  onFileContextMenu,
 }: {
   review: ReviewFiles;
   file: FileEntry;
@@ -122,6 +127,8 @@ export const FileDiffCard = memo(function FileDiffCard({
   onSelect: (path: string) => void;
   onToggleViewed: (file: FileEntry) => void;
   cardRef: (path: string, el: HTMLElement | null) => void;
+  /** Right-click on the header (the Open in editor menu). */
+  onFileContextMenu?: (path: string, e: React.MouseEvent) => void;
 }) {
   const onSelect = () => select(f.path);
   const onToggleViewed = () => toggleViewed(f);
@@ -490,7 +497,12 @@ export const FileDiffCard = memo(function FileDiffCard({
       data-path={f.path}
       aria-label={`Diff of ${f.path}`}
     >
-      <header className={styles.header}>
+      <header
+        className={styles.header}
+        onContextMenu={
+          onFileContextMenu ? (e) => onFileContextMenu(f.path, e) : undefined
+        }
+      >
         <button
           type="button"
           className={`ghost ${styles.collapse}`}
@@ -527,6 +539,7 @@ export const FileDiffCard = memo(function FileDiffCard({
         </button>
         <ThreadCount {...count} />
         <LineStats additions={f.additions} deletions={f.deletions} />
+        <OpenInEditorButton reviewId={review.reviewId} path={f.path} />
         <label className={styles.viewed}>
           <input type="checkbox" checked={f.viewed} onChange={onToggleViewed} />
           Viewed

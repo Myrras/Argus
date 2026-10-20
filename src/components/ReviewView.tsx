@@ -25,6 +25,7 @@ import {
 import { filterFiles, orderFiles } from "../lib/fileTree";
 import { formatBinding } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
+import { useLocalFileMenu } from "../lib/useLocalFileMenu";
 import { usePageFocus } from "../lib/usePageFocus";
 import { canDiffSinceLastReview, reviewRef } from "../lib/reviews";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
@@ -35,6 +36,8 @@ import { useThreadStore } from "../state/threadStore";
 import { ConversationCard } from "./ConversationCard";
 import { FileDiffCard } from "./FileDiffCard";
 import { FileTree } from "./FileTree";
+import { OpenInEditorButton } from "./OpenInEditorButton";
+import { useLocalFiles } from "../state/localFileStore";
 import { FileTreeIcon, PanelCloseIcon, PanelOpenIcon } from "./icons";
 import styles from "./ReviewView.module.css";
 
@@ -156,6 +159,24 @@ export function ReviewView({
 
   const viewed = files?.files.filter((f) => f.viewed).length ?? 0;
 
+  // Open in editor: the files in the local clone, when one is set.
+  const localPaths = useMemo(
+    () => files?.files.map((f) => f.path) ?? null,
+    [files],
+  );
+  useLocalFiles(r.id, localPaths, hasClone);
+  const { onContextMenu: onLocalMenu, menu: localMenu } = useLocalFileMenu(
+    r.id,
+  );
+  const fileAction = useCallback(
+    (f: FileEntry) => <OpenInEditorButton reviewId={r.id} path={f.path} />,
+    [r.id],
+  );
+  const onTreeContextMenu = useCallback(
+    (f: FileEntry, e: React.MouseEvent) => onLocalMenu(f.path, e),
+    [onLocalMenu],
+  );
+
   return (
     <div className={styles.view}>
       <aside
@@ -221,6 +242,8 @@ export function ReviewView({
                 onSelect={pick}
                 onToggleViewed={toggleViewed}
                 conversation={conversationEntry}
+                fileAction={fileAction}
+                onFileContextMenu={onTreeContextMenu}
                 empty={
                   !files
                     ? null
@@ -320,11 +343,13 @@ export function ReviewView({
                 onSelect={selectFile}
                 onToggleViewed={toggleViewed}
                 cardRef={setCard}
+                onFileContextMenu={onLocalMenu}
               />
             ))
           )}
         </div>
       </div>
+      {localMenu}
     </div>
   );
 }
