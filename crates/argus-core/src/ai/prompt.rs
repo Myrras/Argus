@@ -402,6 +402,14 @@ impl<'a> OpenPlan<'a> {
         }
     }
 
+    /// The root note only (its code stays): replies go before the code a
+    /// verdict is judged on.
+    fn root_only(&mut self) {
+        let dropped = self.notes.len().saturating_sub(1);
+        self.notes.truncate(1);
+        self.left_out += dropped;
+    }
+
     fn render(&self, nonce: &str) -> String {
         let mut out = String::new();
         let st = self.t.thread;
@@ -489,30 +497,27 @@ impl<'a> OpenPlan<'a> {
     }
 }
 
-/// The ids of `ids` as lines after `note`, at most [`MAX_OMITTED_IDS`],
-/// then how many more.
-fn omitted_list(out: &mut String, note: &str, ids: &[String]) {
+/// The ids of `ids` as lines after `note`, at most `cap`, then how many
+/// more.
+fn omitted_list(out: &mut String, note: &str, ids: &[String], cap: usize) {
     if ids.is_empty() {
         return;
     }
     out.push_str(note);
-    for id in ids.iter().take(MAX_OMITTED_IDS) {
+    for id in ids.iter().take(cap) {
         let _ = writeln!(out, "- {id}");
     }
-    if ids.len() > MAX_OMITTED_IDS {
-        let _ = writeln!(out, "+{} more in threads.json", ids.len() - MAX_OMITTED_IDS);
+    if ids.len() > cap {
+        let _ = writeln!(out, "+{} more in threads.json", ids.len() - cap);
     }
 }
 
 /// What [`omitted_list`] writes for `n` ids of 36 characters, at most.
-fn omitted_len(note: &str, n: usize) -> usize {
+fn omitted_len(note: &str, n: usize, cap: usize) -> usize {
     match n {
         0 => 0,
         n => {
-            note.len()
-                + n.min(MAX_OMITTED_IDS) * "- \n".len()
-                + n.min(MAX_OMITTED_IDS) * 36
-                + if n > MAX_OMITTED_IDS { 40 } else { 0 }
+            note.len() + n.min(cap) * "- \n".len() + n.min(cap) * 36 + if n > cap { 40 } else { 0 }
         }
     }
 }
@@ -520,23 +525,33 @@ fn omitted_len(note: &str, n: usize) -> usize {
 /// The "Your open threads" section's threads: each with its notes cut as in
 /// "Existing threads" (each note at [`MAX_NOTE_CHARS`], the root and the
 /// newest replies within [`MAX_THREAD_NOTES_CHARS`]) and its code at
-/// [`MAX_EXCERPT_CHARS`]. While over `max`: threads shrink to the start of
-/// their root (oldest first), then are left out and listed by id (the agent
-/// may still judge them from threads.json).
+/// [`MAX_EXCERPT_CHARS`]. While over `max`, oldest first: threads lose
+/// their replies (the code a verdict is judged on stays), then shrink to
+/// the start of their root without code, then are left out and listed by
+/// id, every one of them (a verdict is asked for each; the agent judges
+/// them from threads.json).
 fn write_open_threads(out: &mut String, threads: &[ThreadInput<'_>], nonce: &str, max: usize) {
     let mut plans: Vec<OpenPlan<'_>> = threads.iter().map(OpenPlan::new).collect();
     let mut lens: Vec<usize> = plans.iter().map(|p| p.render(nonce).len()).collect();
     let total = |lens: &[usize]| lens.iter().sum::<usize>();
-    for k in 0..plans.len() {
-        if total(&lens) <= max {
-            break;
+    for compact in [false, true] {
+        for k in 0..plans.len() {
+            if total(&lens) <= max {
+                break;
+            }
+            if compact {
+                plans[k].compact = true;
+            } else {
+                plans[k].root_only();
+            }
+            lens[k] = plans[k].render(nonce).len();
         }
-        plans[k].compact = true;
-        lens[k] = plans[k].render(nonce).len();
     }
     let mut omitted: Vec<String> = Vec::new();
+    let all = usize::MAX;
     let mut k = 0;
-    while total(&lens) + omitted_len(OPEN_OMITTED_NOTE, omitted.len()) > max && k < plans.len() {
+    while total(&lens) + omitted_len(OPEN_OMITTED_NOTE, omitted.len(), all) > max && k < plans.len()
+    {
         omitted.push(plans[k].t.thread.thread_id.to_string());
         lens[k] = 0;
         k += 1;
@@ -546,7 +561,7 @@ fn write_open_threads(out: &mut String, threads: &[ThreadInput<'_>], nonce: &str
             out.push_str(&p.render(nonce));
         }
     }
-    omitted_list(out, OPEN_OMITTED_NOTE, &omitted);
+    omitted_list(out, OPEN_OMITTED_NOTE, &omitted, all);
 }
 
 /// Heading of the section with every thread of the review.
@@ -947,7 +962,9 @@ fn write_existing_within(
     // 5. Leave threads out, oldest first (listed by id, up to a cap).
     let mut omitted: Vec<String> = Vec::new();
     let mut k = 0;
-    while total(&lens) + omitted_len(OMITTED_NOTE, omitted.len()) > budget && k < plans.len() {
+    while total(&lens) + omitted_len(OMITTED_NOTE, omitted.len(), MAX_OMITTED_IDS) > budget
+        && k < plans.len()
+    {
         omitted.push(plans[k].1.t.thread.thread_id.to_string());
         lens[k] = 0;
         k += 1;
@@ -966,7 +983,7 @@ fn write_existing_within(
         out.push_str(&b);
     }
     out.push_str(&posted_text);
-    omitted_list(out, OMITTED_NOTE, &omitted);
+    omitted_list(out, OMITTED_NOTE, &omitted, MAX_OMITTED_IDS);
 }
 
 /// Room kept for the line counting left-out posted findings.
@@ -1598,8 +1615,11 @@ mod tests {
         assert!(open.contains(&format!("## threadId: {}", threads[149].thread_id)));
         assert!(open.contains(OPEN_OMITTED_NOTE));
         assert!(open.contains(&format!("- {}", threads[0].thread_id)));
+        // Every omitted thread of the user's is named (a verdict is asked
+        // for each).
         let ids_listed = open.lines().filter(|l| l.starts_with("- ")).count();
-        assert!(ids_listed <= MAX_OMITTED_IDS, "{ids_listed}");
+        let shown = open.matches("## threadId: ").count();
+        assert_eq!(ids_listed + shown, 150);
         // The conversation entries: under "Existing threads" in full, no verdict.
         for c in &threads[150..] {
             assert!(!open.contains(&c.thread_id.to_string()));
@@ -1608,6 +1628,51 @@ mod tests {
                 c.thread_id
             )));
             assert!(existing.contains(&format!("conversation point {}", c.thread.id)));
+        }
+    }
+
+    #[test]
+    fn open_threads_lose_replies_before_their_code_and_every_omitted_one_is_named() {
+        let mut threads = big_threads(30, 4);
+        for t in &mut threads {
+            t.mine = true;
+            t.started_by_me = true;
+        }
+        let inputs = open_threads(&threads, |_| None);
+        assert_eq!(inputs.len(), 30);
+        // Room for every root with its code, not for the replies.
+        let max = 100_000;
+        let mut out = String::new();
+        write_open_threads(&mut out, &inputs, "n0nce", max);
+        assert!(out.len() <= max, "{}", out.len());
+        for t in &threads {
+            let id = &t.thread.id;
+            assert!(out.contains(&format!("+end of hunk {id}")), "code of {id}");
+            assert!(out.contains(&format!("root {id} ")), "root of {id}");
+        }
+        assert!(!out.contains(" […]"), "no root shortened");
+        assert!(!out.contains(&format!("reply {}-", threads[0].thread.id)));
+        assert!(!out.contains(OPEN_OMITTED_NOTE));
+        // No room at all: every thread left out is named, however many.
+        let many = big_threads(60, 1);
+        let mut mine = many.clone();
+        for t in &mut mine {
+            t.mine = true;
+        }
+        let inputs = open_threads(&mine, |_| None);
+        let mut tiny = String::new();
+        write_open_threads(&mut tiny, &inputs, "n0nce", 4_000);
+        assert!(tiny.len() <= 4_000, "{}", tiny.len());
+        assert!(tiny.contains(OPEN_OMITTED_NOTE));
+        let listed = tiny.lines().filter(|l| l.starts_with("- ")).count();
+        assert!(listed > MAX_OMITTED_IDS, "{listed}");
+        for t in &mine {
+            let id = t.thread_id;
+            assert!(
+                tiny.contains(&format!("- {id}")) || tiny.contains(&format!("## threadId: {id}")),
+                "{}",
+                t.thread.id
+            );
         }
     }
 
