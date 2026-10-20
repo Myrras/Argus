@@ -109,6 +109,8 @@ export interface ReplyState {
   body: string;
   busy: boolean;
   error: PostError | null;
+  /** Bumped when Reply is used on an open composer: scroll to it again. */
+  revealSeq?: number;
 }
 
 interface CommentState {
@@ -633,8 +635,17 @@ export const useCommentStore = create<CommentState>((set, get) => {
     },
 
     openReply: (threadId) => {
-      if (get().replies[threadId]) return;
+      const open = get().replies[threadId];
       requestFocus(FOCUS.reply(threadId));
+      if (open) {
+        set((s) => ({
+          replies: {
+            ...s.replies,
+            [threadId]: { ...open, revealSeq: (open.revealSeq ?? 0) + 1 },
+          },
+        }));
+        return;
+      }
       set((s) => ({
         replies: {
           ...s.replies,

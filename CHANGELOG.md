@@ -251,6 +251,8 @@ when it merges.
   to someone else (a mention inside code, like `@Nullable`, is no remark),
   and not a later comment after the author answered someone else, also by
   quote and with a mention ("> their line" then "@carol fixed").
+- Reply on a thread scrolls to the reply field and focuses it, also when the
+  field is already open.
 
 ### Changed
 

@@ -161,3 +161,44 @@ describe("resolving from the thread", () => {
     expect(screen.queryByText("Resolved")).not.toBeInTheDocument();
   });
 });
+
+describe("replying from the thread header", () => {
+  const scroll = vi.fn();
+  const field = () => screen.getByRole("textbox", { name: "Reply" });
+  const replyButton = () =>
+    screen.getByRole("button", { name: /^Reply to bob-fixture/ });
+
+  beforeEach(async () => {
+    scroll.mockReset();
+    Element.prototype.scrollIntoView = scroll;
+    const { useCommentStore } = await import("../state/commentStore");
+    useCommentStore.setState({ replies: {} });
+  });
+
+  it("scrolls to the composer and focuses it", () => {
+    render(<Live id={t.threadId} />);
+    fireEvent.click(replyButton());
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.contexts[0]).toBe(
+      field().closest('[role="group"]')?.parentElement,
+    );
+    expect(field()).toHaveFocus();
+  });
+
+  it("does it again when the composer is already open", () => {
+    render(<Live id={t.threadId} />);
+    fireEvent.click(replyButton());
+    (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.click(replyButton());
+    expect(scroll).toHaveBeenCalledTimes(2);
+    expect(field()).toHaveFocus();
+  });
+
+  it("does not scroll again while typing", () => {
+    render(<Live id={t.threadId} />);
+    fireEvent.click(replyButton());
+    fireEvent.change(field(), { target: { value: "looks good" } });
+    fireEvent.change(field(), { target: { value: "looks good to me" } });
+    expect(scroll).toHaveBeenCalledTimes(1);
+  });
+});

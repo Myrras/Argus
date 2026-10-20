@@ -171,7 +171,6 @@ export function ThreadBlock({
           type="button"
           className={`ghost ${styles.history}`}
           aria-label={`Reply to ${t.author}'s thread`}
-          disabled={replying && open}
           onClick={reply}
         >
           Reply

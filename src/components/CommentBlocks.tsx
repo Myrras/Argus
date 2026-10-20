@@ -11,9 +11,11 @@
  * - `ReplyComposer`: a thread's reply composer.
  */
 
+import { useEffect, useRef } from "react";
+
 import type { ReviewId, ThreadId } from "../ipc/types";
 import { rangeLabel } from "../lib/commentRanges";
-import { FOCUS } from "../lib/focusRequests";
+import { FOCUS, takeFocus } from "../lib/focusRequests";
 import { useCommentStore } from "../state/commentStore";
 import { Badge } from "./Badge";
 import { CommentComposer } from "./CommentComposer";
@@ -155,9 +157,32 @@ export function ReplyComposer({
   const setBody = useCommentStore((s) => s.setReplyBody);
   const close = useCommentStore((s) => s.closeReply);
   const send = useCommentStore((s) => s.sendReply);
+  const box = useRef<HTMLDivElement>(null);
+  const seq = r?.revealSeq ?? 0;
+  const seen = useRef<number | null>(null);
+  // Scroll to the composer once when it opens (only on a pending request,
+  // so a widget remount stays put) and again on each Reply click while it
+  // is open. The scroll container is the page's diff column; the browser
+  // walks up out of the CodeMirror widget by itself.
+  useEffect(() => {
+    const first = seen.current === null;
+    const changed = !first && seen.current !== seq;
+    seen.current = seq;
+    if (!r || (first ? !takeFocus(FOCUS.reply(threadId)) : !changed)) return;
+    const reduce =
+      document.documentElement.dataset.reduceMotion === "true" ||
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    box.current?.scrollIntoView?.({
+      block: "nearest",
+      behavior: reduce ? "auto" : "smooth",
+    });
+    box.current?.querySelector("textarea")?.focus({ preventScroll: true });
+    // Keyed on the request counter and the composer's presence only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seq, !!r]);
   if (!r) return null;
   return (
-    <div className={styles.reply}>
+    <div className={styles.reply} ref={box}>
       <CommentComposer
         label="Reply"
         placeholder="Reply (markdown)"
