@@ -113,15 +113,28 @@ struct SettingsFile {
 }
 
 impl SettingsFile {
+    /// Read `path`: `None` for a missing file, an error for one that exists
+    /// but cannot be read or parsed (what a caller that writes must not
+    /// paper over with the defaults).
+    fn read_checked(path: &Path) -> CoreResult<Option<Self>> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| CoreError::InvalidInput(format!("settings file is not valid JSON: {e}")))
+    }
+
     /// Read `path`; a missing or corrupt file is the defaults.
     fn read(path: &Path) -> Self {
-        let Ok(raw) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
-        serde_json::from_str(&raw).unwrap_or_else(|e| {
-            tracing::warn!("settings file is corrupt, using defaults: {e}");
-            Self::default()
-        })
+        Self::read_checked(path)
+            .unwrap_or_else(|e| {
+                tracing::warn!("settings file is unreadable, using defaults: {e}");
+                None
+            })
+            .unwrap_or_default()
     }
 
     /// Atomically write to `path`: a temp file renamed over the old one, so
@@ -139,6 +152,7 @@ impl SettingsFile {
     }
 }
 
+#[cfg(test)]
 /// Whether `settings.json` at `path` records the one-time step `name`.
 pub(crate) fn migration_done(path: &Path, name: &str) -> bool {
     SettingsFile::read(path)
@@ -147,10 +161,18 @@ pub(crate) fn migration_done(path: &Path, name: &str) -> bool {
         .any(|m| m == name)
 }
 
+/// Like [`migration_done`], but an error when `path` exists and cannot be
+/// read or parsed: whether the step ran is then unknown, and recording it
+/// would overwrite the file.
+pub(crate) fn migration_status(path: &Path, name: &str) -> CoreResult<bool> {
+    Ok(SettingsFile::read_checked(path)?.is_some_and(|f| f.migrations.iter().any(|m| m == name)))
+}
+
 /// Record the one-time step `name` in `settings.json` at `path` (saved
-/// atomically, the settings in it unchanged).
+/// atomically, the settings in it unchanged). A file that exists but cannot
+/// be read or parsed is left untouched and is an error.
 pub(crate) fn record_migration(path: &Path, name: &str) -> CoreResult<()> {
-    let mut file = SettingsFile::read(path);
+    let mut file = SettingsFile::read_checked(path)?.unwrap_or_default();
     if file.migrations.iter().any(|m| m == name) {
         return Ok(());
     }
@@ -298,6 +320,23 @@ mod tests {
         // A file from before has none.
         std::fs::write(&path, r#"{"pollIntervalSecs":60}"#).unwrap();
         assert!(!migration_done(&path, GITLAB_HTTP_TOKEN));
+    }
+
+    #[test]
+    fn recording_a_step_never_overwrites_a_file_that_cannot_be_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // Missing is fine: nothing to lose, nothing recorded yet.
+        assert!(!migration_status(&path, GITLAB_HTTP_TOKEN).unwrap());
+        let broken = "{\"pollIntervalSecs\": 60,}";
+        std::fs::write(&path, broken).unwrap();
+        assert!(migration_status(&path, GITLAB_HTTP_TOKEN).is_err());
+        assert!(record_migration(&path, GITLAB_HTTP_TOKEN).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        // A directory in its place is unreadable, not missing.
+        let dir_path = dir.path().join("as-dir.json");
+        std::fs::create_dir(&dir_path).unwrap();
+        assert!(migration_status(&dir_path, GITLAB_HTTP_TOKEN).is_err());
     }
 
     #[test]
