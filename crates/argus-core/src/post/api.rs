@@ -308,7 +308,14 @@ impl Core {
                 .collect();
             #[cfg(test)]
             before_watermark_write();
-            let next = advance_after_write(&record, &threads, &before.head_sha, approved, now);
+            let next = advance_after_write(
+                &record,
+                &threads,
+                &before.head_sha,
+                before.fetched_at,
+                approved,
+                now,
+            );
             store::write_review(conn, &next, store::WriteColumns::All)?;
             Ok(next)
         })
@@ -393,20 +400,28 @@ fn post_one(
 /// then goes to `seen_head` instead — the head the user was looking at when
 /// they posted. When the platform's head moved past it, the commits in
 /// between were never seen, so the review stays (or becomes) "needs
-/// re-review". `approved` sets `approved_at` when the refresh did not show
+/// re-review". Likewise its time is never past `seen_at`, when the view
+/// the user posted from was fetched (not the refresh after the post): a
+/// reply that came in between was not on screen, and the post does not
+/// answer it. `approved` sets `approved_at` when the refresh did not show
 /// the approval yet (the next refresh keeps or clears it by what the
 /// platform says).
 pub(crate) fn advance_after_write(
     record: &ReviewRecord,
     threads: &[Thread],
     seen_head: &str,
+    seen_at: DateTime<Utc>,
     approved: bool,
     now: DateTime<Utc>,
 ) -> ReviewRecord {
     let mut next = review::mark_reviewed(record, threads, now);
     let needs_approval = approved && next.approved_at.is_none();
-    if next.last_reviewed_sha.as_deref() == Some(seen_head) && !needs_approval {
+    let seen_earlier = next.last_reviewed_at.is_some_and(|at| at > seen_at);
+    if next.last_reviewed_sha.as_deref() == Some(seen_head) && !needs_approval && !seen_earlier {
         return next;
+    }
+    if seen_earlier {
+        next.last_reviewed_at = Some(seen_at);
     }
     next.last_reviewed_sha = Some(seen_head.to_string());
     if needs_approval {
@@ -421,6 +436,7 @@ pub(crate) fn advance_after_write(
         rerequested_at: next.rerequested_at,
         threads,
         me: &next.viewer,
+        seen_at: Some(seen_at),
     });
     // As in `review::advance`: entering re-review starts a round.
     if round.status == ReviewStatus::NeedsReReview && record.status != ReviewStatus::NeedsReReview {

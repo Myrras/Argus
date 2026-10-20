@@ -921,14 +921,54 @@ fn the_watermark_rule_after_a_write() {
     use super::api::advance_after_write;
     let (core, _fake, id) = setup();
     let record = core.review(id).unwrap();
+    let seen = record.fetched_at;
     // Seen = head: plain mark_reviewed.
-    let next = advance_after_write(&record, &[], "h1", false, at(12, 9));
+    let next = advance_after_write(&record, &[], "h1", seen, false, at(12, 9));
     assert_eq!(next, crate::review::mark_reviewed(&record, &[], at(12, 9)));
     // Seen an older head: re-review, a new round.
-    let next = advance_after_write(&record, &[], "h0", false, at(12, 9));
+    let next = advance_after_write(&record, &[], "h0", seen, false, at(12, 9));
     assert_eq!(next.last_reviewed_sha.as_deref(), Some("h0"));
     assert_eq!(next.status, ReviewStatus::NeedsReReview);
     assert_eq!(next.round, record.round + 1);
+}
+
+#[test]
+fn a_post_over_an_older_view_does_not_take_what_came_after_it_as_seen() {
+    use super::api::advance_after_write;
+    let (core, _fake, id) = setup();
+    // The refresh after the post ran at 12:09; the user's view was fetched
+    // at 12:00. The author replied in the user's thread at 12:05, the user
+    // replied at 12:06 without having seen it.
+    let mut record = core.review(id).unwrap();
+    record.fetched_at = at(12, 9);
+    let threads = [thread(
+        "1",
+        ME,
+        "h1",
+        vec![
+            note("1", ME, at(11, 0)),
+            note("2", AUTHOR, at(12, 5)),
+            note("3", ME, at(12, 6)),
+        ],
+    )];
+    let next = advance_after_write(&record, &threads, "h1", at(12, 0), false, at(12, 9));
+    // The watermark is the view, not the refresh after the post.
+    assert_eq!(next.last_reviewed_at, Some(at(12, 0)));
+    assert_eq!(next.status, ReviewStatus::NeedsReReview);
+    assert_eq!(
+        next.round_reasons,
+        [crate::review::RoundReason::AuthorReplied]
+    );
+    // With the reply on screen, the post answered it.
+    let next = advance_after_write(
+        &record,
+        &threads,
+        "h1",
+        at(12, 5) + chrono::Duration::seconds(1),
+        false,
+        at(12, 9),
+    );
+    assert_eq!(next.status, ReviewStatus::WaitingOnAuthor);
 }
 
 #[test]
