@@ -28,7 +28,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::git::{file_or, LocalClone};
 use crate::ids::{ReviewId, ThreadId};
 use crate::provider::{Anchor, CommitInfo, ReviewProvider, ReviewRef, Side, Thread};
-use crate::review::{untouched_with, RoundInput};
+use crate::review::{untouched_agreeing, RoundInput};
 use crate::store::{read_review, read_threads, ReviewRecord, Store, StoredThread};
 use crate::Core;
 
@@ -229,7 +229,9 @@ fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
             .map(|t| t.thread)
             .collect();
         let touches = read_line_touches(conn, record.id, &current.head_sha)?;
-        let n = untouched_with(
+        // As the stored round reads the notes: a reply kept unanswered is
+        // not untouched (see `keep_unanswered`).
+        let n = untouched_agreeing(
             &RoundInput {
                 state: current.state,
                 head_sha: &current.head_sha,
@@ -241,6 +243,7 @@ fn refresh_untouched(store: &Store, record: &ReviewRecord) -> CoreResult<()> {
                 me: &current.viewer,
                 seen_at: None,
             },
+            &current.round_reasons,
             Some(&touches),
         );
         if n != current.untouched_threads {

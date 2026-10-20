@@ -1130,6 +1130,36 @@ fn the_walk_sharpens_the_untouched_count() {
 }
 
 #[test]
+fn the_rewritten_count_agrees_with_a_reply_kept_unanswered() {
+    let repo = repo();
+    // Head at c1: no commit since the comment. The author replied at
+    // 10:13, the user wrote at 10:14 over the view of 10:12 (the post's
+    // watermark), so the reply stands unanswered.
+    {
+        let mut d = repo.detail.lock().unwrap();
+        d.head_sha = "c1".into();
+        d.commits.truncate(1);
+        let mut threads = repo.threads.lock().unwrap();
+        threads[0].notes.push(note("n5", AUTHOR, at(10, 13)));
+        threads[0].notes.push(note("n6", ME, at(10, 14)));
+    }
+    let core = core_over(&repo);
+    let mut rec = core.reviews().unwrap()[0].clone();
+    rec.last_reviewed_sha = Some("c1".into());
+    rec.last_reviewed_at = Some(at(10, 12));
+    rec.status = ReviewStatus::NeedsReReview;
+    rec.round_reasons = vec![crate::review::RoundReason::AuthorReplied];
+    rec.untouched_threads = 0;
+    core.store
+        .transaction(|conn| crate::store::write_review(conn, &rec, crate::store::WriteColumns::All))
+        .unwrap();
+    core.review_histories(rec.id).unwrap();
+    let after = core.review(rec.id).unwrap();
+    assert_eq!(after.round_reasons, rec.round_reasons);
+    assert_eq!(after.untouched_threads, 0);
+}
+
+#[test]
 fn unknown_threads_are_not_found() {
     let core = Core::new();
     assert!(matches!(
