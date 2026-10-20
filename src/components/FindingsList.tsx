@@ -9,26 +9,39 @@
  * The header's "Post selected (N)" is the only way findings reach the
  * platform: each posted one gets its link, a failed one stays selected with
  * its reason, and the rest are posted regardless.
+ *
+ * `SkippedFindings`: the findings the run set aside because the review
+ * already makes their point, folded under "Skipped as already raised (N)":
+ * each with a link to the comment it repeats and "Show anyway" (local; it
+ * then lists as a normal finding). Never posted from there.
  */
 
-import type { Finding, ReviewId } from "../ipc/types";
+import { useState } from "react";
+
+import type { Finding, ReviewId, StoredThread } from "../ipc/types";
 import {
+  REPEAT_REASON_HINT,
   SEVERITY_LABEL,
   SEVERITY_TONE,
   findingLocation,
   fromEarlierRound,
   groupBySeverity,
   postable,
+  repeatTarget,
+  sortFindings,
 } from "../lib/findings";
 import {
   openPosted,
   useAiStore,
   useCurrentRound,
   useFindings,
+  useSkippedFindings,
 } from "../state/aiStore";
 import { useCodeViewStore } from "../state/codeViewStore";
+import { focusThread } from "../state/focusStore";
+import { useThreadStore } from "../state/threadStore";
 import { Badge } from "./Badge";
-import { ExternalLinkIcon } from "./icons";
+import { CaretIcon, ExternalLinkIcon } from "./icons";
 import styles from "./FindingsList.module.css";
 
 /** Select the finding's file and scroll to the finding once it rendered. */
@@ -189,6 +202,106 @@ function FindingRow({
             Not posted: {ui.error.message}
           </span>
         )}
+      </span>
+    </li>
+  );
+}
+
+const NO_THREADS: StoredThread[] = [];
+
+/** "Skipped as already raised (N)", folded; nothing when none. */
+export function SkippedFindings({ reviewId }: { reviewId: ReviewId }) {
+  const skipped = useSkippedFindings(reviewId);
+  const threads = useThreadStore(
+    (s) => s.byReview[reviewId]?.threads ?? NO_THREADS,
+  );
+  const [open, setOpen] = useState(false);
+  if (skipped.length === 0) return null;
+  return (
+    <section className={styles.skipped} aria-label="Skipped as already raised">
+      <button
+        type="button"
+        className={`ghost ${styles.dismissedToggle}`}
+        aria-expanded={open}
+        title="Findings the review already makes: an existing comment or a finding you posted"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <CaretIcon size={12} className={styles.caret} data-open={open} />
+        Skipped as already raised ({skipped.length})
+      </button>
+      {open && (
+        <ul className={styles.list}>
+          {sortFindings(skipped).map((f) => (
+            <SkippedRow
+              key={f.id}
+              reviewId={reviewId}
+              finding={f}
+              target={repeatTarget(f, threads)}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function SkippedRow({
+  reviewId,
+  finding: f,
+  target,
+}: {
+  reviewId: ReviewId;
+  finding: Finding;
+  target: string;
+}) {
+  const showAnyway = useAiStore((s) => s.showAnyway);
+  const repeated = useAiStore((s) =>
+    f.repeatOf?.findingId
+      ? s.byReview[reviewId]?.findings.find(
+          (x) => x.id === f.repeatOf?.findingId,
+        )
+      : undefined,
+  );
+  const threadId = f.repeatOf?.threadId ?? null;
+  const known = target !== "an existing comment";
+  const openRepeated = () => {
+    if (threadId) focusThread(reviewId, threadId);
+    else if (repeated) scrollToFinding(reviewId, repeated);
+  };
+  return (
+    <li
+      className={styles.row}
+      data-severity={f.severity}
+      data-skipped
+      aria-label={`Skipped: ${f.title}`}
+    >
+      <span className={styles.main}>
+        <span className={styles.rowTitle}>{f.title}</span>
+        <span className={`${styles.where} mono`}>{findingLocation(f)}</span>
+        <span className={styles.tags}>
+          <Badge tone={SEVERITY_TONE[f.severity]}>
+            {SEVERITY_LABEL[f.severity]}
+          </Badge>
+          <button
+            type="button"
+            className={`ghost ${styles.link}`}
+            title={
+              f.repeatOf ? REPEAT_REASON_HINT[f.repeatOf.reason] : undefined
+            }
+            disabled={!known || (!threadId && !repeated)}
+            onClick={openRepeated}
+          >
+            repeats {target}
+          </button>
+          <button
+            type="button"
+            className={`ghost ${styles.link}`}
+            title="List it as a normal finding (in Argus only; nothing is posted)"
+            onClick={() => void showAnyway(f)}
+          >
+            Show anyway
+          </button>
+        </span>
       </span>
     </li>
   );

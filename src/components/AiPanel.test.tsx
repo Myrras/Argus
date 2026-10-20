@@ -24,8 +24,10 @@ import { useAiStore } from "../state/aiStore";
 import { useCodeViewStore } from "../state/codeViewStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useReviewStore } from "../state/reviewStore";
+import { useFocusStore } from "../state/focusStore";
+import { useThreadStore } from "../state/threadStore";
 import { aiRun, checklistItem, finding } from "../test/aiFixtures";
-import { review } from "../test/fixtures";
+import { review, thread } from "../test/fixtures";
 import { AiPanel } from "./AiPanel";
 
 const mockInvoke = vi.mocked(invoke);
@@ -351,16 +353,111 @@ describe("AiPanel", () => {
     expect(screen.getByText(warning)).toBeInTheDocument();
   });
 
-  it("counts the findings skipped as already raised in the review", () => {
+  it("lists the findings set aside as already raised, folded, with a link and Show anyway", async () => {
+    const bobs = thread({ reviewId: ID, author: "bob-fixture" });
+    const mine = thread({ reviewId: ID, mine: true, author: "me-fixture" });
+    const posted = findings[5];
+    const skipped = [
+      finding({
+        reviewId: ID,
+        severity: "high",
+        title: "Said by bob",
+        repeatOf: {
+          reason: "agentMarked",
+          threadId: bobs.threadId,
+          findingId: null,
+        },
+      }),
+      finding({
+        reviewId: ID,
+        title: "Said by me",
+        repeatOf: {
+          reason: "similar",
+          threadId: mine.threadId,
+          findingId: null,
+        },
+      }),
+      finding({
+        reviewId: ID,
+        severity: "low",
+        title: "Posted before",
+        repeatOf: { reason: "similar", threadId: null, findingId: posted.id },
+      }),
+    ];
+    useThreadStore.setState({
+      byReview: {
+        [ID]: { threads: [bobs, mine], loading: false, error: null },
+      },
+    });
+    useAiStore.setState((st) => ({
+      byReview: { [ID]: { ...st.byReview[ID], skipped } },
+    }));
+    mockInvoke.mockClear();
+    render(<AiPanel />);
+    // Not among the findings; folded under its toggle.
+    expect(rows()).not.toContain("Said by bob");
+    expect(screen.queryByText("Said by bob")).toBeNull();
+    const toggle = screen.getByRole("button", {
+      name: "Skipped as already raised (3)",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    const row = (title: string) =>
+      screen.getByRole("listitem", { name: `Skipped: ${title}` });
+    expect(
+      within(row("Said by bob")).getByRole("button", {
+        name: "repeats bob-fixture's comment",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(row("Said by me")).getByRole("button", {
+        name: "repeats your comment",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(row("Posted before")).getByRole("button", {
+        name: "repeats your posted finding",
+      }),
+    ).toBeInTheDocument();
+    // The link focuses the thread it repeats.
+    fireEvent.click(
+      within(row("Said by bob")).getByRole("button", {
+        name: "repeats bob-fixture's comment",
+      }),
+    );
+    const item = useFocusStore.getState().item;
+    expect(item?.kind === "thread" && item.threadId).toBe(bobs.threadId);
+    // Show anyway: local, then re-read. Nothing is posted.
+    fireEvent.click(
+      within(row("Said by bob")).getByRole("button", { name: "Show anyway" }),
+    );
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("show_finding_anyway", {
+        findingId: skipped[0].id,
+      }),
+    );
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("list_skipped_findings", {
+        reviewId: ID,
+      }),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "post_findings"),
+    ).toEqual([]);
+  });
+
+  it("says nothing about repeats when there are none, and counts checklist repeats", () => {
     const { unmount } = render(<AiPanel />);
-    expect(screen.queryByText(/already raised in the review/)).toBeNull();
+    expect(screen.queryByText(/already raised/)).toBeNull();
     unmount();
     useAiStore.setState({
-      runs: { [ID]: aiRun({ reviewId: ID, droppedDuplicates: 3 }) },
+      runs: { [ID]: aiRun({ reviewId: ID, skippedChecklist: 2 }) },
     });
     render(<AiPanel />);
     expect(
-      screen.getByText("3 skipped: already raised in the review."),
+      screen.getByText(
+        "2 checklist items left out: already raised in the review.",
+      ),
     ).toBeInTheDocument();
   });
 

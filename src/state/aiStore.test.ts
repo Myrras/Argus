@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { FindingPostResult } from "../ipc/types";
+import type { Finding, FindingPostResult } from "../ipc/types";
 import { subscribeAiEvents, useAiStore } from "./aiStore";
 import { useBackendSettingsStore } from "./backendSettingsStore";
 import { useReviewStore } from "./reviewStore";
@@ -30,6 +30,7 @@ const initialSettings = useBackendSettingsStore.getState();
 
 const r = review();
 const ID = r.id;
+const uuidThread = "00000000-0000-4000-a000-000000009001";
 
 /** Every command that changes something (the platform or Argus' store). */
 const WRITES = [
@@ -39,6 +40,7 @@ const WRITES = [
   "dismiss_finding",
   "set_checklist_checked",
   "set_verdict_override",
+  "show_finding_anyway",
 ];
 
 const writes = () =>
@@ -49,6 +51,7 @@ let findings = [
   finding({ reviewId: ID, severity: "high", title: "High one" }),
 ];
 let postResults: FindingPostResult[] = [];
+let skipped: Finding[] = [];
 
 function backend(cmd: string, args?: unknown) {
   const a = (args ?? {}) as Record<string, unknown>;
@@ -57,6 +60,10 @@ function backend(cmd: string, args?: unknown) {
       return Promise.resolve(aiRun({ reviewId: String(a.reviewId) }));
     case "list_findings":
       return Promise.resolve(findings);
+    case "list_skipped_findings":
+      return Promise.resolve(skipped);
+    case "show_finding_anyway":
+      return Promise.resolve(skipped[0]);
     case "list_checklist":
       return Promise.resolve([checklistItem({ reviewId: ID })]);
     case "list_verdicts":
@@ -80,6 +87,13 @@ beforeEach(() => {
   findings = [
     finding({ reviewId: ID, severity: "low", title: "Low one" }),
     finding({ reviewId: ID, severity: "high", title: "High one" }),
+  ];
+  skipped = [
+    finding({
+      reviewId: ID,
+      title: "Already said",
+      repeatOf: { reason: "similar", threadId: uuidThread, findingId: null },
+    }),
   ];
 });
 
@@ -261,6 +275,35 @@ describe("aiStore", () => {
     await useAiStore.getState().load(ID);
     await useAiStore.getState().postSelected(ID);
     expect(writes()).toEqual([]);
+  });
+
+  it("reads the findings set aside as already raised apart", async () => {
+    await useAiStore.getState().load(ID);
+    expect(mockInvoke).toHaveBeenCalledWith("list_skipped_findings", {
+      reviewId: ID,
+    });
+    const out = useAiStore.getState().byReview[ID];
+    expect(out.findings.map((f) => f.title)).toEqual(["Low one", "High one"]);
+    expect(out.skipped?.map((f) => f.title)).toEqual(["Already said"]);
+  });
+
+  it("shows a set-aside finding anyway (local) and re-reads; never posts it", async () => {
+    await useAiStore.getState().load(ID);
+    mockInvoke.mockClear();
+    await useAiStore.getState().showAnyway(skipped[0]);
+    expect(writes()).toEqual([
+      ["show_finding_anyway", { findingId: skipped[0].id }],
+    ]);
+    expect(mockInvoke).toHaveBeenCalledWith("list_findings", { reviewId: ID });
+    expect(mockInvoke).toHaveBeenCalledWith("list_skipped_findings", {
+      reviewId: ID,
+    });
+    // Selecting it is impossible while set aside: Post selected sends nothing.
+    useAiStore.getState().setSelected(skipped[0].id, true);
+    await useAiStore.getState().postSelected(ID);
+    expect(
+      mockInvoke.mock.calls.filter(([cmd]) => cmd === "post_findings"),
+    ).toEqual([]);
   });
 
   it("dismisses (deselecting) and re-reads", async () => {
