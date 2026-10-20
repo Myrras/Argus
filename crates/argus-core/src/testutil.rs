@@ -62,6 +62,7 @@ pub fn thread(id: &str, author: &str, sha: &str, notes: Vec<Note>) -> Thread {
         author: author.into(),
         created_at: notes.first().map_or(at(1, 0), |n| n.created_at),
         resolved: false,
+        resolvable: true,
         outdated: false,
         anchor: Some(Anchor {
             path_old: Some("src/cache.rs".into()),

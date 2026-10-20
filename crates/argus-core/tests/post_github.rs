@@ -31,6 +31,13 @@ case "$*" in
   "api -i "*)
     printf 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}'
     echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  "api graphql -f query="*)
+    case "$*" in
+      *"number=12"*"after=Y3Vyc29yOjI="*) cat "$F/graphql_threads_12_page2.json" ;;
+      *"number=12"*) cat "$F/graphql_threads_12_page1.json" ;;
+      *) echo '{"data":{"repository":{"pullRequest":null}}}' ;;
+    esac
+    exit 0 ;;
 esac
 body=$(cat)
 printf '%s\n' "$body" >> "$BODIES"
@@ -61,6 +68,16 @@ case "$*" in
   "api --method POST repos/acme-fixture/widgets/pulls/13/reviews --input -")
     echo '{"message":"Unprocessable Entity","errors":["Can not approve your own pull request"],"status":"422"}'
     echo "gh: Unprocessable Entity (HTTP 422)" >&2; exit 1 ;;
+  "api graphql --input -")
+    case "$body" in
+      *PRRT_fixture_510*)
+        echo '{"data":{"resolveReviewThread":null},"errors":[{"type":"FORBIDDEN","path":["resolveReviewThread"],"locations":[{"line":1,"column":22}],"message":"Resource not accessible by integration (fake-gh-token)"}]}'
+        echo "gh: Resource not accessible by integration" >&2; exit 1 ;;
+      *unresolveReviewThread*)
+        echo '{"data":{"unresolveReviewThread":{"thread":{"id":"PRRT_fixture_501","isResolved":false}}}}' ;;
+      *)
+        echo '{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_fixture_501","isResolved":true}}}}' ;;
+    esac ;;
   *) echo '{"message":"Not Found","status":"404"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
 esac
 "#;
@@ -361,4 +378,76 @@ fn approves_with_an_approve_review() {
         gh.reply(&pr(99), "1", "x").unwrap_err().kind,
         PostErrorKind::NotFound
     );
+}
+
+// --- Resolving threads ---
+
+const RESOLVE: &str = "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }";
+const UNRESOLVE: &str = "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }";
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn resolves_a_review_thread_by_its_graphql_node_id() {
+    let fake = fake();
+    let gh = fake.provider();
+    // 530 is on the second page of `reviewThreads`: every page is read.
+    gh.set_thread_resolved(&pr(12), "530", true).unwrap();
+    gh.set_thread_resolved(&pr(12), "501", false).unwrap();
+    assert_eq!(
+        fake.bodies(),
+        [
+            json!({ "query": RESOLVE, "variables": { "id": "PRRT_fixture_530" } }),
+            json!({ "query": UNRESOLVE, "variables": { "id": "PRRT_fixture_501" } }),
+        ]
+    );
+    let calls = fake.calls();
+    // The node ids come from the PR's own threads, read right before.
+    assert!(
+        calls.contains("-f owner=acme-fixture -f name=widgets -F number=12 token=fake-gh-token")
+    );
+    assert!(calls.contains("-F number=12 -f after=Y3Vyc29yOjI= token=fake-gh-token"));
+    // The body goes on stdin, never into an argument.
+    assert_eq!(
+        calls
+            .matches("api graphql --input - token=fake-gh-token")
+            .count(),
+        2
+    );
+    assert!(!calls.contains("PRRT_fixture_530"));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_thread_github_cannot_resolve_is_refused_without_a_write() {
+    let fake = fake();
+    let gh = fake.provider();
+    // The PR conversation has no resolve on GitHub.
+    for id in ["issuecomment-8002", "pullrequestreview-7004"] {
+        let err = gh.set_thread_resolved(&pr(12), id, true).unwrap_err();
+        assert_eq!(err.kind, PostErrorKind::InvalidInput, "{id}");
+    }
+    // Not a comment id: refused before running gh.
+    let err = gh
+        .set_thread_resolved(&pr(12), "4001; x", true)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::InvalidInput);
+    assert!(fake.calls().is_empty());
+    // A comment GraphQL lists no thread for: never a guessed node id.
+    let err = gh.set_thread_resolved(&pr(12), "777", true).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::NotFound);
+    assert!(fake.bodies().is_empty());
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn surfaces_githubs_refusal_to_resolve_without_the_token() {
+    let fake = fake();
+    let gh = fake.provider();
+    let err = gh.set_thread_resolved(&pr(12), "510", true).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert_eq!(
+        err.message,
+        "GitHub: Resource not accessible by integration ([redacted])"
+    );
+    assert_eq!(fake.bodies().len(), 1);
 }

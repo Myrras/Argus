@@ -987,6 +987,29 @@ impl ReviewProvider for GitlabProvider {
         Ok(())
     }
 
+    /// GitLab answers a user who may not resolve (on instances where only
+    /// the MR author and maintainers can) with a 403: its message is
+    /// forwarded as a refusal.
+    fn set_thread_resolved(&self, r: &ReviewRef, thread: &str, resolved: bool) -> PostResultOf<()> {
+        if thread.trim().is_empty() {
+            return Err(PostError::new(
+                PostErrorKind::InvalidInput,
+                "not a GitLab discussion",
+            ));
+        }
+        let _: serde_json::Value = self.write_json(
+            reqwest::Method::PUT,
+            &format!(
+                "{}/discussions/{}",
+                Self::mr_path(r),
+                encode_segment(thread)
+            ),
+            Some(&serde_json::json!({ "resolved": resolved })),
+            GlWrite::Resolve,
+        )?;
+        Ok(())
+    }
+
     // --- M3: thread history ---
 
     /// The diff endpoint names no parent, so the commit itself is read
@@ -1252,6 +1275,9 @@ fn discussion_thread(d: GlDiscussion, head: &str) -> Option<Thread> {
         author: first.author.username.clone(),
         created_at: first.created_at,
         resolved,
+        // GitLab marks the notes of a discussion it lets be resolved (diff
+        // notes, MR-level threads); a single comment has none.
+        resolvable: !d.individual_note && !resolvable.is_empty(),
         outdated: anchor
             .as_ref()
             .is_some_and(|a| !head.is_empty() && a.head_sha != head),
@@ -1511,6 +1537,10 @@ struct GlCompare {
 #[derive(Deserialize)]
 struct GlDiscussion {
     id: String,
+    /// A single comment rather than a thread ("Comment", not "Start a
+    /// thread"): never resolvable.
+    #[serde(default)]
+    individual_note: bool,
     notes: Vec<GlNote>,
 }
 
@@ -1525,6 +1555,7 @@ enum GlWrite {
     Comment,
     Reply,
     Approve,
+    Resolve,
 }
 
 impl GitlabProvider {
@@ -1537,13 +1568,27 @@ impl GitlabProvider {
         body: Option<&serde_json::Value>,
         what: GlWrite,
     ) -> PostResultOf<T> {
+        self.write_json(reqwest::Method::POST, path, body, what)
+    }
+
+    /// [`post_json`](Self::post_json) with any method (`PUT` to resolve).
+    fn write_json<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        what: GlWrite,
+    ) -> PostResultOf<T> {
         let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
         let url = format!("{}/api/v4{path}", self.base);
         let payload = body.map(|b| b.to_string()).unwrap_or_default();
         let mut response = None;
         for delay_ms in [0, 500, 1500] {
             std::thread::sleep(Duration::from_millis(delay_ms));
-            let mut req = self.client.post(&url).header("PRIVATE-TOKEN", &token);
+            let mut req = self
+                .client
+                .request(method.clone(), &url)
+                .header("PRIVATE-TOKEN", &token);
             if body.is_some() {
                 req = req
                     .header("Content-Type", "application/json")

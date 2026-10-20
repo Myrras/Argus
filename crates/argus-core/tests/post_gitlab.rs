@@ -178,6 +178,10 @@ fn instance(req: &Request) -> Reply {
         ("POST", r) if r.starts_with(&format!("{MR21}/discussions/")) && r.ends_with("/notes") => {
             reply("201 Created", r#"{"id":9002,"body":"x"}"#)
         }
+        ("PUT", r) if r.starts_with(&format!("{MR21}/discussions/")) => reply(
+            "200 OK",
+            r#"{"id":"d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","individual_note":false,"notes":[]}"#,
+        ),
         ("POST", r) if r == format!("{MR21}/approve") => {
             reply("201 Created", r#"{"id":5,"iid":21,"approved_by":[]}"#)
         }
@@ -652,4 +656,154 @@ fn a_failing_reviewers_call_does_not_block_approving() {
     core.approve_review(id, HEAD_SHA).unwrap();
     let approval = posts(&log).last().unwrap().clone();
     assert_eq!(approval.path, format!("{MR21}/approve"));
+}
+
+// --- Resolving discussions ---
+
+const D1: &str = "d1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// Every request but a GET: the writes.
+fn writes(log: &Log) -> Vec<Request> {
+    log.lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.method != "GET")
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn resolves_and_reopens_a_discussion_with_a_put() {
+    let (base, log) = serve(instance);
+    let gl = provider(&base);
+    gl.set_thread_resolved(&mr(&base), D1, true).unwrap();
+    gl.set_thread_resolved(&mr(&base), D1, false).unwrap();
+    let sent = writes(&log);
+    assert_eq!(sent.len(), 2);
+    for (req, resolved) in sent.iter().zip([true, false]) {
+        assert_eq!(req.method, "PUT");
+        assert_eq!(req.path, format!("{MR21}/discussions/{D1}"));
+        assert_eq!(req.json(), json!({ "resolved": resolved }));
+        assert_eq!(req.content_type.as_deref(), Some("application/json"));
+        assert!(req.token);
+    }
+    // The discussion id is one path segment, whatever it holds.
+    gl.set_thread_resolved(&mr(&base), "d1/../../x", true)
+        .unwrap();
+    assert_eq!(
+        writes(&log)[2].path,
+        format!("{MR21}/discussions/d1%2F..%2F..%2Fx")
+    );
+    // Nothing to name: refused before any request.
+    let err = gl.set_thread_resolved(&mr(&base), " ", true).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::InvalidInput);
+    assert_eq!(writes(&log).len(), 3);
+}
+
+#[test]
+fn a_refused_resolve_surfaces_gitlabs_message() {
+    let refuse = |status: &'static str, body: &'static str| {
+        serve(move |req| match req.method.as_str() {
+            "PUT" => reply(status, body),
+            _ => instance(req),
+        })
+    };
+    // Only the MR author and maintainers may resolve on this instance.
+    let (base, _) = refuse("403 Forbidden", r#"{"message":"403 Forbidden"}"#);
+    let err = provider(&base)
+        .set_thread_resolved(&mr(&base), D1, true)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert_eq!(err.message, "GitLab: 403 Forbidden");
+    // A discussion that cannot be resolved; the token never comes back.
+    let (base, _) = refuse(
+        "400 Bad Request",
+        r#"{"message":"400 Bad request - glpat-fixture-not-a-real-token not resolvable"}"#,
+    );
+    let err = provider(&base)
+        .set_thread_resolved(&mr(&base), D1, true)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::PostRejected);
+    assert_eq!(
+        err.message,
+        "GitLab: 400 Bad request - [redacted] not resolvable"
+    );
+    // A token GitLab rejects is an auth problem, not a refusal.
+    let (base, _) = refuse("401 Unauthorized", r#"{"message":"401 Unauthorized"}"#);
+    let err = provider(&base)
+        .set_thread_resolved(&mr(&base), D1, true)
+        .unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::GitlabAuth);
+}
+
+#[test]
+fn resolving_through_the_core_writes_once_and_refreshes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let resolved = Arc::new(AtomicBool::new(false));
+    let flag = resolved.clone();
+    // A stateful instance: the PUT resolves `d1`, later reads show it.
+    let (base, log) = serve(move |req| {
+        let (route, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
+        match (req.method.as_str(), route) {
+            ("PUT", r) if r == format!("{MR21}/discussions/{D1}") => {
+                let body: Value = serde_json::from_str(&req.body).unwrap();
+                flag.store(body["resolved"] == json!(true), Ordering::SeqCst);
+                instance(req)
+            }
+            ("GET", r) if r == format!("{MR21}/discussions") && !query.contains("page=2") => {
+                let mut page: Value =
+                    serde_json::from_str(&fixture("mr_21_discussions_page1.json")).unwrap();
+                for n in page[0]["notes"].as_array_mut().unwrap() {
+                    n["resolved"] = flag.load(Ordering::SeqCst).into();
+                }
+                Reply {
+                    headers: "X-Next-Page: 2\r\n".into(),
+                    ..reply("200 OK", page.to_string())
+                }
+            }
+            _ => instance(req),
+        }
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    assert!(core.refresh().errors.is_empty());
+    let id = core.reviews().unwrap()[0].id;
+    let thread = |key: &str| {
+        core.threads(id)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.thread.id.starts_with(key))
+            .unwrap()
+    };
+    let d1 = thread("d1");
+    assert!(d1.thread.resolvable && !d1.thread.resolved);
+    let before = log.lock().unwrap().len();
+
+    let after = core.resolve_thread(id, d1.thread_id, true).unwrap();
+    // One write, then the review read again: the store has the new state.
+    assert_eq!(writes(&log).len(), 1);
+    assert!(after.thread.resolved);
+    assert!(thread("d1").thread.resolved);
+    let reads_after: Vec<String> = log.lock().unwrap()[before + 1..]
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    assert!(reads_after
+        .iter()
+        .any(|p| p.starts_with(&format!("{MR21}/discussions"))));
+
+    // Reopened the same way.
+    let after = core.resolve_thread(id, d1.thread_id, false).unwrap();
+    assert!(!after.thread.resolved);
+    assert_eq!(writes(&log).len(), 2);
+
+    // A single comment cannot be resolved: refused, nothing written.
+    let d5 = thread("d5");
+    assert!(!d5.thread.resolvable);
+    let err = core.resolve_thread(id, d5.thread_id, true).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::InvalidInput);
+    // A thread of another review: refused as well.
+    let other = argus_core::ReviewId::from_key("gitlab|elsewhere|grp/app|99");
+    let err = core.resolve_thread(other, d1.thread_id, true).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::InvalidInput);
+    assert_eq!(writes(&log).len(), 2);
 }

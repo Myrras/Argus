@@ -67,15 +67,21 @@ const GH_TIMEOUT: Duration = Duration::from_secs(60);
 /// `gh auth token` is a local lookup; it only hangs on a stuck keychain.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The resolved and outdated state of every review thread of one PR, a page
-/// at a time. Threads are matched to the REST ones by their first comment's
-/// URL (`…#discussion_r<id>`, the REST root comment id): `databaseId` is a
-/// 32-bit `Int` that review comment ids have outgrown.
+/// The node id, resolved and outdated state of every review thread of one
+/// PR, a page at a time. Threads are matched to the REST ones by their first
+/// comment's URL (`…#discussion_r<id>`, the REST root comment id):
+/// `databaseId` is a 32-bit `Int` that review comment ids have outgrown.
 const THREADS_QUERY: &str =
     "query($owner: String!, $name: String!, $number: Int!, $after: String) { \
 repository(owner: $owner, name: $name) { pullRequest(number: $number) { \
 reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } \
-nodes { isResolved isOutdated comments(first: 1) { nodes { url } } } } } } }";
+nodes { id isResolved isOutdated comments(first: 1) { nodes { url } } } } } } }";
+
+/// Resolve / reopen one review thread by its node id (an explicit write).
+const RESOLVE_MUTATION: &str = "mutation($id: ID!) { \
+resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }";
+const UNRESOLVE_MUTATION: &str = "mutation($id: ID!) { \
+unresolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }";
 
 /// What [`GithubProvider::auth_status`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -435,8 +441,23 @@ impl GithubProvider {
         if self.limit.active().is_some() {
             return None;
         }
-        let (owner, name) = r.repo.split_once('/')?;
-        let token = self.token().ok()?;
+        match self.review_threads(r) {
+            Ok(states) => Some(states),
+            Err(e) => {
+                tracing::debug!("GitHub thread states unavailable: {e}");
+                None
+            }
+        }
+    }
+
+    /// Every review thread of the PR by REST root comment id, all pages of
+    /// [`THREADS_QUERY`]; a failed page fails it.
+    fn review_threads(&self, r: &ReviewRef) -> CoreResult<HashMap<String, ThreadState>> {
+        let (owner, name) = r
+            .repo
+            .split_once('/')
+            .ok_or_else(|| CoreError::InvalidInput("not a GitHub repository".into()))?;
+        let token = self.token()?;
         let query = format!("query={THREADS_QUERY}");
         let owner = format!("owner={owner}");
         let name = format!("name={name}");
@@ -453,15 +474,22 @@ impl GithubProvider {
             if let Some(a) = &after_field {
                 args.extend(["-f", a]);
             }
-            let output = match self.exec(token.as_deref(), &args, None) {
-                Ok(o) if o.status.success() => o,
-                _ => {
-                    tracing::debug!("GitHub thread states unavailable");
-                    return None;
-                }
-            };
-            let page: GqlResponse = serde_json::from_slice(&output.stdout).ok()?;
-            let threads = page.data?.repository?.pull_request?.review_threads;
+            let output = self.exec(token.as_deref(), &args, None)?;
+            if !output.status.success() {
+                // Not `failure`: GraphQL has a budget of its own, and its
+                // limit must not pause the REST reads.
+                return Err(CoreError::Provider(
+                    "could not read the review threads from GitHub".into(),
+                ));
+            }
+            let page: GqlResponse =
+                serde_json::from_slice(&output.stdout).map_err(|_| unexpected())?;
+            let threads = page
+                .data
+                .and_then(|d| d.repository)
+                .and_then(|r| r.pull_request)
+                .ok_or(CoreError::NotFound)?
+                .review_threads;
             for t in threads.nodes {
                 let Some(id) = t
                     .comments
@@ -474,6 +502,7 @@ impl GithubProvider {
                 states.insert(
                     id,
                     ThreadState {
+                        node_id: t.id,
                         resolved: t.is_resolved,
                         outdated: t.is_outdated,
                     },
@@ -487,7 +516,7 @@ impl GithubProvider {
                 _ => break,
             }
         }
-        Some(states)
+        Ok(states)
     }
 
     fn search(&self, qualifier: &str) -> CoreResult<Vec<GhSearchItem>> {
@@ -681,8 +710,10 @@ fn root_comment_id(url: &str) -> Option<String> {
 }
 
 /// A review thread's state from GraphQL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ThreadState {
+    /// The thread's GraphQL node id, what the resolve mutations take.
+    node_id: String,
     resolved: bool,
     outdated: bool,
 }
@@ -910,6 +941,45 @@ impl ReviewProvider for GithubProvider {
             &format!("repos/{}/pulls/{}/reviews", r.repo, r.number),
             &serde_json::json!({ "event": "APPROVE", "commit_id": head_sha }),
         )?;
+        Ok(())
+    }
+
+    /// REST has no resolve: the thread's node id is read from GraphQL's
+    /// `reviewThreads` (the same query the refresh makes), then the one
+    /// mutation. The PR conversation has no threads to resolve.
+    fn set_thread_resolved(&self, r: &ReviewRef, thread: &str, resolved: bool) -> PostResultOf<()> {
+        if ConversationId::parse(thread).is_some() {
+            return Err(super::not_resolvable());
+        }
+        if thread.is_empty() || !thread.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(PostError::new(
+                PostErrorKind::InvalidInput,
+                "not a GitHub thread",
+            ));
+        }
+        let node = self
+            .review_threads(r)?
+            .remove(thread)
+            .map(|s| s.node_id)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                PostError::new(
+                    PostErrorKind::NotFound,
+                    "GitHub lists no review thread for this comment; refresh and try again",
+                )
+            })?;
+        let (field, mutation) = if resolved {
+            ("resolveReviewThread", RESOLVE_MUTATION)
+        } else {
+            ("unresolveReviewThread", UNRESOLVE_MUTATION)
+        };
+        let data = self.graphql_write(&serde_json::json!({
+            "query": mutation,
+            "variables": { "id": node },
+        }))?;
+        if data.get(field).and_then(|f| f.get("thread")).is_none() {
+            return Err(unexpected().into());
+        }
         Ok(())
     }
     // --- M3: thread history ---
@@ -1213,6 +1283,7 @@ fn root_thread(c: GhComment) -> Thread {
         author: login(&c.user),
         created_at: c.created_at,
         resolved: false,
+        resolvable: true,
         outdated: c.position.is_none(),
         anchor: Some(anchor),
         notes: vec![note(&c)],
@@ -1453,6 +1524,70 @@ impl GithubProvider {
             None => CoreError::Provider("gh could not post to GitHub".into()).into(),
         })
     }
+
+    /// `gh api graphql --input -` with `body` (`query` + `variables`) on
+    /// stdin: a GraphQL mutation. Its `data`, or GitHub's own error
+    /// messages as [`PostErrorKind::PostRejected`] (GraphQL answers a
+    /// refusal, such as missing permission, with `errors` and gh exits 1).
+    fn graphql_write(&self, body: &serde_json::Value) -> PostResultOf<serde_json::Value> {
+        let token = self.token()?;
+        let output = match self.exec(
+            token.as_deref(),
+            &["api", "graphql", "--input", "-"],
+            Some(body.to_string().into_bytes()),
+        ) {
+            Ok(o) => o,
+            // It may have reached GitHub before it hung.
+            Err(ExecError::TimedOut) => {
+                return Err(PostError::new(
+                    PostErrorKind::Provider,
+                    "GitHub did not answer in time; refresh to see whether it went through",
+                ))
+            }
+            Err(e) => return Err(CoreError::from(e).into()),
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        if !output.status.success() {
+            tracing::debug!("gh api graphql write failed");
+            if stderr.contains("auth login")
+                || stderr.contains("not logged")
+                || stderr.contains("http 401")
+            {
+                *self.token.lock().expect("token lock poisoned") = None;
+                return Err(CoreError::GithubUnavailable.into());
+            }
+            if stderr.contains("rate limit") {
+                return Err(CoreError::Provider(
+                    "GitHub rate limit reached, try again later".into(),
+                )
+                .into());
+            }
+        }
+        let reply: Option<serde_json::Value> = serde_json::from_str(stdout.trim()).ok();
+        let has_errors = reply
+            .as_ref()
+            .and_then(|v| v.get("errors"))
+            .and_then(|e| e.as_array())
+            .is_some_and(|e| !e.is_empty());
+        if has_errors || !output.status.success() {
+            let message = github_error_message(&stdout).map(|m| {
+                format!(
+                    "GitHub: {}",
+                    sanitize(&m, &[token.as_deref().unwrap_or("")])
+                )
+            });
+            return Err(match message {
+                Some(m) => PostError::new(PostErrorKind::PostRejected, m),
+                None if stderr.contains("http 404") => CoreError::NotFound.into(),
+                None => CoreError::Provider("gh could not write to GitHub".into()).into(),
+            });
+        }
+        reply
+            .and_then(|v| v.get("data").cloned())
+            .filter(|d| !d.is_null())
+            .ok_or_else(|| unexpected().into())
+    }
 }
 
 impl GithubProvider {
@@ -1591,6 +1726,8 @@ struct GqlPageInfo {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GqlThread {
+    #[serde(default)]
+    id: String,
     #[serde(default)]
     is_resolved: bool,
     #[serde(default)]

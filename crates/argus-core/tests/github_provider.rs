@@ -1299,3 +1299,20 @@ fn a_head_that_keeps_moving_fails_the_diff_instead_of_mislabelling_it() {
     let err = gh.fetch_files(&widgets_12(), &review_range()).unwrap_err();
     assert!(err.to_string().contains("new commits"), "{err}");
 }
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn review_threads_are_resolvable_and_the_conversation_is_not() {
+    let fake = script(FAKE);
+    let gh = fake.provider("github.com", None);
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    let (code, talk): (Vec<&Thread>, Vec<&Thread>) =
+        threads.iter().partition(|t| t.anchor.is_some());
+    assert!(!code.is_empty() && !talk.is_empty());
+    // Every review comment thread, whether GraphQL answered or not.
+    assert!(code.iter().all(|t| t.resolvable));
+    assert!(talk.iter().all(|t| !t.resolvable));
+    std::fs::write(fake.log.with_file_name("graphql-down"), "").unwrap();
+    let threads = gh.fetch_threads(&widgets_12()).unwrap();
+    assert!(code_threads(threads).iter().all(|t| t.resolvable));
+}

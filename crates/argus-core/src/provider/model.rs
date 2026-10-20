@@ -263,6 +263,14 @@ pub struct Thread {
     /// GitHub: GraphQL's `isResolved` (REST has no such field); `false`
     /// when that query fails.
     pub resolved: bool,
+    /// The platform lets a thread like this be resolved (and reopened):
+    /// GitHub review threads (not the PR conversation, which has no
+    /// resolve), GitLab discussions with resolvable notes (diff notes and
+    /// MR-level threads, not single comments). Whether the user may is the
+    /// platform's call: a refusal comes back from the write. Absent in
+    /// threads serialised before it existed.
+    #[serde(default)]
+    pub resolvable: bool,
     pub outdated: bool,
     /// `None` for a discussion on the review as a whole (a GitLab MR-level
     /// discussion, GitHub's PR conversation).
@@ -422,6 +430,7 @@ mod tests {
             author: author.into(),
             created_at: DateTime::<Utc>::UNIX_EPOCH,
             resolved: false,
+            resolvable: false,
             outdated: false,
             anchor: None,
             notes,

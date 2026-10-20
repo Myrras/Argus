@@ -1,10 +1,10 @@
-//! Posting: new line comments, replies and approvals, written to the
-//! platform only when the user asks ([`Core`](crate::Core)'s post API in
-//! [`api`]; nothing in the poll loop or anywhere else writes).
+//! Posting: new line comments, replies, approvals and resolving or
+//! reopening threads, written to the platform only when the user asks
+//! ([`Core`](crate::Core)'s post API in [`api`]; nothing in the poll loop or
+//! anywhere else writes).
 //!
 //! v1 posts comments one by one, so a failure is reported per comment and
-//! never loses the others. Argus never merges, never resolves threads and
-//! never changes code.
+//! never loses the others. Argus never merges and never changes code.
 //!
 //! Errors are [`PostError`] (`{ kind, message }`, the shape of the shell's
 //! `IpcError`) rather than [`CoreError`]: a rejected comment carries the

@@ -1196,3 +1196,71 @@ fn a_commented_mr_that_keeps_failing_drops_off_the_list() {
     failing.store(true, Ordering::SeqCst);
     assert!(listed(&gl));
 }
+
+/// Page 2 plus an MR-level thread ("Start a thread", no position): GitLab
+/// makes its notes resolvable, unlike a single comment's (`d5`).
+fn discussions_with_an_mr_level_thread() -> String {
+    let mut page: serde_json::Value =
+        serde_json::from_str(&fixture("mr_21_discussions_page2.json")).unwrap();
+    let list = page.as_array_mut().unwrap();
+    let mut d7 = list[1].clone();
+    d7["id"] = "d7ffffffffffffffffffffffffffffffffffffff".into();
+    d7["individual_note"] = false.into();
+    d7["notes"][0]["id"] = 7001.into();
+    d7["notes"][0]["resolvable"] = true.into();
+    list.push(d7);
+    page.to_string()
+}
+
+#[test]
+fn only_gitlab_discussions_it_lets_be_resolved_are_resolvable() {
+    let (base, _) = serve_raw(|path, _| {
+        if path.starts_with("/api/v4/projects/grp%2Fapp/merge_requests/21/discussions")
+            && path.contains("page=2")
+        {
+            Reply {
+                status: "200 OK",
+                headers: "X-Next-Page: \r\nX-Page: 2\r\n".into(),
+                body: discussions_with_an_mr_level_thread(),
+            }
+        } else {
+            fixture_routes(path)
+        }
+    });
+    let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
+    let report = core.refresh();
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    let r21 = core
+        .reviews()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.review.number == 21)
+        .unwrap();
+    // Read back from the store: what the UI gets.
+    let flags: Vec<(String, bool, bool)> = core
+        .threads(r21.id)
+        .unwrap()
+        .into_iter()
+        .map(|t| {
+            (
+                t.thread.id[..2].to_string(),
+                t.thread.anchor.is_some(),
+                t.thread.resolvable,
+            )
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // (id, anchored, resolvable): diff notes and the MR-level thread are,
+    // the single comment is not.
+    assert_eq!(
+        flags,
+        [
+            ("d1".into(), true, true),
+            ("d2".into(), true, true),
+            ("d4".into(), true, true),
+            ("d5".into(), false, false),
+            ("d7".into(), false, true),
+        ]
+    );
+}

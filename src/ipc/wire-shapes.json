@@ -333,6 +333,7 @@
       "notes[].id",
       "notes[].system",
       "outdated",
+      "resolvable",
       "resolved",
       "reviewId",
       "startedByMe",

@@ -35,7 +35,7 @@ use crate::post::{PlacedComment, PostError, PostErrorKind, PostedComment, Posted
 use crate::settings::Settings;
 
 /// Read access to one platform for the current user, plus the explicit
-/// writes of M4 (posting, replying, approving).
+/// writes of M4 (posting, replying, approving, resolving threads).
 pub trait ReviewProvider: Send + Sync {
     fn id(&self) -> ProviderId;
 
@@ -118,6 +118,24 @@ pub trait ReviewProvider: Send + Sync {
         Err(read_only())
     }
 
+    /// Resolve (`resolved`) or reopen the platform thread `thread` (its id
+    /// as in [`reply`](Self::reply)); only for a [`Thread::resolvable`] one.
+    ///
+    /// GitHub: GraphQL `resolveReviewThread` / `unresolveReviewThread` with
+    /// the review thread's node id, read right before from the PR's
+    /// `reviewThreads` (never guessed); the PR conversation cannot be
+    /// resolved. GitLab: `PUT merge_requests/:iid/discussions/:id` with
+    /// `resolved`. A platform refusal (no permission) is
+    /// [`PostErrorKind::PostRejected`] with the platform's message.
+    fn set_thread_resolved(
+        &self,
+        _r: &ReviewRef,
+        _thread: &str,
+        _resolved: bool,
+    ) -> PostResultOf<()> {
+        Err(not_resolvable())
+    }
+
     // --- M3: thread history ---
 
     /// What commit `sha` changed, against its first parent (the thread
@@ -187,6 +205,15 @@ fn read_only() -> PostError {
     PostError::new(
         PostErrorKind::Provider,
         "this provider cannot post".to_string(),
+    )
+}
+
+/// A thread its platform has no resolve for (GitHub's PR conversation, a
+/// GitLab single comment), or a provider without the write.
+pub(crate) fn not_resolvable() -> PostError {
+    PostError::new(
+        PostErrorKind::InvalidInput,
+        "This thread cannot be resolved on its platform.",
     )
 }
 

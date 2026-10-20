@@ -16,7 +16,7 @@ use crate::error::{CoreError, CoreResult};
 use crate::files;
 use crate::ids::{ReviewId, ThreadId};
 use crate::poll;
-use crate::provider::{DiffRange, FileDiff, ReviewProvider, Side, Thread};
+use crate::provider::{self as providers, DiffRange, FileDiff, ReviewProvider, Side, Thread};
 use crate::review::{self, ReviewStatus, RoundInput};
 use crate::store::{self, ReviewRecord, StoredThread};
 use crate::Core;
@@ -125,6 +125,49 @@ impl Core {
         let note = provider.reply(&record.review, &stored.thread.id, body)?;
         self.after_write_logged(provider.as_ref(), &record, false);
         Ok(note)
+    }
+
+    /// Resolve (`resolved`) or reopen a stored thread of review `review` on
+    /// its platform: one write, then the review is refreshed through the
+    /// poll's own path, so the stored thread, the history's resolve events
+    /// (its cache is keyed on the resolved state) and the round state
+    /// follow. The watermark stays: resolving is not reviewing new commits.
+    ///
+    /// Only a [`Thread::resolvable`] thread is sent (else
+    /// [`PostErrorKind::InvalidInput`], nothing written). Returns the
+    /// thread as stored afterwards; when the refresh failed, the stored one
+    /// with the new state (the platform has it; the next poll catches up).
+    pub fn resolve_thread(
+        &self,
+        review: ReviewId,
+        thread: ThreadId,
+        resolved: bool,
+    ) -> Result<StoredThread, PostError> {
+        let (record, stored) = self.find_thread(thread)?;
+        if record.id != review {
+            return Err(PostError::new(
+                PostErrorKind::InvalidInput,
+                "the thread is not on this review",
+            ));
+        }
+        if !stored.thread.resolvable {
+            return Err(providers::not_resolvable());
+        }
+        let provider = self.provider_for(&record)?;
+        provider.set_thread_resolved(&record.review, &stored.thread.id, resolved)?;
+        if let Err(e) = self.refresh_review(provider.as_ref(), record.id, Utc::now()) {
+            tracing::debug!("refreshing after resolving a thread failed: {e}");
+        }
+        let after = self
+            .store
+            .threads(record.id)
+            .ok()
+            .and_then(|all| all.into_iter().find(|t| t.thread_id == thread));
+        Ok(after.unwrap_or_else(|| {
+            let mut t = stored;
+            t.thread.resolved = resolved;
+            t
+        }))
     }
 
     /// Approve a review on its platform (a separate, explicit action; never
