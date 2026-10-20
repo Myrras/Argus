@@ -4,6 +4,7 @@ import type { Finding } from "../ipc/types";
 import { aiRun, checklistItem, finding } from "../test/aiFixtures";
 import { thread } from "../test/fixtures";
 import {
+  aiChipText,
   aiStatusText,
   currentRound,
   defaultBody,
@@ -107,6 +108,22 @@ describe("findings", () => {
     expect(aiStatusText(aiRun({ status: "notStarted" }), 0)).toBe(
       "AI: not started",
     );
+  });
+
+  it("keep the chip's visible words short", () => {
+    expect(aiChipText(aiRun({ status: "running" }), 3)).toBe("Running…");
+    expect(aiChipText(aiRun({ status: "done", queued: true }), 2)).toBe(
+      "Queued",
+    );
+    expect(aiChipText(aiRun(), 6)).toBe("6 findings");
+    expect(aiChipText(aiRun(), 1)).toBe("1 finding");
+    expect(
+      aiChipText(aiRun({ status: "failed", error: "agent timed out" }), 0),
+    ).toBe("Failed");
+    expect(aiChipText(aiRun({ status: "failed", error: "cancelled" }), 0)).toBe(
+      "Cancelled",
+    );
+    expect(aiChipText(aiRun({ status: "notStarted" }), 0)).toBe("Not run");
   });
 
   it("count what is set aside as already raised, from the listed points", () => {

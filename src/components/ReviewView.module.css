@@ -48,27 +48,17 @@
 
 .treeTitle {
   flex: 1;
+  min-width: 0;
+  white-space: nowrap;
 }
 
-.treeToggle {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  color: var(--text-muted);
+.treeHeader .segmented {
+  letter-spacing: normal;
 }
 
 .count {
   margin-left: var(--sp-1);
   font-weight: 500;
-}
-
-.modeToggle {
-  height: 22px;
-  padding: 0 var(--sp-2);
-  font-size: var(--fs-xs);
-  letter-spacing: normal;
-  text-transform: none;
-  color: var(--text-muted);
 }
 
 .filter {
@@ -98,7 +88,9 @@
   flex-direction: column;
 }
 
+/* The toolbar is a container so it can drop words before it overflows. */
 .toolbar {
+  container-type: inline-size;
   position: sticky;
   top: 0;
   z-index: 3;
@@ -106,7 +98,7 @@
   align-items: center;
   gap: var(--sp-2);
   height: var(--tabbar-h);
-  padding: 0 var(--sp-3);
+  padding: 0 var(--sp-2) 0 var(--sp-3);
   flex-shrink: 0;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -114,8 +106,36 @@
 }
 
 .progress {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+/* The viewed share as a line over the toolbar's bottom border. */
+.meter {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent);
+  transform-origin: left center;
+  transition: transform var(--dur-3) var(--ease-out);
+  pointer-events: none;
+}
+
+.meter[data-done="true"] {
+  background: var(--success);
+}
+
+.since {
+  height: 26px;
+  padding: 0 var(--sp-2);
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
 }
 
 .since[aria-pressed="true"] {
@@ -124,33 +144,34 @@
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* Two or more icon buttons as one control (diff layout, file list). */
 .segmented {
   display: inline-flex;
+  flex-shrink: 0;
+  gap: 1px;
+  padding: 1px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* Beats the global `button.iconButton` size whatever the stylesheet order. */
+.segmented button:global(.iconButton) {
+  width: 24px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+}
+
+.toolbar .segmented {
   margin-left: auto;
 }
 
-.segmented button {
-  border-radius: 0;
-}
-
-.segmented button:first-child {
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-}
-
-.segmented button:last-child {
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  border-left: none;
-}
-
-.segmented button[aria-pressed="true"] {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.keys {
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
-  white-space: nowrap;
+/* Too narrow for the label: "Since my last review" keeps its icon (and
+   its name for screen readers). */
+@container (max-width: 380px) {
+  .sinceLabel {
+    display: none;
+  }
 }
 
 .error {

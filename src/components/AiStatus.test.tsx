@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -57,6 +63,13 @@ describe("AiStatus", () => {
       expect(chip()).toHaveTextContent("AI: done · 1 finding"),
     );
     expect(chip()).toHaveAttribute("data-status", "done");
+    // The eye gets the short words; the count is not repeated on the toggle.
+    expect(within(chip()).getByText("1 finding")).toHaveAttribute(
+      "aria-hidden",
+    );
+    expect(
+      screen.getByRole("button", { name: "Findings" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Run again" }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("run_ai", { reviewId: r.id }),
@@ -81,6 +94,10 @@ describe("AiStatus", () => {
     const { container } = render(<AiStatus review={r} />);
     await waitFor(() => expect(chip()).toHaveTextContent("AI: running…"));
     expect(container.querySelector(".spinner")).not.toBeNull();
+    // The earlier run's findings: counted on the toggle while this one runs.
+    expect(
+      await screen.findByRole("button", { name: "Findings, 1" }),
+    ).toHaveTextContent("1");
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("cancel_ai", { reviewId: r.id }),

@@ -237,7 +237,24 @@ export function relatedLabel(
   return `related to ${pointLabel(first, threads)}${more}`;
 }
 
-/** The review header chip's text for a run with `findings` findings shown. */
+/**
+ * The header chip's visible words: short, since its sparkle already says
+ * "AI" and the tooltip and the AI panel carry the rest (a failure's reason).
+ */
+export function aiChipText(run: AiRunState, findings: number): string {
+  if (run.status === "running") return "Running…";
+  if (run.queued) return "Queued";
+  switch (run.status) {
+    case "done":
+      return findingCount(findings);
+    case "failed":
+      return run.error === "cancelled" ? "Cancelled" : "Failed";
+    default:
+      return "Not run";
+  }
+}
+
+/** The review header chip's full text for a run with `findings` findings shown. */
 export function aiStatusText(run: AiRunState, findings: number): string {
   if (run.status === "running") return "AI: running…";
   if (run.queued) return "AI: queued";

@@ -1,9 +1,14 @@
 /**
- * The detail island for the selected review: its header (round state, "Mark
- * round reviewed", the pending comments with "Post all", and "Approve") over
- * one review page (`ReviewView`: the Conversation, then every changed file
- * with its threads inline). Without a selection the island shows the
+ * The detail island for the selected review: its header over one review
+ * page (`ReviewView`: the Conversation, then every changed file with its
+ * threads inline). Without a selection the island shows the
  * `WelcomeScreen`.
+ *
+ * The header reads top-down: the title, with the actions top right (the AI
+ * group, pending comments with "Post all", then the review's verdict slot:
+ * "Mark round reviewed" and "Approve"); where the review lives and who wrote
+ * it; then its status with the round, the reasons and what is untouched.
+ * Under a narrow island the actions move below (container query).
  *
  * Approving is its own explicit action, apart from posting: a confirmation
  * names the head being approved (and warns about pending comments, which it
@@ -84,106 +89,116 @@ function ReviewHeader({
 
   return (
     <header className={styles.header}>
-      <div className={styles.topRow}>
-        <PlatformBadge provider={r.provider} />
-        <span className={`${styles.ref} mono`}>{reviewRef(r)}</span>
-        {r.draft && <Badge>Draft</Badge>}
-        <button
-          type="button"
-          className={`ghost ${styles.open}`}
-          onClick={() => openExternal(r.url)}
-          title={r.url}
-        >
-          Open in {PROVIDER_LABEL[r.provider]} <ExternalLinkIcon size={12} />
-        </button>
-      </div>
-      <h1 className={styles.title}>{r.title}</h1>
-      <div className={styles.meta}>
-        <span>
-          by <strong>{r.author}</strong>
-        </span>
-        {r.updatedAt && (
-          <span title={fullTime(r.updatedAt)}>
-            updated {ago(r.updatedAt, now)}
-          </span>
-        )}
-        <Badge tone={r.status === "needsReReview" ? "accent" : "neutral"}>
-          {STATUS_LABEL[r.status]}
-        </Badge>
-        <span>Round {r.round}</span>
-        <AiStatus review={r} />
-        {r.state !== "open" && (
-          <Badge tone={r.state === "merged" ? "accent" : "neutral"}>
-            {r.state === "merged" ? "Merged" : "Closed"}
-          </Badge>
-        )}
-      </div>
-      {(r.roundReasons.length > 0 || untouched) && (
+      <div className={styles.grid}>
+        <h1 className={styles.title}>{r.title}</h1>
+        <div className={styles.actions}>
+          <AiStatus review={r} />
+          {drafts.length > 0 && (
+            <span className={styles.pending} aria-live="polite">
+              <span>
+                {drafts.length} pending{" "}
+                {drafts.length === 1 ? "comment" : "comments"}
+                {failed > 0 && (
+                  <span className={styles.failed}> ({failed} not posted)</span>
+                )}
+              </span>
+              <button
+                type="button"
+                disabled={posting}
+                title="Post every pending comment of this review now"
+                onClick={() => void postAll(r.id)}
+              >
+                {posting ? "Posting…" : "Post all"}
+              </button>
+            </span>
+          )}
+          {/* The review's own verdict: one slot, top right. */}
+          <div className={styles.submit} data-slot="review-submit">
+            <button
+              type="button"
+              className="primary"
+              disabled={!canMark || marking}
+              title={
+                canMark
+                  ? "Remember the current head as reviewed"
+                  : "Nothing new since your last review"
+              }
+              onClick={() => void markReviewed(r.id)}
+            >
+              {marking ? "Marking…" : "Mark round reviewed"}
+            </button>
+            <button
+              type="button"
+              disabled={!canApprove}
+              title={
+                canApprove
+                  ? `Approve on ${PROVIDER_LABEL[r.provider]} (asks first)`
+                  : r.approvedAt
+                    ? "You approved this already"
+                    : "Only an open review can be approved"
+              }
+              onClick={() => setConfirming(true)}
+            >
+              Approve…
+            </button>
+          </div>
+        </div>
         <div className={styles.meta}>
+          <PlatformBadge provider={r.provider} />
+          <span className={styles.ref}>
+            <span className={`${styles.refText} mono`}>{reviewRef(r)}</span>
+            <button
+              type="button"
+              className={`iconButton ${styles.open}`}
+              onClick={() => openExternal(r.url)}
+              aria-label={`Open in ${PROVIDER_LABEL[r.provider]}`}
+              title={`Open in ${PROVIDER_LABEL[r.provider]}: ${r.url}`}
+            >
+              <ExternalLinkIcon />
+            </button>
+          </span>
+          {r.draft && <Badge>Draft</Badge>}
+          {r.state !== "open" && (
+            <Badge tone={r.state === "merged" ? "accent" : "neutral"}>
+              {r.state === "merged" ? "Merged" : "Closed"}
+            </Badge>
+          )}
+          <span>
+            by <strong>{r.author}</strong>
+          </span>
+          {r.updatedAt && (
+            <span title={fullTime(r.updatedAt)}>
+              updated {ago(r.updatedAt, now)}
+            </span>
+          )}
+        </div>
+        <div className={styles.status}>
+          {/* The status and its round read as one: "Needs re-review · R2". */}
+          <span
+            className={styles.statusPill}
+            data-tone={r.status === "needsReReview" ? "accent" : "neutral"}
+          >
+            <span>{STATUS_LABEL[r.status]}</span>
+            <span className={styles.round} title={`Round ${r.round}`}>
+              <span aria-hidden>R{r.round}</span>
+              <span className="visually-hidden">Round {r.round}</span>
+            </span>
+          </span>
           {r.roundReasons.map((reason) => (
             <Badge key={reason} tone="accent">
               {REASON_LABEL[reason]}
             </Badge>
           ))}
           {untouched && <span className={styles.untouched}>{untouched}</span>}
-        </div>
-      )}
-      <div className={styles.actions}>
-        <button
-          type="button"
-          className="primary"
-          disabled={!canMark || marking}
-          title={
-            canMark
-              ? "Remember the current head as reviewed"
-              : "Nothing new since your last review"
-          }
-          onClick={() => void markReviewed(r.id)}
-        >
-          {marking ? "Marking…" : "Mark round reviewed"}
-        </button>
-        <button
-          type="button"
-          disabled={!canApprove}
-          title={
-            canApprove
-              ? `Approve on ${PROVIDER_LABEL[r.provider]} (asks first)`
-              : r.approvedAt
-                ? "You approved this already"
-                : "Only an open review can be approved"
-          }
-          onClick={() => setConfirming(true)}
-        >
-          Approve…
-        </button>
-        {r.lastReviewedAt && (
-          <span
-            className={styles.lastReviewed}
-            title={fullTime(r.lastReviewedAt)}
-          >
-            Last marked reviewed {ago(r.lastReviewedAt, now)}
-          </span>
-        )}
-        {drafts.length > 0 && (
-          <span className={styles.pending} aria-live="polite">
-            <span>
-              {drafts.length} pending{" "}
-              {drafts.length === 1 ? "comment" : "comments"}
-              {failed > 0 && (
-                <span className={styles.failed}> ({failed} not posted)</span>
-              )}
-            </span>
-            <button
-              type="button"
-              className="primary"
-              disabled={posting}
-              title="Post every pending comment of this review now"
-              onClick={() => void postAll(r.id)}
+          {r.lastReviewedAt && (
+            <span
+              className={styles.lastReviewed}
+              title={fullTime(r.lastReviewedAt)}
             >
-              {posting ? "Posting…" : "Post all"}
-            </button>
-          </span>
-        )}
+              Last marked reviewed {ago(r.lastReviewedAt, now)}
+            </span>
+          )}
+        </div>
       </div>
       <ApproveModal
         review={r}

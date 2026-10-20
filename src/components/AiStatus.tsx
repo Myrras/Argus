@@ -1,9 +1,11 @@
 /**
- * The AI pass' state in the review header: a compact chip ("AI: running…",
- * "AI: done · 6 findings", "AI: failed — <reason>", "AI: queued"), Run again
- * / Retry / Cancel, and the toggle of the AI island. Loads the review's run
- * and output when it opens. With the AI pass off it renders nothing (the
- * rest of the review works as before).
+ * The AI pass' state in the review header, one compact group: a chip (the
+ * sparkle or a spinner, then "6 findings", "Running…", "Failed"; the full
+ * state and a failure's reason in its tooltip and for screen readers), an
+ * icon button for Run again / Retry / Cancel, and the toggle of the AI
+ * island (panel icon, with the findings count while the chip shows none).
+ * Loads the review's run and output when it opens. With the AI pass off it
+ * renders nothing (the rest of the review works as before).
  *
  * `AiRunIndicator`: the review list's small spinner while a review's run is
  * queued or running.
@@ -12,7 +14,12 @@
 import { useEffect } from "react";
 
 import type { ReviewId, ReviewRecord } from "../ipc/types";
-import { aiStatusText, skippedSummary, skippedText } from "../lib/findings";
+import {
+  aiChipText,
+  aiStatusText,
+  skippedSummary,
+  skippedText,
+} from "../lib/findings";
 import { withHint } from "../lib/keymap";
 import { useKeymap } from "../lib/useKeymap";
 import {
@@ -24,7 +31,15 @@ import {
   useSkippedFindings,
 } from "../state/aiStore";
 import { useLayoutStore } from "../state/layoutStore";
-import { AiIcon } from "./icons";
+import {
+  AiIcon,
+  AiPanelCloseIcon,
+  AiPanelOpenIcon,
+  ErrorIcon,
+  RerunIcon,
+  RunIcon,
+  StopIcon,
+} from "./icons";
 import styles from "./AiStatus.module.css";
 
 export function AiStatus({ review: r }: { review: ReviewRecord }) {
@@ -58,8 +73,17 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
       : "queued"
     : run.status;
 
+  // The count shows once: in the chip after a finished run, else (an
+  // earlier run's findings while the next one runs or failed) on the toggle.
+  const toggleCount = status !== "done" && active > 0;
+  const runLabel = failed
+    ? "Retry"
+    : run.status === "notStarted"
+      ? "Run now"
+      : "Run again";
+
   return (
-    <span className={styles.ai}>
+    <span className={styles.ai} role="group" aria-label="AI pass">
       <span
         className={styles.chip}
         data-status={status}
@@ -76,40 +100,49 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
       >
         {busy ? (
           <span className={`spinner ${styles.spinner}`} aria-hidden />
+        ) : failed ? (
+          <ErrorIcon size={12} />
         ) : (
           <AiIcon size={12} />
         )}
-        <span className={styles.text}>{aiStatusText(run, active)}</span>
+        {/* Screen readers hear the full state, the eye reads the short one. */}
+        <span className="visually-hidden">{aiStatusText(run, active)}</span>
+        <span className={styles.text} aria-hidden>
+          {aiChipText(run, active)}
+        </span>
       </span>
       {busy ? (
         <button
           type="button"
-          className="ghost"
+          className="iconButton"
           disabled={starting}
+          aria-label="Cancel"
           title="Stop the AI pass of this review"
           onClick={() => void cancel(id)}
         >
-          Cancel
+          <StopIcon />
         </button>
       ) : (
         <button
           type="button"
-          className="ghost"
+          className="iconButton"
           disabled={starting}
-          title="Analyse this review again now"
+          aria-label={runLabel}
+          title={
+            run.status === "notStarted"
+              ? "Run now: analyse this review"
+              : `${runLabel}: analyse this review again now`
+          }
           onClick={() => void runAi(id)}
         >
-          {failed
-            ? "Retry"
-            : run.status === "notStarted"
-              ? "Run now"
-              : "Run again"}
+          {run.status === "notStarted" ? <RunIcon /> : <RerunIcon />}
         </button>
       )}
       <button
         type="button"
-        className={`ghost ${styles.toggle}`}
+        className={`iconButton ${styles.toggle}`}
         aria-pressed={panelOpen}
+        aria-label={toggleCount ? `Findings, ${active}` : "Findings"}
         title={withHint(
           panelOpen ? "Hide the AI findings" : "Show the AI findings",
           keymap,
@@ -117,8 +150,12 @@ export function AiStatus({ review: r }: { review: ReviewRecord }) {
         )}
         onClick={togglePanel}
       >
-        Findings
-        {active > 0 && <span className={styles.count}>{active}</span>}
+        {panelOpen ? <AiPanelCloseIcon /> : <AiPanelOpenIcon />}
+        {toggleCount && (
+          <span className={styles.count} aria-hidden>
+            {active}
+          </span>
+        )}
       </button>
     </span>
   );
