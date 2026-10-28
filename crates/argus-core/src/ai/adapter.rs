@@ -1020,6 +1020,10 @@ Total: 35 tools (34 enabled, 1 disabled)\n";
     }
 
     #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "unix paths: deny_outside writes no rules on Windows"
+    )]
     fn deny_rules_close_everything_around_the_allowed_dirs() {
         let tree: std::collections::HashMap<&str, &[&str]> = [
             (
@@ -1109,6 +1113,14 @@ Total: 35 tools (34 enabled, 1 disabled)\n";
         assert!(settings["permissions"]["deny"]
             .as_array()
             .is_some_and(|d| !d.is_empty()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn no_directory_deny_rules_are_written_on_windows() {
+        let allowed = [PathBuf::from(r"C:\Users\fixture\src\widgets")];
+        let rules = deny_outside(&allowed, |_| Some(vec![OsString::from("other")]), |_| None);
+        assert!(rules.is_empty(), "{rules:?}");
     }
 
     #[test]
