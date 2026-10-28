@@ -1,0 +1,33 @@
+{
+  "url": "https://api.github.com/repos/acme-fixture/widgets/pulls/12",
+  "id": 900012,
+  "html_url": "https://github.com/acme-fixture/widgets/pull/12",
+  "number": 12,
+  "state": "open",
+  "locked": false,
+  "title": "Add widget caching",
+  "user": { "login": "alice-fixture", "id": 1002, "type": "User" },
+  "body": "Caches widgets for a minute.",
+  "created_at": "2026-10-08T10:00:00Z",
+  "updated_at": "2026-10-10T09:00:00Z",
+  "closed_at": null,
+  "merged_at": null,
+  "merge_commit_sha": null,
+  "assignees": [],
+  "requested_reviewers": [
+    { "login": "rev-fixture", "id": 1001, "type": "User" }
+  ],
+  "requested_teams": [],
+  "labels": [],
+  "draft": false,
+  "head": { "label": "alice-fixture:cache", "ref": "cache", "sha": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3" },
+  "base": { "label": "acme-fixture:main", "ref": "main", "sha": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0" },
+  "merged": false,
+  "mergeable": true,
+  "comments": 1,
+  "review_comments": 7,
+  "commits": 3,
+  "additions": 40,
+  "deletions": 4,
+  "changed_files": 3
+}

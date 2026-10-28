@@ -8,6 +8,7 @@ pnpm-debug.log*
 node_modules
 dist
 dist-ssr
+coverage
 *.local
 
 # Rust / Cargo (workspace build output — large)
@@ -23,3 +24,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Agent worktrees
+.claude/worktrees
+.podium
+
+# Local signing identity (machine-specific)
+src-tauri/tauri.dev-signed.conf.json

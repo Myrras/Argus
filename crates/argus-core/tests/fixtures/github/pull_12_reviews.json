@@ -1,0 +1,41 @@
+[
+  {
+    "id": 7001,
+    "user": { "login": "rev-fixture", "id": 1001 },
+    "body": "",
+    "state": "COMMENTED",
+    "commit_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "submitted_at": "2026-10-08T12:00:00Z"
+  },
+  {
+    "id": 7002,
+    "user": { "login": "alice-fixture", "id": 1002 },
+    "body": "",
+    "state": "COMMENTED",
+    "commit_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+    "submitted_at": "2026-10-08T13:00:00Z"
+  },
+  {
+    "id": 7003,
+    "user": { "login": "dana-fixture", "id": 1004 },
+    "body": "Looks fine.",
+    "state": "APPROVED",
+    "commit_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+    "submitted_at": "2026-10-09T12:00:00Z"
+  },
+  {
+    "id": 7004,
+    "user": { "login": "dana-fixture", "id": 1004 },
+    "body": "One more nit.",
+    "state": "COMMENTED",
+    "commit_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+    "submitted_at": "2026-10-09T12:30:00Z"
+  },
+  {
+    "id": 7005,
+    "user": { "login": "erin-fixture", "id": 1005 },
+    "body": "Draft, not sent yet.",
+    "state": "PENDING",
+    "commit_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+  }
+]

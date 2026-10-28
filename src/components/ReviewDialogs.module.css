@@ -1,0 +1,5 @@
+/* The confirmations before a write (`ReviewDialogs`). Tokens only. */
+.confirmText {
+  margin: 0;
+  line-height: 1.5;
+}

@@ -1,0 +1,18 @@
+[
+  {
+    "author": { "id": "U_alice", "is_bot": false, "login": "alice-fixture", "type": "User", "url": "https://github.com/alice-fixture" },
+    "number": 12,
+    "repository": { "name": "widgets", "nameWithOwner": "acme-fixture/widgets" },
+    "title": "Add widget caching",
+    "updatedAt": "2026-10-10T09:00:00Z",
+    "url": "https://github.com/acme-fixture/widgets/pull/12"
+  },
+  {
+    "author": { "id": "U_me", "is_bot": false, "login": "rev-fixture", "type": "User", "url": "https://github.com/rev-fixture" },
+    "number": 15,
+    "repository": { "name": "widgets", "nameWithOwner": "acme-fixture/widgets" },
+    "title": "My own PR",
+    "updatedAt": "2026-10-13T08:00:00Z",
+    "url": "https://github.com/acme-fixture/widgets/pull/15"
+  }
+]

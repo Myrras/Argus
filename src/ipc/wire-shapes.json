@@ -1,0 +1,536 @@
+{
+  "enums": {
+    "AiRunStatus": [
+      "notStarted",
+      "running",
+      "done",
+      "failed"
+    ],
+    "DiffKind": [
+      "same",
+      "changed",
+      "removed",
+      "added"
+    ],
+    "FileStatus": [
+      "added",
+      "modified",
+      "removed",
+      "renamed"
+    ],
+    "GitlabProblem": [
+      "invalidUrl"
+    ],
+    "LineChange.kind": [
+      "modified",
+      "deleted",
+      "fileGone",
+      "renamed"
+    ],
+    "LineStatus.kind": [
+      "located",
+      "deleted",
+      "fileGone",
+      "unlocated",
+      "notCode"
+    ],
+    "MyReviewState": [
+      "awaitingReview",
+      "reviewStarted",
+      "requestedChanges",
+      "commented",
+      "approved",
+      "notReviewer"
+    ],
+    "PostErrorKind": [
+      "notFound",
+      "invalidInput",
+      "githubUnavailable",
+      "gitlabNotConfigured",
+      "gitlabAuth",
+      "provider",
+      "store",
+      "io",
+      "postRejected",
+      "lineNotInDiff",
+      "headMoved",
+      "unsupported"
+    ],
+    "ProviderId": [
+      "github",
+      "gitlab"
+    ],
+    "RepeatReason": [
+      "agentMarked",
+      "similar"
+    ],
+    "ReviewSkillChoice.kind": [
+      "auto",
+      "none",
+      "skill"
+    ],
+    "ReviewState": [
+      "open",
+      "merged",
+      "closed"
+    ],
+    "ReviewStatus": [
+      "needsReview",
+      "needsReReview",
+      "waitingOnAuthor",
+      "closedWithoutApproval",
+      "approved"
+    ],
+    "ReviewVerdict": [
+      "approve",
+      "requestChanges",
+      "comment"
+    ],
+    "RoundReason": [
+      "newCommits",
+      "authorReplied",
+      "reRequested"
+    ],
+    "Severity": [
+      "high",
+      "medium",
+      "low"
+    ],
+    "Side": [
+      "old",
+      "new"
+    ],
+    "SkillSource": [
+      "user",
+      "plugin",
+      "project"
+    ],
+    "SnapshotSource": [
+      "file",
+      "diffHunk"
+    ],
+    "TimelineEvent.kind": [
+      "note",
+      "commit",
+      "resolved",
+      "unresolved"
+    ],
+    "VerdictLabel": [
+      "addressed",
+      "partly",
+      "untouched"
+    ]
+  },
+  "structs": {
+    "AiRunState": [
+      "adapter",
+      "context",
+      "context.notes",
+      "context.rulesFiles",
+      "context.skill",
+      "context.skill.name",
+      "context.skill.source",
+      "context.worktree",
+      "droppedDuplicates",
+      "droppedFindings",
+      "droppedVerdicts",
+      "enabled",
+      "error",
+      "finishedAt",
+      "lastDoneRound",
+      "queued",
+      "readOnlyGuaranteed",
+      "reviewId",
+      "round",
+      "skippedChecklist",
+      "startedAt",
+      "status"
+    ],
+    "ChecklistItem": [
+      "checked",
+      "id",
+      "relatedTo",
+      "relatedTo[].findingId",
+      "relatedTo[].threadId",
+      "repeatOf",
+      "repeatOf.findingId",
+      "repeatOf.reason",
+      "repeatOf.threadId",
+      "reviewId",
+      "round",
+      "text"
+    ],
+    "CloneStatus": [
+      "configured",
+      "found",
+      "head",
+      "matchesReviewHead",
+      "path"
+    ],
+    "CommentableLines": [
+      "baseSha",
+      "headSha",
+      "hunks",
+      "hunks[].new",
+      "hunks[].old",
+      "path",
+      "reviewId"
+    ],
+    "Finding": [
+      "body",
+      "dismissed",
+      "id",
+      "line",
+      "path",
+      "postedAt",
+      "postedUrl",
+      "relatedTo",
+      "relatedTo[].findingId",
+      "relatedTo[].threadId",
+      "repeatOf",
+      "repeatOf.findingId",
+      "repeatOf.reason",
+      "repeatOf.threadId",
+      "reviewId",
+      "round",
+      "severity",
+      "side",
+      "title"
+    ],
+    "FindingPostResult:failed": [
+      "findingId",
+      "kind",
+      "message",
+      "status"
+    ],
+    "FindingPostResult:posted": [
+      "findingId",
+      "postedAt",
+      "postedUrl",
+      "status"
+    ],
+    "LineStatus:deleted": [
+      "kind",
+      "path",
+      "removedBy"
+    ],
+    "LineStatus:fileGone": [
+      "kind",
+      "path",
+      "removedBy"
+    ],
+    "LineStatus:located": [
+      "kind",
+      "line",
+      "moved",
+      "path",
+      "renamed",
+      "startLine",
+      "touched"
+    ],
+    "LineStatus:notCode": [
+      "kind"
+    ],
+    "LineStatus:unlocated": [
+      "kind",
+      "reason"
+    ],
+    "LocalFile": [
+      "absolutePath",
+      "cloneHead",
+      "exists",
+      "matchesReviewHead",
+      "path"
+    ],
+    "NewComment": [
+      "baseSha",
+      "body",
+      "headSha",
+      "line",
+      "path",
+      "side",
+      "startLine"
+    ],
+    "PostResult:failed": [
+      "kind",
+      "message",
+      "status"
+    ],
+    "PostResult:posted": [
+      "headSha",
+      "line",
+      "path",
+      "providerNoteId",
+      "providerThreadId",
+      "side",
+      "startLine",
+      "status",
+      "url"
+    ],
+    "PostedNote": [
+      "providerNoteId",
+      "providerThreadId",
+      "url"
+    ],
+    "ProviderStatus": [
+      "github",
+      "github.enabled",
+      "github.host",
+      "github.installed",
+      "github.loggedIn",
+      "gitlab",
+      "gitlab.baseUrl",
+      "gitlab.configured",
+      "gitlab.insecure",
+      "gitlab.problem",
+      "gitlab.tokenPresent"
+    ],
+    "RefreshReport": [
+      "changed",
+      "errors",
+      "errors[].message",
+      "errors[].provider",
+      "errors[].rateLimitedUntil",
+      "errors[].review",
+      "errors[].unavailable",
+      "refreshedAt"
+    ],
+    "ReviewFiles": [
+      "baseApproximate",
+      "baseSha",
+      "files",
+      "files[].additions",
+      "files[].binary",
+      "files[].contentSha",
+      "files[].deletions",
+      "files[].oldPath",
+      "files[].patch",
+      "files[].path",
+      "files[].status",
+      "files[].tooLarge",
+      "files[].viewed",
+      "headSha",
+      "reviewBaseSha",
+      "reviewId",
+      "sinceLastReview",
+      "truncated"
+    ],
+    "ReviewRecord": [
+      "approvedAt",
+      "author",
+      "baseSha",
+      "draft",
+      "fetchedAt",
+      "headSha",
+      "host",
+      "id",
+      "lastReviewedAt",
+      "lastReviewedSha",
+      "listed",
+      "myReviewState",
+      "myReviewedAt",
+      "myReviewedSha",
+      "number",
+      "provider",
+      "repo",
+      "requested",
+      "rerequestedAt",
+      "round",
+      "roundReasons",
+      "state",
+      "status",
+      "title",
+      "untouchedThreads",
+      "updatedAt",
+      "url",
+      "viewer"
+    ],
+    "ReviewRefresh": [
+      "changed",
+      "review",
+      "review.approvedAt",
+      "review.author",
+      "review.baseSha",
+      "review.draft",
+      "review.fetchedAt",
+      "review.headSha",
+      "review.host",
+      "review.id",
+      "review.lastReviewedAt",
+      "review.lastReviewedSha",
+      "review.listed",
+      "review.myReviewState",
+      "review.myReviewedAt",
+      "review.myReviewedSha",
+      "review.number",
+      "review.provider",
+      "review.repo",
+      "review.requested",
+      "review.rerequestedAt",
+      "review.round",
+      "review.roundReasons",
+      "review.state",
+      "review.status",
+      "review.title",
+      "review.untouchedThreads",
+      "review.updatedAt",
+      "review.url",
+      "review.viewer"
+    ],
+    "ReviewSkillChoice:auto": [
+      "kind"
+    ],
+    "ReviewSkillChoice:none": [
+      "kind"
+    ],
+    "ReviewSkillChoice:skill": [
+      "kind",
+      "name",
+      "source"
+    ],
+    "ReviewSkillList": [
+      "autoPick",
+      "projectListed",
+      "skills",
+      "skills[].description",
+      "skills[].name",
+      "skills[].source"
+    ],
+    "Settings": [
+      "ai",
+      "ai.adapter",
+      "ai.args",
+      "ai.binary",
+      "ai.enabled",
+      "clonePaths",
+      "defaultEditor",
+      "editorOverrides",
+      "github",
+      "github.account",
+      "github.enabled",
+      "github.host",
+      "gitlab",
+      "gitlab.baseUrl",
+      "pollIntervalSecs",
+      "reviewSkills"
+    ],
+    "StoredThread": [
+      "anchor",
+      "anchor.baseSha",
+      "anchor.currentLine",
+      "anchor.diffHunk",
+      "anchor.headSha",
+      "anchor.lineNew",
+      "anchor.lineOld",
+      "anchor.pathNew",
+      "anchor.pathOld",
+      "anchor.side",
+      "anchor.startLine",
+      "anchor.startSha",
+      "author",
+      "createdAt",
+      "id",
+      "mine",
+      "notes",
+      "notes[].author",
+      "notes[].body",
+      "notes[].createdAt",
+      "notes[].id",
+      "notes[].system",
+      "outdated",
+      "resolvable",
+      "resolved",
+      "reviewId",
+      "startedByMe",
+      "threadId"
+    ],
+    "ThreadHistory": [
+      "diffLines",
+      "diffLines[].kind",
+      "diffLines[].now",
+      "diffLines[].now.anchored",
+      "diffLines[].now.line",
+      "diffLines[].now.text",
+      "diffLines[].then",
+      "diffLines[].then.anchored",
+      "diffLines[].then.line",
+      "diffLines[].then.text",
+      "headSha",
+      "nowSnapshot",
+      "nowSnapshot.anchorEnd",
+      "nowSnapshot.anchorStart",
+      "nowSnapshot.firstLine",
+      "nowSnapshot.lines",
+      "nowSnapshot.path",
+      "nowSnapshot.sha",
+      "nowSnapshot.source",
+      "outdated",
+      "reviewId",
+      "status",
+      "status.kind",
+      "status.line",
+      "status.moved",
+      "status.path",
+      "status.renamed",
+      "status.startLine",
+      "status.touched",
+      "thenSnapshot",
+      "thenSnapshot.anchorEnd",
+      "thenSnapshot.anchorStart",
+      "thenSnapshot.firstLine",
+      "thenSnapshot.lines",
+      "thenSnapshot.path",
+      "thenSnapshot.sha",
+      "thenSnapshot.source",
+      "threadId",
+      "timeline",
+      "timeline[].at",
+      "timeline[].author",
+      "timeline[].body",
+      "timeline[].kind",
+      "timeline[].noteId",
+      "timeline[].root",
+      "timeline[].system",
+      "touchedBy"
+    ],
+    "TimelineEntry:commit": [
+      "at",
+      "author",
+      "change",
+      "change.from",
+      "change.kind",
+      "change.to",
+      "kind",
+      "sha",
+      "title"
+    ],
+    "TimelineEntry:note": [
+      "at",
+      "author",
+      "body",
+      "kind",
+      "noteId",
+      "root",
+      "system"
+    ],
+    "TimelineEntry:resolved": [
+      "at",
+      "by",
+      "kind"
+    ],
+    "TimelineEntry:unresolved": [
+      "at",
+      "by",
+      "kind"
+    ],
+    "Verdict": [
+      "aiLabel",
+      "aiReason",
+      "label",
+      "reviewId",
+      "round",
+      "threadId",
+      "userOverride"
+    ]
+  }
+}

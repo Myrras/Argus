@@ -1,0 +1,28 @@
+[
+  {
+    "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+    "filename": "src/new_name.rs",
+    "previous_filename": "src/old_name.rs",
+    "status": "renamed",
+    "additions": 1,
+    "deletions": 1,
+    "changes": 2,
+    "patch": "@@ -4 +4 @@\n-fn a() {}\n+fn b() {}"
+  },
+  {
+    "sha": "f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+    "filename": "assets/logo.png",
+    "status": "modified",
+    "additions": 0,
+    "deletions": 0,
+    "changes": 0
+  },
+  {
+    "sha": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+    "filename": "data/fixtures.json",
+    "status": "modified",
+    "additions": 4200,
+    "deletions": 3100,
+    "changes": 7300
+  }
+]

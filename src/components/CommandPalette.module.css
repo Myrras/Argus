@@ -1,0 +1,118 @@
+/* The command palette (M6): a field over the option list, inside `Modal`. */
+.palette {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.mode {
+  flex: none;
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--selection);
+  color: var(--accent);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: min(420px, 60vh);
+  overflow-y: auto;
+}
+
+.heading {
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+.option[aria-selected="true"] {
+  background: var(--selection);
+  box-shadow: inset var(--focus-ring-width) 0 0 var(--focus-ring);
+}
+
+.label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mark {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.keys {
+  display: flex;
+  gap: var(--sp-1);
+  flex: none;
+}
+
+.kbd {
+  padding: 1px var(--sp-2);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.empty {
+  padding: var(--sp-3) var(--sp-2);
+  color: var(--text-muted);
+}
+
+.footer {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}

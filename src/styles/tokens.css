@@ -1,12 +1,17 @@
 /**
- * Design tokens. Dark-theme-first: the defaults on :root are the dark palette;
- * `:root[data-theme="light"]` overrides them. Components only ever reference
- * these variables, never hard-coded colors, durations, or easings.
+ * Design tokens for Argus (copied from Iris / Podium so the apps look the same;
+ * the violet accent is the only brand difference).
+ * Dark-theme-first: the defaults on :root are the dark palette;
+ * `:root[data-theme="light"]` and `:root[data-theme="retro"]` override them.
+ * Components only ever reference these variables, never hard-coded colors,
+ * durations or easings.
  */
 
 :root {
+  color-scheme: dark;
+
   /* Surfaces (back to front) */
-  --canvas: #08090c;
+  --canvas: #08090c; /* the "desktop" behind the floating islands */
   --bg: #0e1116;
   --surface: #161b22;
   --surface-2: #1c222b;
@@ -23,6 +28,15 @@
   --accent: #a371f7;
   --accent-hover: #bc8cff;
   --accent-contrast: #ffffff;
+  --selection: color-mix(
+    in srgb,
+    var(--accent) 18%,
+    transparent
+  ); /* selected rows, active pane */
+  --selection-inactive: #2f3743; /* selected rows, inactive pane: neutral grey */
+  /* The keyboard focus ring on review items (threads, findings). */
+  --focus-ring: var(--accent);
+  --focus-ring-width: 2px;
 
   /* Semantic */
   --danger: #f85149;
@@ -31,6 +45,12 @@
   --warning-bg: #3a2d12;
   --success: #3fb950;
   --info: #4493f8;
+  /* Code view diff tints, from the semantic colours (so every theme follows
+     its own --success / --danger). */
+  --diff-add-bg: color-mix(in srgb, var(--success) 12%, transparent);
+  --diff-add-strong: color-mix(in srgb, var(--success) 30%, transparent);
+  --diff-del-bg: color-mix(in srgb, var(--danger) 12%, transparent);
+  --diff-del-strong: color-mix(in srgb, var(--danger) 30%, transparent);
 
   /* Typography */
   --font-sans:
@@ -44,7 +64,7 @@
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-lg: 15px;
-  --fs-xl: 20px;
+  --fs-xl: 20px; /* welcome-screen heading */
 
   /* Spacing scale */
   --sp-1: 4px;
@@ -52,13 +72,13 @@
   --sp-3: 12px;
   --sp-4: 16px;
   --sp-5: 24px;
-  --gap-island: var(--sp-2);
+  --gap-island: var(--sp-2); /* canvas gap between floating islands */
 
   /* Radii */
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 10px;
-  --radius-xl: 12px;
+  --radius-xl: 12px; /* island corners (rounder than the 10px modal) */
 
   /* Elevation */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -68,7 +88,8 @@
   /*
    * Motion. The whole UI animates from this one scale — components reference
    * these tokens, never raw durations/curves, so timing stays coherent and a
-   * single edit retunes the whole feel. Durations mirror `src/lib/motion.ts`.
+   * single edit retunes the whole feel. Durations mirror `src/lib/motion.ts`
+   * (the JS side that drives mount/unmount timing); keep the two in sync.
    *
    * Easings: `out` decelerates (entrances feel snappy then settle), `in`
    * accelerates (exits get out of the way), `in-out` is for things that move
@@ -83,10 +104,42 @@
   --dur-2: 150ms; /* fast: small UI — menus, toggles, tabs */
   --dur-3: 220ms; /* base: modals, panels, reveals */
   --dur-4: 360ms; /* slow: large or emphasis transitions */
+
+  /* Layout constants */
+  --sidebar-w: 280px;
+  --tabbar-h: 38px;
+  --file-tree-w: 240px; /* the review view's file tree, while expanded */
+  --ai-panel-w: 340px; /* the AI island right of the review, while open */
+
+  /* Repeating animations that are not state transitions (spinner, pulsing
+     status dots) — kept off the --dur-* scale on purpose. */
+  --dur-spin: 600ms;
+  --dur-pulse: 900ms;
+  --dur-indeterminate: 1.1s; /* sliding segment of an unknown-size progress bar */
+
+  /* Overlays and fixed-contrast glyphs. */
+  --overlay: rgba(0, 0, 0, 0.55); /* modal backdrop */
+  --on-danger: #ffffff; /* text/icons on a --danger fill */
+  --swatch-border: rgba(0, 0, 0, 0.12);
+
+  /* Theme-picker previews (background / accent / text of each theme). The
+     picker shows every theme at once, so these stay fixed across themes —
+     keep them in step with the palettes above and below. */
+  --swatch-dark-bg: #0e1116;
+  --swatch-dark-accent: #a371f7;
+  --swatch-dark-text: #e6edf3;
+  --swatch-light-bg: #f6f8fa;
+  --swatch-light-accent: #8250df;
+  --swatch-light-text: #1f2328;
+  --swatch-retro-bg: #f2e5bc;
+  --swatch-retro-accent: #b16286;
+  --swatch-retro-text: #3c3836;
 }
 
 :root[data-theme="light"] {
-  --canvas: #e7ebef;
+  color-scheme: light;
+
+  --canvas: #e7ebef; /* soft grey so white islands pop */
   --bg: #f6f8fa;
   --surface: #ffffff;
   --surface-2: #f0f3f6;
@@ -112,4 +165,39 @@
   --shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.1);
   --shadow-md: 0 4px 16px rgba(31, 35, 40, 0.15);
   --shadow-lg: 0 12px 40px rgba(31, 35, 40, 0.2);
+}
+
+/* Retro — warm Gruvbox-inspired palette. Earthy cream backgrounds, violet
+   accents, sepia text. A light theme for people who prefer warmth over sterility. */
+:root[data-theme="retro"] {
+  color-scheme: light;
+
+  --canvas: #e8d5a8; /* deeper tan, just below the cream surfaces */
+  --bg: #f2e5bc;
+  --surface: #fbf1c7;
+  --surface-2: #ebdbb2;
+  --surface-hover: #d5c4a1;
+  --border: #bdae93;
+  --border-strong: #a89984;
+
+  --text: #3c3836;
+  --text-muted: #665c54;
+  --text-faint: #7c6f64;
+
+  --accent: #b16286; /* Gruvbox purple, Argus's violet in this palette */
+  --accent-hover: #8f3f71;
+  --accent-contrast: #fbf1c7;
+  --selection: color-mix(in srgb, var(--accent) 18%, transparent);
+  --selection-inactive: #cfbe94;
+
+  --danger: #cc241d;
+  --danger-bg: #f9d8d6;
+  --warning: #d79921;
+  --warning-bg: #f9f0c1;
+  --success: #98971a;
+  --info: #458588;
+
+  --shadow-sm: 0 1px 2px rgba(60, 56, 54, 0.12);
+  --shadow-md: 0 4px 16px rgba(60, 56, 54, 0.18);
+  --shadow-lg: 0 12px 40px rgba(60, 56, 54, 0.24);
 }

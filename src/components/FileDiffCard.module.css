@@ -1,0 +1,188 @@
+.card {
+  margin: 0 var(--sp-3) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  /* Keeps the sticky header inside its card. */
+  overflow: clip;
+  scroll-margin-top: calc(var(--tabbar-h) + var(--sp-2));
+}
+
+.card[data-selected="true"] {
+  border-color: var(--accent);
+}
+
+/* The header stays in view (under the Files toolbar) while its file
+   scrolls by. */
+.header {
+  position: sticky;
+  top: var(--tabbar-h);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--sp-2) 0 var(--sp-1);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.card[data-viewed="true"] .header {
+  background: var(--surface);
+}
+
+.collapse {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.caret {
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.caret[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  padding: 0 var(--sp-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  text-align: left;
+  display: block;
+}
+
+.oldPath {
+  color: var(--text-muted);
+}
+
+.arrow {
+  color: var(--text-faint);
+}
+
+.viewed {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.viewed input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.body {
+  min-width: 0;
+}
+
+/* A note above the diff (the old side takes no comments). */
+.sideNote {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.placeholder {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.error {
+  padding: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+}
+
+.error p {
+  margin: 0 0 var(--sp-2);
+}
+
+.listed {
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.listedTitle {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3) 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.listedCount {
+  font-weight: 500;
+}
+
+.patch {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-1) 0;
+  overflow: auto;
+  font-size: var(--fs-sm);
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.patchLine {
+  display: block;
+  padding: 0 var(--sp-2);
+  white-space: pre;
+}
+
+.patchLine[data-kind="add"] {
+  background: var(--diff-add-bg);
+}
+
+.patchLine[data-kind="del"] {
+  background: var(--diff-del-bg);
+}
+
+.patchLine[data-kind="meta"] {
+  color: var(--text-faint);
+}
+
+/* The editor: no inner vertical scroll (the column scrolls), horizontal
+   scroll per side. */
+.body :global(.argus-diff-editor) {
+  min-width: 0;
+}
+
+.body :global(.cm-mergeView) {
+  overflow-y: visible;
+}
+
+.body :global(.cm-mergeViewEditor) {
+  min-width: 0;
+}

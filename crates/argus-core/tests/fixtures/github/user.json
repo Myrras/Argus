@@ -1,0 +1,10 @@
+{
+  "login": "rev-fixture",
+  "id": 1001,
+  "node_id": "U_kgDOfixture",
+  "type": "User",
+  "site_admin": false,
+  "name": "Reviewer Fixture",
+  "company": null,
+  "html_url": "https://github.com/rev-fixture"
+}

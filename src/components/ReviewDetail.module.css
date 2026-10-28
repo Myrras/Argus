@@ -1,0 +1,265 @@
+/* The detail island: rounded, bordered, elevated, like Iris's pane islands. */
+.island {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  animation: islandIn var(--dur-3) var(--ease-out);
+}
+
+@keyframes islandIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+/* The header is the container its layout queries: the detail island's
+   width depends on the sidebar and the AI island, not on the window. */
+.header {
+  container-type: inline-size;
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The title with the actions top right; the review's facts below, full
+   width. */
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "title actions"
+    "meta meta"
+    "status status";
+  column-gap: var(--sp-4);
+  row-gap: var(--sp-2);
+  align-items: start;
+}
+
+.title {
+  grid-area: title;
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.actions {
+  grid-area: actions;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* The verdict slot: today "Mark round reviewed" + "Approve…". */
+.submit {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.submit button {
+  height: 28px;
+}
+
+.meta,
+.status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.meta {
+  grid-area: meta;
+}
+
+.status {
+  grid-area: status;
+}
+
+.meta strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+/* The ref and its open-in-browser icon stay together. */
+.ref {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.refText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ref .open {
+  width: 22px;
+  height: 22px;
+}
+
+/* Refreshing this review: the glyph turns in the accent, the button stays
+   put (disabled, not dimmed, so the motion reads as progress). */
+.ref .refresh[data-spinning="true"] {
+  color: var(--accent);
+  opacity: 1;
+}
+
+.ref .refresh[data-spinning="true"] svg {
+  animation: spin var(--dur-spin) linear infinite;
+}
+
+/* "Needs re-review | R2": the status badge with its round as a second
+   segment, so the round is read as part of the status. */
+.statusPill {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  height: 20px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.statusPill > span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+}
+
+.statusPill .round {
+  font-variant-numeric: tabular-nums;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.statusPill[data-tone="accent"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.statusPill[data-tone="accent"] .round {
+  border-left-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+/* The user's review state on the platform. */
+.myState {
+  color: var(--text-muted);
+}
+
+.myState[data-state="awaitingReview"],
+.myState[data-state="reviewStarted"] {
+  color: var(--accent);
+}
+
+.myState[data-state="approved"] {
+  color: var(--success);
+}
+
+/* Unresolved threads, GitLab style: the icon carries the hue, the text
+   stays readable; all resolved reads as done. */
+.resolution {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.resolutionIcon {
+  flex-shrink: 0;
+  color: var(--warning);
+}
+
+/* GitLab's ⌃ ⌄ beside the count: a tight pair, smaller than a toolbar
+   button so the status row keeps its height. */
+.jumps {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 2px;
+}
+
+.jumps .jump {
+  width: 20px;
+  height: 20px;
+  color: var(--text-muted);
+}
+
+.resolution[data-done="true"],
+.resolution[data-done="true"] .resolutionIcon {
+  color: var(--success);
+}
+
+.untouched {
+  color: var(--warning);
+}
+
+/* Context, not news: right-aligned and faint while there is room. */
+.lastReviewed {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.pending {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.pending button {
+  height: 28px;
+}
+
+.failed {
+  color: var(--warning);
+}
+
+/* A narrow island: one column, the actions last and left-aligned. */
+@container (max-width: 780px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "title"
+      "meta"
+      "status"
+      "actions";
+  }
+
+  .actions {
+    justify-content: flex-start;
+  }
+
+  .lastReviewed {
+    margin-left: 0;
+  }
+}

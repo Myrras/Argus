@@ -1,0 +1,208 @@
+/* Fills the sidebar's Reviews section; the list scrolls, the tabs stay. */
+.pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 2×2 segmented tabs: the four labels are long, so they get a grid rather
+   than a squeezed row. */
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 0 var(--sp-2) var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.tab:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: transparent;
+  color: var(--text);
+}
+
+.tab[aria-selected="true"] {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.tabLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.count {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-xs);
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+.tab[aria-selected="true"] .count {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.count[data-zero="true"] {
+  background: transparent;
+  color: var(--text-faint);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+}
+
+.item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+  white-space: normal;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  font-size: var(--fs-md);
+}
+
+.item:hover:not(:disabled) {
+  background: var(--surface-hover);
+  border-color: transparent;
+}
+
+.item:active:not(:disabled) {
+  transform: none;
+}
+
+.item[data-cursor="true"] {
+  background: var(--surface-hover);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.item[data-selected="true"] {
+  background: var(--selection);
+  border-left-color: var(--accent);
+}
+
+.item:focus-visible {
+  outline-offset: -2px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.ref {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.age {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Refreshing on its own: a small turning glyph right before the age, in
+   the age's faint tone, so the row reads unchanged at a glance. */
+.refreshing {
+  display: inline-flex;
+  margin-left: auto;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.refreshing svg {
+  animation: spin var(--dur-spin) linear infinite;
+}
+
+.refreshing + .age {
+  margin-left: 0;
+}
+
+.title {
+  color: var(--text);
+  font-weight: 500;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.author {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.round {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.untouched {
+  font-size: var(--fs-xs);
+  color: var(--warning);
+}
+
+.empty {
+  margin: 0;
+  padding: var(--sp-5) var(--sp-4);
+  text-align: center;
+  color: var(--text-faint);
+}
+
+/* A review just approved from Argus, before it leaves the tab. */
+.approved {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--success);
+  animation: approvedIn var(--dur-2) var(--ease-out);
+}
+
+@keyframes approvedIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}

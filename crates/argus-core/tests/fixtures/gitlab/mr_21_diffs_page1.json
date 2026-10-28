@@ -1,0 +1,33 @@
+[
+  {
+    "old_path": "src/importer.rs",
+    "new_path": "src/importer.rs",
+    "a_mode": "100644",
+    "b_mode": "100644",
+    "diff": "@@ -1,3 +1,3 @@\n pub fn retries() -> u32 {\n-    1\n+    3\n }\n",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": false,
+    "generated_file": false
+  },
+  {
+    "old_path": "src/backoff.rs",
+    "new_path": "src/backoff.rs",
+    "a_mode": "0",
+    "b_mode": "100644",
+    "diff": "@@ -0,0 +1,2 @@\n+pub fn backoff() {}\n+\n",
+    "new_file": true,
+    "renamed_file": false,
+    "deleted_file": false
+  },
+  {
+    "old_path": "src/old_import.rs",
+    "new_path": "src/old_import.rs",
+    "a_mode": "100644",
+    "b_mode": "0",
+    "diff": "@@ -1 +0,0 @@\n-pub fn old() {}\n",
+    "new_file": false,
+    "renamed_file": false,
+    "deleted_file": true
+  }
+]

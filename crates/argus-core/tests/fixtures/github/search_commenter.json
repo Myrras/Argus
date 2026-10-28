@@ -1,0 +1,10 @@
+[
+  {
+    "author": { "id": "U_carol", "is_bot": false, "login": "carol-fixture", "type": "User", "url": "https://github.com/carol-fixture" },
+    "number": 3,
+    "repository": { "name": "tools", "nameWithOwner": "acme-fixture/tools" },
+    "title": "Speed up the linter",
+    "updatedAt": "2026-10-01T12:00:00Z",
+    "url": "https://github.com/acme-fixture/tools/pull/3"
+  }
+]

@@ -1,0 +1,39 @@
+{
+  "id": 9005,
+  "iid": 5,
+  "project_id": 200,
+  "title": "Bump the parser",
+  "description": "Bump the parser.",
+  "state": "opened",
+  "created_at": "2026-10-08T10:00:00.000Z",
+  "updated_at": "2026-10-11T09:00:00.000Z",
+  "merged_at": null,
+  "target_branch": "main",
+  "source_branch": "feature",
+  "author": {
+    "id": 44,
+    "username": "bob-fixture",
+    "name": "Bob Fixture",
+    "state": "active",
+    "avatar_url": null,
+    "web_url": "https://gitlab.example.test/bob-fixture"
+  },
+  "assignees": [],
+  "reviewers": [],
+  "draft": false,
+  "work_in_progress": false,
+  "merge_status": "can_be_merged",
+  "sha": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+  "references": {
+    "short": "!5",
+    "relative": "!5",
+    "full": "grp/sub/lib!5"
+  },
+  "web_url": "https://gitlab.example.test/grp/sub/lib/-/merge_requests/5",
+  "diff_refs": {
+    "base_sha": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+    "head_sha": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+    "start_sha": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+  },
+  "user_notes_count": 5
+}

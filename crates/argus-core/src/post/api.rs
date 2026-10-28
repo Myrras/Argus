@@ -1,0 +1,453 @@
+//! The post API on [`Core`]: the only code in Argus that writes to a
+//! platform, and only when called (each call is one explicit user action).
+//!
+//! All of it blocks (network, `gh`): call it from `spawn_blocking`.
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+
+use super::anchor;
+use super::{
+    commentable_hunks, CommentableCache, CommentableLines, NewComment, PostError, PostErrorKind,
+    PostResult, PostedComment, PostedNote,
+};
+use crate::error::{CoreError, CoreResult};
+use crate::files;
+use crate::ids::{ReviewId, ThreadId};
+use crate::poll;
+use crate::provider::{self as providers, DiffRange, FileDiff, ReviewProvider, Side, Thread};
+use crate::review::{self, ReviewStatus, RoundInput};
+use crate::store::{self, ReviewRecord, StoredThread};
+use crate::Core;
+
+impl Core {
+    /// Post `comments` on a review as new line comments, one by one in
+    /// order; the results come back in the same order.
+    ///
+    /// The review's head and diff are read from the platform first, each
+    /// comment is moved to that head and placed on its diff
+    /// ([`resolve`](super::resolve)), then posted. A comment that fails (bad
+    /// input, line no longer in the diff, the platform refused) is reported
+    /// in its slot and the rest still go out. After at least one comment
+    /// was posted the review's threads are refreshed and its watermark
+    /// moves to the head the user was looking at (see
+    /// [`advance_after_write`]); when none was but one was refused with
+    /// [`PostErrorKind::HeadMoved`], the review is refreshed all the same.
+    ///
+    /// `Err` only for failures before anything was posted: the review or
+    /// its provider is unknown, or its head or diff could not be read.
+    pub fn post_comments(
+        &self,
+        id: ReviewId,
+        comments: Vec<NewComment>,
+    ) -> Result<Vec<PostResult>, PostError> {
+        let record = self.review(id)?;
+        let provider = self.provider_for(&record)?;
+        let mut results: Vec<Option<PostResult>> = comments
+            .iter()
+            .map(|c| anchor::validate(c).err().map(PostResult::Failed))
+            .collect();
+        if results.iter().all(Option::is_some) {
+            return Ok(results.into_iter().flatten().collect());
+        }
+        // The platform's head now, not the stored one: comments go on it.
+        let detail = provider.fetch_head(&record.review)?;
+        let mut current = provider.fetch_files(
+            &record.review,
+            &DiffRange::Review {
+                base: detail.base_sha.clone(),
+                head: detail.head_sha.clone(),
+            },
+        )?;
+        // The left side the code view showed (the clone's merge base for a
+        // stand-in), which old-side comments were read against.
+        self.exact_base(&record, &mut current);
+        // The diff must be the one of that head, and the head must not have
+        // moved while it was read: GitHub serves a pull's files at its head
+        // of the moment, and `commit_id` is the head read before, so a push
+        // in between would place lines of one head on another.
+        let moved = current.head_sha != detail.head_sha
+            || provider.fetch_head(&record.review)?.head_sha != detail.head_sha;
+        if moved {
+            self.refresh_after_head_moved(provider.as_ref(), &record);
+            return Err(PostError::new(
+                PostErrorKind::HeadMoved,
+                "The review got new commits while posting; nothing was posted. Check the new commits and post again.",
+            ));
+        }
+        // Per head a comment was written at: the diff from it to now.
+        let mut since: HashMap<String, Result<FileDiff, PostError>> = HashMap::new();
+        let (mut posted_any, mut head_moved) = (false, false);
+        for (c, slot) in comments.iter().zip(results.iter_mut()) {
+            if slot.is_some() {
+                continue;
+            }
+            let written_at = c.head_sha.as_deref().unwrap_or(&record.head_sha);
+            let outcome = post_one(
+                provider.as_ref(),
+                &record,
+                c,
+                written_at,
+                &current,
+                &mut since,
+            );
+            posted_any |= outcome.is_ok();
+            head_moved |= outcome
+                .as_ref()
+                .is_err_and(|e| e.kind == PostErrorKind::HeadMoved);
+            *slot = Some(match outcome {
+                Ok(p) => PostResult::Posted(p),
+                Err(e) => PostResult::Failed(e),
+            });
+        }
+        if posted_any {
+            self.after_write_logged(provider.as_ref(), &record, false);
+        } else if head_moved {
+            // A comment the platform refused for a push (GitLab's own
+            // version check): store the new head, as for a refused batch.
+            self.refresh_after_head_moved(provider.as_ref(), &record);
+        }
+        Ok(results.into_iter().flatten().collect())
+    }
+
+    /// Reply to a stored thread. Then refreshes the review and moves its
+    /// watermark, as after posting.
+    pub fn reply_to_thread(&self, thread: ThreadId, body: &str) -> Result<PostedNote, PostError> {
+        if body.trim().is_empty() {
+            return Err(PostError::new(
+                PostErrorKind::InvalidInput,
+                "the reply is empty",
+            ));
+        }
+        let (record, stored) = self.find_thread(thread)?;
+        let provider = self.provider_for(&record)?;
+        let note = provider.reply(&record.review, &stored.thread.id, body)?;
+        self.after_write_logged(provider.as_ref(), &record, false);
+        Ok(note)
+    }
+
+    /// Resolve (`resolved`) or reopen a stored thread of review `review` on
+    /// its platform: one write, then the review is refreshed through the
+    /// poll's own path, so the stored thread, the history's resolve events
+    /// (its cache is keyed on the resolved state) and the round state
+    /// follow. The watermark stays: resolving is not reviewing new commits.
+    ///
+    /// Only a [`Thread::resolvable`] thread is sent (else
+    /// [`PostErrorKind::InvalidInput`], nothing written). Returns the
+    /// thread as stored afterwards; when the refresh failed, the stored one
+    /// with the new state (the platform has it; the next poll catches up).
+    pub fn resolve_thread(
+        &self,
+        review: ReviewId,
+        thread: ThreadId,
+        resolved: bool,
+    ) -> Result<StoredThread, PostError> {
+        let (record, stored) = self.find_thread(thread)?;
+        if record.id != review {
+            return Err(PostError::new(
+                PostErrorKind::InvalidInput,
+                "the thread is not on this review",
+            ));
+        }
+        if !stored.thread.resolvable {
+            return Err(providers::not_resolvable());
+        }
+        let provider = self.provider_for(&record)?;
+        provider.set_thread_resolved(&record.review, &stored.thread.id, resolved)?;
+        if let Err(e) = self.refetch_after_write(provider.as_ref(), record.id, Utc::now()) {
+            tracing::debug!("refreshing after resolving a thread failed: {e}");
+        }
+        let after = self
+            .store
+            .threads(record.id)
+            .ok()
+            .and_then(|all| all.into_iter().find(|t| t.thread_id == thread));
+        Ok(after.unwrap_or_else(|| {
+            let mut t = stored;
+            t.thread.resolved = resolved;
+            t
+        }))
+    }
+
+    /// Approve a review on its platform (never a merge), pinned to
+    /// `seen_head`: [`submit_review`](Self::submit_review) with
+    /// [`ReviewVerdict::Approve`] and no summary. Returns the review as
+    /// stored afterwards.
+    ///
+    /// [`ReviewVerdict::Approve`]: crate::provider::ReviewVerdict::Approve
+    pub fn approve_review(&self, id: ReviewId, seen_head: &str) -> Result<ReviewRecord, PostError> {
+        self.submit_review(id, crate::provider::ReviewVerdict::Approve, seen_head, None)
+    }
+
+    /// The lines of `path` a new comment can go on, per hunk of the review's
+    /// diff at its stored head (what the code view shows). Blocking.
+    ///
+    /// The diff is read once per review and stored head, not once per file:
+    /// the cache lock is held while reading, so the code view's calls for
+    /// each file of a review share one fetch.
+    pub fn commentable_lines(&self, id: ReviewId, path: &str) -> CoreResult<CommentableLines> {
+        let record = self.review(id)?;
+        let mut cache = self.commentable.lock().expect("commentable lock poisoned");
+        let fresh = cache.as_ref().is_some_and(|c| {
+            c.review == id && c.stored_head == record.head_sha && c.stored_base == record.base_sha
+        });
+        if !fresh {
+            // The left side is resolved below, on a hit as well.
+            let diff = self
+                .provider_for(&record)?
+                .fetch_files(&record.review, &files::review_range(&record))?;
+            *cache = Some(CommentableCache {
+                review: id,
+                stored_head: record.head_sha.clone(),
+                stored_base: record.base_sha.clone(),
+                files: diff
+                    .files
+                    .iter()
+                    .map(|f| {
+                        let hunks = f
+                            .patch
+                            .as_deref()
+                            .map(commentable_hunks)
+                            .unwrap_or_default();
+                        (f.path.clone(), hunks)
+                    })
+                    .collect(),
+                base_sha: diff.base_sha,
+                head_sha: diff.head_sha,
+                base_approximate: diff.base_approximate,
+            });
+        }
+        let c = cache.as_mut().expect("filled above");
+        if c.base_approximate {
+            // A stand-in left side is asked of the local clone on every
+            // read, not only when the diff was: after the user fetches the
+            // clone, `list_files` reports its merge base, and this must too
+            // or the lines no longer match the diff shown. Only the label
+            // changes: the patches were relative to that merge base all
+            // along (the hunks stay). Once found it stays: the merge base
+            // of two fixed commits never changes.
+            let mut sides = FileDiff {
+                base_sha: c.base_sha.clone(),
+                head_sha: c.head_sha.clone(),
+                files: Vec::new(),
+                truncated: false,
+                base_approximate: true,
+            };
+            self.exact_base(&record, &mut sides);
+            c.base_sha = sides.base_sha;
+            c.base_approximate = sides.base_approximate;
+        }
+        let hunks = c
+            .files
+            .get(path)
+            .ok_or_else(|| CoreError::InvalidInput("not a changed file of this review".into()))?;
+        Ok(CommentableLines {
+            review_id: id,
+            path: path.to_string(),
+            hunks: hunks.clone(),
+            base_sha: c.base_sha.clone(),
+            head_sha: c.head_sha.clone(),
+        })
+    }
+
+    /// The stored thread `id` and its review.
+    fn find_thread(&self, id: ThreadId) -> CoreResult<(ReviewRecord, StoredThread)> {
+        for record in self.store.reviews()? {
+            if let Some(t) = self
+                .store
+                .threads(record.id)?
+                .into_iter()
+                .find(|t| t.thread_id == id)
+            {
+                return Ok((record, t));
+            }
+        }
+        Err(CoreError::NotFound)
+    }
+
+    /// After a [`PostErrorKind::HeadMoved`] refusal: store the platform's
+    /// review as it is now, so a retry starts from the new head instead of
+    /// failing until the next poll. Logged only: the refusal is the answer.
+    pub(super) fn refresh_after_head_moved(
+        &self,
+        provider: &dyn ReviewProvider,
+        record: &ReviewRecord,
+    ) {
+        if let Err(e) = self.refetch_after_write(provider, record.id, Utc::now()) {
+            tracing::debug!("refreshing after a moved head failed: {e}");
+        }
+    }
+
+    /// [`after_write`](Self::after_write) where a failure must not turn a
+    /// successful post into an error: logged, and the next poll catches up.
+    fn after_write_logged(
+        &self,
+        provider: &dyn ReviewProvider,
+        before: &ReviewRecord,
+        approved: bool,
+    ) {
+        if let Err(e) = self.after_write(provider, before, approved) {
+            tracing::debug!("updating the review after a post failed: {e}");
+        }
+    }
+
+    /// After a successful write: refresh the review through the poll's own
+    /// path (so the new thread or note is stored), then move the watermark.
+    pub(super) fn after_write(
+        &self,
+        provider: &dyn ReviewProvider,
+        before: &ReviewRecord,
+        approved: bool,
+    ) -> CoreResult<ReviewRecord> {
+        let now = Utc::now();
+        if let Err(e) = self.refetch_after_write(provider, before.id, now) {
+            // The write went through; the watermark still moves.
+            tracing::debug!("refreshing after a post failed: {e}");
+        }
+        // Read, advanced and written in one transaction: a poll storing at
+        // the same time lands before or after it, never in between (a
+        // write of a record read earlier would undo it).
+        self.store.transaction(|conn| {
+            let record = store::read_review(conn, before.id)?.ok_or(CoreError::NotFound)?;
+            let threads: Vec<Thread> = store::read_threads(conn, before.id)?
+                .into_iter()
+                .map(|t| t.thread)
+                .collect();
+            #[cfg(test)]
+            before_watermark_write();
+            let next = advance_after_write(
+                &record,
+                &threads,
+                &before.head_sha,
+                before.fetched_at,
+                approved,
+                now,
+            );
+            store::write_review(conn, &next, store::WriteColumns::All)?;
+            Ok(next)
+        })
+    }
+
+    /// Fetch one review and its threads and store them, as a poll would.
+    /// Unlike [`Core::refresh_review`] it takes no refresh lock: a post
+    /// must not wait behind a poll on the network. The fetch tickets keep
+    /// either from storing an older copy over the other.
+    fn refetch_after_write(
+        &self,
+        provider: &dyn ReviewProvider,
+        id: ReviewId,
+        now: DateTime<Utc>,
+    ) -> CoreResult<()> {
+        let prev = self.review(id)?;
+        let me = provider.current_user()?;
+        let seq = self.store.begin_fetch();
+        let detail = provider.fetch_review(&prev.review)?;
+        let threads = provider.fetch_threads(&prev.review)?;
+        poll::persist(
+            &self.store,
+            Some(&prev),
+            &detail,
+            &threads,
+            &me,
+            prev.listed,
+            now,
+            seq,
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Run once inside `after_write` between reading the stored review and
+    /// writing it back (tests only): where a poll storing at the same time
+    /// would land.
+    pub(crate) static BEFORE_WATERMARK_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_watermark_write() {
+    if let Some(f) = BEFORE_WATERMARK_WRITE.with(|h| h.borrow_mut().take()) {
+        f();
+    }
+}
+
+/// Resolve one comment against the current diff and post it.
+fn post_one(
+    provider: &dyn ReviewProvider,
+    record: &ReviewRecord,
+    c: &NewComment,
+    written_at: &str,
+    current: &FileDiff,
+    since: &mut HashMap<String, Result<FileDiff, PostError>>,
+) -> Result<PostedComment, PostError> {
+    // Only a new-side line moves with the head (see `resolve`).
+    let since_diff = if c.side == Side::New && written_at != current.head_sha {
+        let diff = since.entry(written_at.to_string()).or_insert_with(|| {
+            provider
+                .fetch_files(
+                    &record.review,
+                    &DiffRange::Compare {
+                        from: written_at.to_string(),
+                        to: current.head_sha.clone(),
+                    },
+                )
+                .map_err(PostError::from)
+        });
+        Some(diff.as_ref().map_err(Clone::clone)?)
+    } else {
+        None
+    };
+    let placed = anchor::resolve(c, written_at, current, since_diff)?;
+    provider.post_comment(&record.review, &placed)
+}
+
+/// The record after a successful write (plan §7: the watermark moves when
+/// the user marks the round reviewed, posts or approves).
+///
+/// [`review::mark_reviewed`] moves it to the record's head; the watermark
+/// then goes to `seen_head` instead — the head the user was looking at when
+/// they posted. When the platform's head moved past it, the commits in
+/// between were never seen, so the review stays (or becomes) "needs
+/// re-review". Likewise its time is never past `seen_at`, when the view
+/// the user posted from was fetched (not the refresh after the post): a
+/// reply that came in between was not on screen, and the post does not
+/// answer it. `approved` sets `approved_at` when the refresh did not show
+/// the approval yet (the next refresh keeps or clears it by what the
+/// platform says).
+pub(crate) fn advance_after_write(
+    record: &ReviewRecord,
+    threads: &[Thread],
+    seen_head: &str,
+    seen_at: DateTime<Utc>,
+    approved: bool,
+    now: DateTime<Utc>,
+) -> ReviewRecord {
+    let mut next = review::mark_reviewed(record, threads, now);
+    let needs_approval = approved && next.approved_at.is_none();
+    let seen_earlier = next.last_reviewed_at.is_some_and(|at| at > seen_at);
+    if next.last_reviewed_sha.as_deref() == Some(seen_head) && !needs_approval && !seen_earlier {
+        return next;
+    }
+    if seen_earlier {
+        next.last_reviewed_at = Some(seen_at);
+    }
+    next.last_reviewed_sha = Some(seen_head.to_string());
+    if needs_approval {
+        next.approved_at = Some(now);
+    }
+    let round = review::classify(&RoundInput {
+        seen_at: Some(seen_at),
+        ..RoundInput::of(&next, threads)
+    });
+    // As in `review::advance`: entering re-review starts a round.
+    if round.status == ReviewStatus::NeedsReReview && record.status != ReviewStatus::NeedsReReview {
+        next.round += 1;
+    }
+    next.status = round.status;
+    next.round_reasons = round.reasons;
+    next.untouched_threads = round.untouched_threads;
+    next
+}

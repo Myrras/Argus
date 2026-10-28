@@ -1,0 +1,136 @@
+/* Sidebar island styles, copied from Iris (Podium's Sidebar.module.css); the
+   review rows live in ReviewList.module.css. */
+
+/* A floating island: rounded, bordered, elevated; clips its sections. */
+.sidebar {
+  height: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  flex-shrink: 0;
+  animation: islandIn var(--dur-3) var(--ease-out);
+}
+
+@keyframes islandIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.99);
+  }
+}
+
+/* The Reviews section takes the height left; its list scrolls inside it and
+   the Providers section stays pinned below. */
+.reviews {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Sections ──────────────────────────────────────────────────────────────── */
+
+.subsection {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* Divider between stacked sections. */
+.subsection + .subsection,
+.reviews + .subsection {
+  border-top: 1px solid var(--border);
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-2);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Caret + icon + title: the click target that collapses the section. */
+.sectionToggle {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The global `button:hover:not(:disabled)` / `button:active:not(:disabled)`
+ * (0,2,1) would paint a full-width hover bar and shrink the title on press;
+ * matching their pseudo-classes outranks them, so the title only recolours. */
+.sectionToggle:hover:not(:disabled) {
+  background: none;
+  color: var(--text-muted);
+}
+
+.sectionToggle:active:not(:disabled) {
+  transform: none;
+}
+
+/* The caret icon wrapper rotates 90° when the section is expanded. */
+.caretWrap {
+  display: flex;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.caretWrap[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.sectionCount {
+  font-weight: 400;
+}
+
+.panelIcon {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+
+.panelTitle {
+  flex: 1;
+}
+
+/*
+ * Grid trick for smooth height animation from auto → 0 without JS.
+ * The inner wrapper must have overflow:hidden; the outer wrapper uses
+ * grid-template-rows to animate the available space for the inner child.
+ */
+.sectionBody {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows var(--dur-3) var(--ease-out);
+}
+
+.sectionBodyCollapsed {
+  grid-template-rows: 0fr;
+}
+
+.sectionBodyInner {
+  overflow: hidden;
+  min-height: 0;
+}

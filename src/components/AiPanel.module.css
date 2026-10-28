@@ -1,0 +1,100 @@
+/* The AI island: same chrome as the detail island, at a fixed width
+   (Iris's preview island). */
+.panel {
+  flex: 0 0 var(--ai-panel-w);
+  width: var(--ai-panel-w);
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  animation: aiIslandIn var(--dur-3) var(--ease-out);
+}
+
+@keyframes aiIslandIn {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--tabbar-h);
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.subtitle {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.close {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.note,
+.hint {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.hint {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.warning {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+}
+
+.error {
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+}

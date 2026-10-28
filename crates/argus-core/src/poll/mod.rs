@@ -1,0 +1,640 @@
+//! Refreshing: list, fetch, diff against the store, classify, persist — and
+//! a background loop that does it on an interval.
+//!
+//! Providers are blocking (as in Podium), so the loop is a plain thread, not
+//! a tokio task. Each provider refreshes on its own thread; one failing
+//! never stops the other, and one review failing never drops the others.
+//! A rate-limited provider is skipped until its limit lifts.
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+use crate::error::{CoreError, CoreResult};
+use crate::history::cache::read_line_touches;
+use crate::ids::ReviewId;
+use crate::provider::{
+    is_rate_limited, rate_limited, ProviderId, ReviewDetail, ReviewProvider, ReviewRef,
+    ReviewState, Thread,
+};
+use crate::review::advance_with;
+use crate::store::{self, ReviewRecord, Store, WriteColumns};
+
+/// How many reviews of one provider are fetched at the same time.
+const FETCH_PARALLELISM: usize = 4;
+
+/// One failure during a refresh. `message` is the error's app-owned text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshError {
+    pub provider: ProviderId,
+    /// `None` when the provider as a whole failed (listing, auth, `gh`).
+    pub review: Option<ReviewId>,
+    pub message: String,
+    /// The provider cannot be used right now (`gh` missing or logged out,
+    /// no GitLab token, token rejected).
+    pub unavailable: bool,
+    /// Set when the platform rate-limited the provider: when Argus tries it
+    /// again. The message says so too; this is the machine-readable form.
+    pub rate_limited_until: Option<DateTime<Utc>>,
+}
+
+impl RefreshError {
+    fn new(provider: ProviderId, review: Option<ReviewId>, e: &CoreError) -> Self {
+        Self {
+            provider,
+            review,
+            message: e.to_string(),
+            unavailable: e.is_unavailable(),
+            rate_limited_until: None,
+        }
+    }
+
+    /// `e` as a provider-level error; a rate limit also carries the time
+    /// the provider names as its reset.
+    fn for_provider(provider: &dyn ReviewProvider, e: &CoreError) -> Self {
+        let mut err = Self::new(provider.id(), None, e);
+        if is_rate_limited(e) {
+            err.rate_limited_until = provider.rate_limited_until();
+        }
+        err
+    }
+}
+
+/// What one refresh did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshReport {
+    /// Reviews whose stored state changed (new ones included).
+    pub changed: Vec<ReviewId>,
+    pub errors: Vec<RefreshError>,
+    pub refreshed_at: DateTime<Utc>,
+}
+
+/// Where a refresh reads the time: [`Utc::now`] in the app, a fixed or
+/// scripted time in tests.
+pub(crate) type Clock<'a> = &'a (dyn Fn() -> DateTime<Utc> + Sync);
+
+/// Refresh every provider, in parallel, with the time fixed at `now`.
+pub fn refresh_all(
+    providers: &[Arc<dyn ReviewProvider>],
+    store: &Store,
+    now: DateTime<Utc>,
+) -> RefreshReport {
+    refresh_all_unless(providers, store, &move || now, None).expect("no stop flag to stop on")
+}
+
+/// [`refresh_all`], unless `stop` is set once the refresh lock is held:
+/// a poll loop stopped while it waited for another refresh (its settings
+/// were replaced, or Argus quits) ends there instead of running a whole
+/// refresh over its old providers first. `None` when it stopped.
+///
+/// The time is read from `clock` once the lock is held, and per review just
+/// before its fetch, together with the fetch's ticket that orders it
+/// against a slower one (see [`persist`]): what a review's `fetched_at`
+/// says it was read at never predates the read, however long the refresh
+/// waited or ran.
+pub(crate) fn refresh_all_unless(
+    providers: &[Arc<dyn ReviewProvider>],
+    store: &Store,
+    clock: Clock<'_>,
+    stop: Option<&AtomicBool>,
+) -> Option<RefreshReport> {
+    // One refresh at a time per database: a manual refresh asked for while
+    // the poll is on the network waits for it, then reads afresh, instead of
+    // fetching alongside it and racing it to the store. A refresh that
+    // panicked holds no state worth refusing to go on with.
+    let _one_at_a_time = store
+        .refreshing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+        return None;
+    }
+    let now = clock();
+    let results: Vec<(Vec<ReviewId>, Vec<RefreshError>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = providers
+            .iter()
+            .map(|p| {
+                (
+                    p.id(),
+                    s.spawn(|| refresh_provider_with(p.as_ref(), store, clock)),
+                )
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|(id, h)| {
+                h.join().unwrap_or_else(|_| {
+                    let e = CoreError::Provider("the refresh crashed".into());
+                    (Vec::new(), vec![RefreshError::new(id, None, &e)])
+                })
+            })
+            .collect()
+    });
+    let mut report = RefreshReport {
+        changed: Vec::new(),
+        errors: Vec::new(),
+        refreshed_at: now,
+    };
+    for (changed, errors) in results {
+        report.changed.extend(changed);
+        report.errors.extend(errors);
+    }
+    Some(report)
+}
+
+/// One fetched review (and when its fetch started: by the wall clock, and
+/// its ticket from [`Store::begin_fetch`]), or why it could not be.
+type Fetched = (
+    ReviewRef,
+    bool,
+    (DateTime<Utc>, u64),
+    CoreResult<(ReviewDetail, Vec<Thread>)>,
+);
+
+/// Refresh one provider: what it lists now, plus the stored open reviews it
+/// no longer lists (fetched once more to learn whether they were merged,
+/// closed, or just dropped off, then daily: see [`unlisted_due`]). Merged
+/// and closed reviews are final and not fetched again.
+///
+/// While the provider is rate-limited nothing is called: one provider-level
+/// "rate limited until HH:MM" error, the stored reviews untouched. A limit
+/// hit halfway is one such error too, not one per review it cut off.
+pub fn refresh_provider(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    now: DateTime<Utc>,
+) -> (Vec<ReviewId>, Vec<RefreshError>) {
+    refresh_provider_with(provider, store, &move || now)
+}
+
+/// [`refresh_provider`], reading the time from `clock`: once for the
+/// provider (its rate limit, which unlisted reviews are due), and per
+/// review just before its fetch.
+fn refresh_provider_with(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    clock: Clock<'_>,
+) -> (Vec<ReviewId>, Vec<RefreshError>) {
+    let now = clock();
+    let pid = provider.id();
+    let fail = |e: CoreError| (Vec::new(), vec![RefreshError::for_provider(provider, &e)]);
+    if let Some(until) = provider.rate_limited_until().filter(|u| *u > now) {
+        return fail(rate_limited(pid, until));
+    }
+    let me = match provider.current_user() {
+        Ok(me) => me,
+        Err(e) => return fail(e),
+    };
+    let listed = match provider.list_reviews() {
+        Ok(l) => l,
+        Err(e) => return fail(e),
+    };
+    let stored = match store.reviews() {
+        Ok(s) => s,
+        Err(e) => return fail(e),
+    };
+    let listed_ids: HashSet<ReviewId> = listed.iter().map(ReviewRef::id).collect();
+    let mut targets: Vec<(ReviewRef, bool)> = listed.into_iter().map(|r| (r, true)).collect();
+    targets.extend(
+        stored
+            .iter()
+            .filter(|r| {
+                r.review.provider == pid
+                    && r.review.host == provider.host()
+                    && r.state == ReviewState::Open
+                    && !listed_ids.contains(&r.id)
+                    && unlisted_due(r, now)
+            })
+            .map(|r| (r.review.clone(), false)),
+    );
+
+    let mut fetched: Vec<Fetched> = Vec::with_capacity(targets.len());
+    for chunk in targets.chunks(FETCH_PARALLELISM) {
+        std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|(r, listed)| {
+                    let h = s.spawn(move || {
+                        let started = clock();
+                        let seq = store.begin_fetch();
+                        let fetch = || {
+                            let detail = provider.fetch_review(r)?;
+                            let threads = provider.fetch_threads(r)?;
+                            Ok((detail, threads))
+                        };
+                        ((started, seq), fetch())
+                    });
+                    (r, *listed, h)
+                })
+                .collect();
+            for (r, listed, h) in handles {
+                let (started, result) = h.join().unwrap_or_else(|_| {
+                    ((now, 0), Err(CoreError::Provider("a fetch crashed".into())))
+                });
+                fetched.push((r.clone(), listed, started, result));
+            }
+        });
+    }
+
+    let mut changed = Vec::new();
+    let mut errors = Vec::new();
+    let mut limited: Option<CoreError> = None;
+    for (r, listed, (started, seq), result) in fetched {
+        let id = r.id();
+        let prev = stored.iter().find(|s| s.id == id);
+        let outcome = match result {
+            Ok((detail, threads)) => {
+                persist(store, prev, &detail, &threads, &me, listed, started, seq)
+            }
+            // An unlisted review that is gone (deleted, access lost): just
+            // no longer listed.
+            Err(CoreError::NotFound) if !listed => match prev {
+                Some(p) => {
+                    let dropped = p.listed;
+                    let marked = if dropped {
+                        store.set_listed(id, false)
+                    } else {
+                        Ok(())
+                    };
+                    marked
+                        .and_then(|_| store.touch_fetched(id, started))
+                        .map(|_| dropped)
+                }
+                None => Ok(false),
+            },
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(true) => changed.push(id),
+            Ok(false) => {}
+            Err(e) if is_rate_limited(&e) => {
+                limited.get_or_insert(e);
+            }
+            Err(e) => errors.push(RefreshError::new(pid, Some(id), &e)),
+        }
+    }
+    if let Some(e) = limited {
+        // The latest reset, when calls in parallel hit different ones.
+        let e = provider
+            .rate_limited_until()
+            .map_or(e, |until| rate_limited(pid, until));
+        errors.push(RefreshError::for_provider(provider, &e));
+    }
+    (changed, errors)
+}
+
+/// What refreshing one review did ([`Core::refresh_review`](crate::Core::refresh_review)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewRefresh {
+    /// The review as stored afterwards.
+    pub review: ReviewRecord,
+    /// This refresh changed its stored state. `false` also when a full
+    /// refresh it waited for had read it after it was asked for: that one
+    /// reported the change.
+    pub changed: bool,
+}
+
+impl ReviewRefresh {
+    /// The refresh as a report, for what runs after every refresh (the AI
+    /// pass' [`on_refresh_report`](crate::Core::on_refresh_report)).
+    pub fn report(&self) -> RefreshReport {
+        RefreshReport {
+            changed: if self.changed {
+                vec![self.review.id]
+            } else {
+                Vec::new()
+            },
+            errors: Vec::new(),
+            refreshed_at: self.review.fetched_at,
+        }
+    }
+}
+
+/// Refresh the stored review `id` alone: its detail and threads, stored
+/// through [`persist`] like a poll's fetch. Nothing is listed, and the
+/// review keeps its `listed` flag (the next poll's list call decides that).
+///
+/// It is a refresh like any other: it takes the refresh lock, so it waits
+/// for a full refresh under way (and a poll waits for it). Waiting, not
+/// fetching alongside, is what keeps the two from racing to the store; and
+/// if that full refresh read this review after it was asked for, its
+/// answer is already as fresh as asked and no second read goes out (see
+/// [`refresh_review_asked`]).
+///
+/// A rate-limited provider is not called at all: the "rate limited until
+/// HH:MM" error, before and after the wait. Any other failure is the
+/// provider's error; the stored review stays as it was.
+pub(crate) fn refresh_review(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    id: ReviewId,
+    clock: Clock<'_>,
+) -> CoreResult<ReviewRefresh> {
+    // The ticket of the ask, taken before any wait.
+    let asked = store.begin_fetch();
+    refresh_review_asked(provider, store, id, asked, clock)
+}
+
+/// [`refresh_review`], asked at ticket `asked`.
+pub(crate) fn refresh_review_asked(
+    provider: &dyn ReviewProvider,
+    store: &Store,
+    id: ReviewId,
+    asked: u64,
+    clock: Clock<'_>,
+) -> CoreResult<ReviewRefresh> {
+    let pid = provider.id();
+    let limited = |now: DateTime<Utc>| {
+        provider
+            .rate_limited_until()
+            .filter(|u| *u > now)
+            .map(|until| rate_limited(pid, until))
+    };
+    // Fail fast: no wait on a full refresh for an answer known now.
+    if let Some(e) = limited(clock()) {
+        return Err(e);
+    }
+    let _one_at_a_time = store
+        .refreshing
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stored = |changed| {
+        let review = store.review(id)?.ok_or(CoreError::NotFound)?;
+        Ok(ReviewRefresh { review, changed })
+    };
+    // Joined: the refresh this one waited for stored a fetch that started
+    // after the ask.
+    if store.fetched_since(id, asked) {
+        return stored(false);
+    }
+    // The wait may have ended on a limit the full refresh ran into.
+    if let Some(e) = limited(clock()) {
+        return Err(e);
+    }
+    let record = store.review(id)?.ok_or(CoreError::NotFound)?;
+    // A limit hit halfway names the provider's reset, as in a poll.
+    let latest_reset = |e: CoreError| {
+        if is_rate_limited(&e) {
+            if let Some(until) = provider.rate_limited_until() {
+                return rate_limited(pid, until);
+            }
+        }
+        e
+    };
+    let me = provider.current_user().map_err(latest_reset)?;
+    let started = clock();
+    let seq = store.begin_fetch();
+    let fetch = || {
+        let detail = provider.fetch_review(&record.review)?;
+        let threads = provider.fetch_threads(&record.review)?;
+        Ok((detail, threads))
+    };
+    let (detail, threads) = fetch().map_err(latest_reset)?;
+    let changed = persist(
+        store,
+        Some(&record),
+        &detail,
+        &threads,
+        &me,
+        record.listed,
+        started,
+        seq,
+    )?;
+    stored(changed)
+}
+
+/// How often a stored open review the list no longer has is fetched (to
+/// learn whether it was merged or closed meanwhile): once when it drops
+/// off, then at most this often.
+const UNLISTED_EVERY: chrono::Duration = chrono::Duration::days(1);
+
+/// Whether the unlisted review `r` is fetched in a refresh at `now`: right
+/// after it dropped off (the last list still had it), then once per
+/// [`UNLISTED_EVERY`] since its last fetch.
+fn unlisted_due(r: &ReviewRecord, now: DateTime<Utc>) -> bool {
+    r.listed || now - r.fetched_at >= UNLISTED_EVERY
+}
+
+/// Classify a fresh fetch against the stored record and store it if
+/// anything changed. `seq` is the fetch's ticket from
+/// [`Store::begin_fetch`], taken when it started; `now` is when it started
+/// by the wall clock (shown, and what an unlisted review's next fetch is
+/// timed from).
+///
+/// The stored record is re-read, classified against and written in one
+/// transaction, so whatever landed while the fetch was on the network (the
+/// user marking it reviewed, an approval from Argus) is what the fetch is
+/// folded into, never overwritten by an older copy. The poll's own `prev`
+/// is therefore not used (kept for callers that still pass one). The
+/// watermark is never written here (see [`WriteColumns::Fetched`]).
+///
+/// A fetch that started before the newest one stored is older than what
+/// is stored and is dropped (`Ok(false)`): a slow poll landing after a
+/// refresh that overtook it (after a post) would otherwise move the head
+/// back, start a false round and drop the threads posted meanwhile. An
+/// unchanged fetch counts as the newest look at the review too. The order
+/// is the tickets', not the wall clock's: a clock stepping back between
+/// two starts would make the older fetch look newer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn persist(
+    store: &Store,
+    _prev: Option<&ReviewRecord>,
+    detail: &ReviewDetail,
+    threads: &[Thread],
+    me: &str,
+    listed: bool,
+    now: DateTime<Utc>,
+    seq: u64,
+) -> CoreResult<bool> {
+    let id = detail.review.id();
+    store.transaction(|conn| {
+        if !store.claim_fetch(id, seq) {
+            return Ok(false);
+        }
+        let prev = store::read_review(conn, id)?;
+        // What the user wrote since is told against the stored threads.
+        let stored: Vec<Thread> = match &prev {
+            Some(_) => store::read_threads(conn, id)?
+                .into_iter()
+                .map(|t| t.thread)
+                .collect(),
+            None => Vec::new(),
+        };
+        // The cached line walks at this head sharpen the untouched count;
+        // none (or a failed read) falls back to the approximation.
+        let touches = read_line_touches(conn, id, &detail.head_sha).ok();
+        let mut next = advance_with(
+            prev.as_ref().map(|p| (p, stored.as_slice())),
+            detail,
+            threads,
+            me,
+            listed,
+            now,
+            touches.as_ref(),
+        );
+        next.fingerprint = fingerprint(detail, threads);
+        let changed = match &prev {
+            Some(p) => {
+                let mut same_time = p.clone();
+                same_time.fetched_at = next.fetched_at;
+                same_time != next
+            }
+            None => true,
+        };
+        if changed {
+            store::write_review(conn, &next, WriteColumns::Fetched)?;
+            store::write_threads(conn, id, threads, me)?;
+        } else {
+            // The newest look at the review, changed or not: what an
+            // unlisted review's daily fetch is timed from (see
+            // `unlisted_due`).
+            store::touch_fetched(conn, id, now)?;
+        }
+        Ok(changed)
+    })
+}
+
+/// FNV-1a over the fetched data: stable across runs and releases (unlike
+/// `DefaultHasher`), and plenty to tell "something changed".
+fn fingerprint(detail: &ReviewDetail, threads: &[Thread]) -> String {
+    let json = serde_json::to_string(&(detail, threads)).unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in json.bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+enum Command {
+    Now,
+    Stop,
+}
+
+/// A running background refresh loop. Dropping it stops the loop (and waits
+/// for an in-flight refresh to finish).
+pub struct Poller {
+    tx: Sender<Command>,
+    /// Set on stop: a refresh still under way then ends without reporting.
+    stopped: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+    /// The providers the loop refreshes (tests: which ones it got).
+    #[cfg(test)]
+    pub(crate) providers: Vec<Arc<dyn ReviewProvider>>,
+}
+
+impl Poller {
+    /// Refresh right away, then every `interval`, calling `on_refresh` with
+    /// each report (the shell emits `review:changed` per id in
+    /// `report.changed` and one `reviews:refreshed`).
+    pub fn start<F>(
+        providers: Vec<Arc<dyn ReviewProvider>>,
+        store: Arc<Store>,
+        interval: Duration,
+        on_refresh: F,
+    ) -> Self
+    where
+        F: Fn(&RefreshReport) + Send + 'static,
+    {
+        let (tx, rx) = mpsc::channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        #[cfg(test)]
+        let polled = providers.clone();
+        let handle = std::thread::Builder::new()
+            .name("argus-poll".into())
+            .spawn(move || loop {
+                let Some(report) = refresh_all_unless(&providers, &store, &Utc::now, Some(&stop))
+                else {
+                    return;
+                };
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                on_refresh(&report);
+                match rx.recv_timeout(interval) {
+                    Ok(Command::Now) | Err(RecvTimeoutError::Timeout) => {}
+                    Ok(Command::Stop) | Err(RecvTimeoutError::Disconnected) => break,
+                }
+                // Collapse a burst of "now" requests into one refresh.
+                loop {
+                    match rx.try_recv() {
+                        Ok(Command::Now) => {}
+                        Ok(Command::Stop) | Err(mpsc::TryRecvError::Disconnected) => return,
+                        Err(mpsc::TryRecvError::Empty) => break,
+                    }
+                }
+            })
+            .expect("spawn the poll thread");
+        Self {
+            tx,
+            stopped,
+            handle: Some(handle),
+            #[cfg(test)]
+            providers: polled,
+        }
+    }
+
+    /// Refresh now instead of waiting for the interval.
+    pub fn refresh_now(&self) {
+        let _ = self.tx.send(Command::Now);
+    }
+
+    /// Stop the loop and wait for it.
+    pub fn stop(mut self) {
+        self.shutdown();
+    }
+
+    /// Tell the loop to stop, without waiting: a refresh under way ends
+    /// on its own and reports nothing.
+    pub fn request_stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = self.tx.send(Command::Stop);
+    }
+
+    /// Stop the loop, waiting at most `deadline` for a refresh under way
+    /// (for quitting: one `gh` or GitLab call can take up to a minute).
+    /// Past it the thread is left to end on its own; every store write is
+    /// a transaction, so the process exiting under it loses at most that
+    /// refresh. Whether the loop ended in time.
+    pub fn stop_within(mut self, deadline: Duration) -> bool {
+        self.request_stop();
+        let Some(h) = self.handle.take() else {
+            return true;
+        };
+        let until = Instant::now() + deadline;
+        while !h.is_finished() {
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = h.join();
+        true
+    }
+
+    fn shutdown(&mut self) {
+        self.request_stop();
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests;

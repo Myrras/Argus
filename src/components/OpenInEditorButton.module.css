@@ -1,0 +1,20 @@
+.button {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--text-muted);
+}
+
+.button:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.button:disabled {
+  opacity: 0.45;
+}
+
+/* The clone is on another commit: the file may differ from the review's. */
+.button[data-head-moved="true"]:not(:disabled) {
+  color: var(--warning);
+}

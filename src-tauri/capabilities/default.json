@@ -1,7 +1,23 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window: core APIs, the logging plugin, and window-state persistence.",
-  "windows": ["main"],
-  "permissions": ["core:default", "log:default", "window-state:default"]
+  "description": "Capability for the main window: core APIs, logging, window-state persistence, opening http(s) review links in the browser (nothing else of the opener: Open in editor and Show in Finder run from Rust, so the webview cannot open paths), the native folder picker only (a local clone in Settings), and the custom-title-bar window controls (Windows; dragging on macOS and Windows).",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "log:default",
+    "window-state:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://*" }, { "url": "http://*" }]
+    },
+    "dialog:allow-open",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized"
+  ]
 }
