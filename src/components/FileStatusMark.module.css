@@ -1,0 +1,72 @@
+.mark {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.mark[data-status="added"] {
+  color: var(--success);
+}
+
+.mark[data-status="modified"] {
+  color: var(--warning);
+}
+
+.mark[data-status="removed"] {
+  color: var(--danger);
+}
+
+.mark[data-status="renamed"] {
+  color: var(--info);
+}
+
+.stats {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: var(--sp-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.add {
+  color: var(--success);
+}
+
+.del {
+  color: var(--danger);
+}
+
+.threads {
+  flex-shrink: 0;
+  min-width: 18px;
+  height: 16px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+/* Some of the threads are the user's: what this round is about. */
+.threads[data-mine="true"] {
+  color: var(--accent-contrast);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Unresolved threads: what is still to settle, quiet but warm. */
+.open {
+  flex-shrink: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--warning);
+}

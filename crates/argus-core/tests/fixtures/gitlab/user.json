@@ -1,0 +1,10 @@
+{
+  "id": 42,
+  "username": "rev-fixture",
+  "name": "Rev Fixture",
+  "state": "active",
+  "avatar_url": null,
+  "web_url": "https://gitlab.example.test/rev-fixture",
+  "email": "rev@example.test",
+  "is_admin": false
+}

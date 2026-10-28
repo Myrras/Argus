@@ -1,0 +1,117 @@
+.tree {
+  list-style: none;
+  margin: 0;
+  padding: var(--sp-1) 0;
+}
+
+.empty {
+  margin: 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+
+.dirItem,
+.fileItem {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.dir,
+.file {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  gap: var(--sp-1);
+  height: 26px;
+  padding-right: var(--sp-1);
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+
+.dir {
+  color: var(--text-muted);
+}
+
+.dir:hover:not(:disabled),
+.file:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.fileItem[data-selected="true"] {
+  background: var(--selection);
+}
+
+.fileItem[data-selected="true"] .file:hover:not(:disabled) {
+  background: transparent;
+}
+
+.fileItem[data-viewed="true"] .name {
+  color: var(--text-faint);
+}
+
+.caret {
+  flex-shrink: 0;
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.caret[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewed {
+  flex-shrink: 0;
+  width: auto;
+  margin: 0 var(--sp-2) 0 var(--sp-1);
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* The Conversation entry: set off from the files below it. The trailing
+   spacer stands in for the Viewed checkbox so the counts line up. */
+.conversationItem {
+  margin-bottom: var(--sp-1);
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+}
+
+.conversationItem::after {
+  content: "";
+  flex-shrink: 0;
+  width: 13px;
+  margin: 0 var(--sp-2) 0 var(--sp-1);
+}
+
+.conversationIcon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+/* Open in editor: on the row under the pointer or with the focus. */
+.fileAction {
+  display: none;
+  flex-shrink: 0;
+}
+
+.fileAction:empty {
+  display: none !important;
+}
+
+.fileItem:hover .fileAction,
+.fileItem:focus-within .fileAction,
+.fileItem[data-selected="true"] .fileAction {
+  display: inline-flex;
+}

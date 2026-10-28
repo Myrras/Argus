@@ -1,0 +1,87 @@
+/* A suggested change: a captioned mini diff in the code view's colours. */
+.suggestion {
+  margin: var(--sp-2) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 24px;
+  padding: 0 var(--sp-2);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-xs);
+}
+
+.title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.where {
+  color: var(--text-faint);
+}
+
+.note {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-xs);
+  font-style: italic;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.lines {
+  margin: 0;
+  padding: 2px 0;
+  overflow-x: auto;
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  color: var(--text);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.line {
+  display: block;
+  padding-right: var(--sp-2);
+  white-space: pre;
+}
+
+.line[data-kind="del"] {
+  background: var(--diff-del-bg);
+}
+
+.line[data-kind="add"] {
+  background: var(--diff-add-bg);
+}
+
+.num {
+  display: inline-block;
+  min-width: 36px;
+  padding: 0 6px 0 10px;
+  text-align: right;
+  color: var(--text-faint);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sign {
+  display: inline-block;
+  width: 14px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.line[data-kind="del"] .sign {
+  color: var(--danger);
+}
+
+.line[data-kind="add"] .sign {
+  color: var(--success);
+}

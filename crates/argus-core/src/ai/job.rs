@@ -1,0 +1,735 @@
+//! One AI run, end to end: read the diff and threads, prepare the working
+//! directory (and, with a local clone, a worktree at the review's head),
+//! read the repository's rules and review skill at the target branch, build
+//! the prompt, run the agent (once more with a repair instruction when its
+//! answer is invalid), validate and filter.
+//!
+//! Nothing is stored here: the runtime saves the [`RunOutput`] in one
+//! transaction, so a failed run leaves the store as it was.
+
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::adapter::{self, Adapter, ChildSlot, Invocation, PromptDelivery, RunDirs};
+use super::context::{self, BaseFiles};
+use super::dedupe;
+use super::model::{Finding, RunContext, UsedSkill};
+use super::output::{self, RunOutput};
+use super::prompt::{self, DiffScope, ExistingThread, Guidance, PromptInput, Workspace};
+use super::skills;
+use super::store::PostedIds;
+use crate::files::{review_range, since_range};
+use crate::git::worktree::{ReviewWorktree, WorktreeError};
+use crate::git::LocalClone;
+use crate::provider::{FileDiff, ReviewProvider};
+use crate::settings::Settings;
+use crate::store::{ReviewRecord, Store, StoredThread};
+
+/// What a queued run needs besides the store, captured when it is queued.
+#[derive(Clone)]
+pub(crate) struct JobContext {
+    pub settings: Settings,
+    /// Read access only: the AI pass never posts.
+    pub provider: Arc<dyn ReviewProvider>,
+    pub timeout: Duration,
+    /// The agent process while one runs; the runtime gives each started run
+    /// a fresh one and kills what is in it on shutdown.
+    pub child: ChildSlot,
+    /// Claude Code's config directory (`~/.claude`): where the user's and
+    /// plugins' review skills are. `None`: none are looked for.
+    pub claude_dir: Option<PathBuf>,
+}
+
+/// Prefix of a run's temp dir under the system temp dir.
+const TEMP_PREFIX: &str = "argus-ai-";
+
+/// A directory under the system temp dir, removed (with its contents) on
+/// drop, so a run cleans up after itself however it ends.
+pub(crate) struct TempDir(PathBuf);
+
+impl TempDir {
+    /// A fresh dir, by its canonical path (macOS' temp dir is behind the
+    /// `/var` → `/private/var` link), which the agent's deny rules name.
+    pub fn new() -> std::io::Result<Self> {
+        let path =
+            std::env::temp_dir().join(format!("{TEMP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&path)?;
+        let path = path.canonicalize().unwrap_or(path);
+        Ok(Self(path))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Remove the temp dirs of runs a previous Argus left behind (it crashed or
+/// was killed mid-run): they hold private diffs. Only for a process that
+/// knows no run of its own is live (the app at startup; one instance runs
+/// at a time). Returns how many went.
+pub fn sweep_stale_temp_dirs() -> usize {
+    sweep_temp_dirs_in(&std::env::temp_dir())
+}
+
+pub(crate) fn sweep_temp_dirs_in(base: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            // Exactly Argus' own names: the prefix and a simple UUID.
+            name.strip_prefix(TEMP_PREFIX)
+                .is_some_and(|id| id.len() == 32 && id.chars().all(|c| c.is_ascii_hexdigit()))
+                && e.file_type().is_ok_and(|t| t.is_dir())
+        })
+        .filter(|e| std::fs::remove_dir_all(e.path()).is_ok())
+        .count()
+}
+
+/// Longest file name most file systems take (`NAME_MAX`), in bytes.
+const MAX_NAME: usize = 255;
+
+/// A path component that fits [`MAX_NAME`] with `suffix` added: as is, or
+/// (a name only a platform could hold) its SHA-1 instead.
+fn fit_name(name: &std::ffi::OsStr, suffix: &str) -> std::ffi::OsString {
+    if name.len() + suffix.len() <= MAX_NAME {
+        let mut out = name.to_os_string();
+        out.push(suffix);
+        return out;
+    }
+    let hash = sha1_smol::Sha1::from(name.to_string_lossy().as_bytes())
+        .digest()
+        .to_string();
+    format!("{hash}{suffix}").into()
+}
+
+/// `diff/<path>.diff` for a diff's `path`: only its normal components (a
+/// hostile `../../x` cannot write outside the snapshot dir), each fitting
+/// a file name. `None` for a path with no normal component.
+fn snapshot_path(path: &str) -> Option<PathBuf> {
+    let parts: Vec<_> = Path::new(path)
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let (last, dirs) = parts.split_last()?;
+    let mut out = PathBuf::from("diff");
+    for d in dirs {
+        out.push(fit_name(d, ""));
+    }
+    out.push(fit_name(last, ".diff"));
+    Some(out)
+}
+
+/// Fill a snapshot dir: `diff/<path>.diff` per file with a patch, and
+/// `threads.json` with every thread of the review. A file that cannot be
+/// written is left out (its patch is in the prompt all the same); only
+/// `threads.json` failing fails.
+pub(crate) fn write_snapshot(
+    dir: &Path,
+    diff: &FileDiff,
+    threads: &[StoredThread],
+) -> std::io::Result<()> {
+    for f in &diff.files {
+        let (Some(patch), Some(rel)) = (f.patch.as_deref(), snapshot_path(&f.path)) else {
+            continue;
+        };
+        let target = dir.join(rel);
+        let written = target
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&target, patch));
+        if let Err(e) = written {
+            tracing::debug!("AI run: a diff file was left out of the snapshot: {e}");
+        }
+    }
+    let json = serde_json::to_string_pretty(threads).map_err(std::io::Error::other)?;
+    std::fs::write(dir.join("threads.json"), json)
+}
+
+/// Tokens the agent's answer must not carry into a finding, besides the
+/// shapes [`super::output::redact`] knows: the configured GitLab token.
+/// (`gh`'s token stays inside the provider; GitHub tokens have fixed
+/// prefixes, which the shapes cover.)
+pub(crate) fn known_secrets(settings: &Settings) -> Vec<String> {
+    use crate::provider::gitlab::{KeychainToken, TokenSource};
+    let url = settings.gitlab.base_url.trim();
+    if url.is_empty() {
+        return Vec::new();
+    }
+    KeychainToken::for_base_url(url)
+        .token()
+        .into_iter()
+        .collect()
+}
+
+/// The run-state note of a run reviewed without a worktree.
+pub(crate) fn no_worktree(why: &str) -> String {
+    format!("Couldn't create a review worktree: {why}; reviewed without it")
+}
+
+/// The commit the rules and project skills are read at: the review's base
+/// (a target-branch commit: GitHub's base commit, GitLab's merge base),
+/// else, for a run over the whole diff, that diff's left side (the merge
+/// base). Never the head or the last-reviewed commit, which the merge
+/// request's author controls. `None` without one.
+fn rules_base(record: &ReviewRecord, full: bool, diff: &FileDiff) -> Option<String> {
+    let sha = if !record.base_sha.trim().is_empty() {
+        record.base_sha.trim()
+    } else if full && !diff.base_approximate {
+        diff.base_sha.trim()
+    } else {
+        ""
+    };
+    (!sha.is_empty()).then(|| sha.to_string())
+}
+
+/// Every path the review changes (for "this merge request changes the
+/// rules"): the run's diff when it is the whole review, else the clone's
+/// diff from the merge base to the head, else the run's diff.
+fn review_paths(
+    full: bool,
+    diff: &FileDiff,
+    clone: Option<&LocalClone>,
+    record: &ReviewRecord,
+) -> Vec<String> {
+    let own: Vec<String> = diff
+        .files
+        .iter()
+        .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+        .collect();
+    if full {
+        return own;
+    }
+    clone
+        .and_then(|c| {
+            let base = c.merge_base(&record.base_sha, &diff.head_sha)?;
+            c.changed_paths(&base, &diff.head_sha)
+        })
+        .unwrap_or(own)
+}
+
+/// The review worktree of a run, or why there is none (a note for the run
+/// state). Cancelled: the run stops.
+fn worktree_for(
+    clone_dir: Option<&Path>,
+    clone: Option<&LocalClone>,
+    record: &ReviewRecord,
+    head: &str,
+    cancel: &AtomicBool,
+) -> Result<(Option<ReviewWorktree>, Option<String>), String> {
+    let Some(dir) = clone_dir else {
+        return Ok((None, None));
+    };
+    let Some(clone) = clone else {
+        tracing::debug!("AI run: {} is no git clone Argus can use", dir.display());
+        return Ok((
+            None,
+            Some(no_worktree(
+                "the clone is not a git repository Argus can use",
+            )),
+        ));
+    };
+    match clone.review_worktree(&record.review, head, cancel) {
+        Ok(wt) => Ok((Some(wt), None)),
+        Err(WorktreeError::Cancelled) => Err(super::CANCELLED.into()),
+        Err(e) => {
+            tracing::debug!("AI run: no review worktree: {e}");
+            Ok((None, Some(no_worktree(&e.to_string()))))
+        }
+    }
+}
+
+/// Compute (and cache) the histories of the threads a later round asks about at the review's
+/// head. Errors are logged and dropped: history is context, not a
+/// requirement of the run.
+fn warm_histories(
+    store: &Store,
+    record: &ReviewRecord,
+    ctx: &JobContext,
+    threads: &[StoredThread],
+) {
+    let ids: Vec<_> = prompt::open_threads(threads, |_| None)
+        .iter()
+        .map(|t| t.thread.thread_id)
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let provider = Ok(ctx.provider.clone());
+    let clone = ctx.settings.clone_path(&record.review);
+    if let Err(e) = crate::history::compute_histories(store, record, &provider, clone, Some(&ids)) {
+        tracing::debug!("AI run: thread history unavailable: {e}");
+    }
+}
+
+/// The cached then/now text of a thread at the review's head, as the prompt
+/// wants it. `None` without a cached history (or with nothing in it).
+fn thread_snapshot(
+    store: &Store,
+    record: &ReviewRecord,
+    thread: crate::ids::ThreadId,
+) -> Option<prompt::ThreadSnapshot> {
+    let text = store.snapshot_text(thread, &record.head_sha).ok()??;
+    let snapshot = prompt::ThreadSnapshot {
+        then_code: text.then_code,
+        now_code: text.now_code,
+        now_path: text.now_path,
+        now_line: text.now_line,
+    };
+    (snapshot != prompt::ThreadSnapshot::default()).then_some(snapshot)
+}
+
+fn check(cancel: &AtomicBool) -> Result<(), String> {
+    if cancel.load(Ordering::Relaxed) {
+        Err(super::CANCELLED.into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Run the AI pass for `record` (blocking).
+pub(crate) fn execute(
+    store: &Store,
+    record: &ReviewRecord,
+    ctx: &JobContext,
+    cancel: &AtomicBool,
+) -> Result<RunOutput, String> {
+    let ai = &ctx.settings.ai;
+    let adapter = adapter::adapter(&ai.adapter)
+        .ok_or_else(|| "unknown agent adapter: choose claude or auggie in Settings".to_string())?;
+    let program = adapter
+        .resolve(ai.binary.as_deref())
+        .ok_or_else(|| adapter::AgentError::NotFound(adapter.binary).message())?;
+
+    // Round 1 (or never marked reviewed): the whole diff. Later: since the
+    // watermark; with no new commits, the whole diff again for context.
+    let provider = ctx.provider.as_ref();
+    let fetch = |range| {
+        provider
+            .fetch_files(&record.review, &range)
+            .map_err(|e| e.to_string())
+    };
+    let first = record.round <= 1 || record.last_reviewed_sha.is_none();
+    let since = if first {
+        None
+    } else {
+        since_range(record).ok()
+    };
+    let new_commits = since.is_some();
+    let mut diff = fetch(since.unwrap_or_else(|| review_range(record)))?;
+    // Old-side findings are numbered at the left side the code view and
+    // posting use (see `crate::exact_base`).
+    crate::exact_base(&ctx.settings, record, &mut diff);
+    let scope = match (first, new_commits) {
+        (true, _) => DiffScope::Full(&diff),
+        (false, true) => DiffScope::SinceLastReview(&diff),
+        (false, false) => DiffScope::FullNoNewCommits(&diff),
+    };
+    check(cancel)?;
+
+    let threads = store.threads(record.id).map_err(|e| e.to_string())?;
+    // Later rounds: the then/now text of the user's open threads. Computed
+    // here (cached per thread and head, so a re-run is cheap) because the
+    // history is otherwise only built when the UI opens a thread. A failure
+    // never fails the run: the thread goes in with its own excerpt only.
+    let asked = if first {
+        Vec::new()
+    } else {
+        warm_histories(store, record, ctx, &threads);
+        check(cancel)?;
+        prompt::open_threads(&threads, |id| thread_snapshot(store, record, id))
+    };
+    let known: HashSet<_> = asked.iter().map(|t| t.thread.thread_id).collect();
+    // Every thread, in every round, so nothing the review already says is
+    // raised again; with its then/now code when the history cache has it
+    // (only read here: computing it for every thread would cost a walk
+    // each).
+    let snapshots: Vec<_> = threads
+        .iter()
+        .map(|t| thread_snapshot(store, record, t.thread_id))
+        .collect();
+    let earlier = super::store::findings(store, record.id).map_err(|e| e.to_string())?;
+    let posted_ids = super::store::posted_ids(store, record.id).map_err(|e| e.to_string())?;
+    // A posted finding whose thread is already fetched is that thread.
+    let unfetched: Vec<&Finding> = earlier
+        .iter()
+        .filter(|f| f.posted_at.is_some())
+        .filter(|f| {
+            let ids = posted_ids.get(&f.id).cloned().unwrap_or_default();
+            !threads.iter().any(|t| posted_as(t, f, &ids))
+        })
+        .collect();
+    let raised = dedupe::raised_points(
+        &threads
+            .iter()
+            .zip(snapshots.iter().cloned())
+            .collect::<Vec<_>>(),
+        &unfetched,
+    );
+    // What `relatedThreadIds` may name: what the prompt lists by id.
+    let related: HashSet<String> = raised.iter().map(|r| r.of.id()).collect();
+    let existing: Vec<ExistingThread<'_>> = threads
+        .iter()
+        .zip(snapshots)
+        .map(|(thread, snapshot)| ExistingThread { thread, snapshot })
+        .collect();
+    let paths: HashSet<String> = diff
+        .files
+        .iter()
+        .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+        .collect();
+
+    let clone_dir = ctx
+        .settings
+        .clone_path(&record.review)
+        .filter(|p| p.is_dir())
+        .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
+    let local = clone_dir.as_deref().and_then(LocalClone::open);
+    let mut notes: Vec<String> = Vec::new();
+    // With a clone, the agent reads a worktree at the review's head (fetched
+    // when missing), removed when `worktree` drops however the run ends.
+    // Without one it reads the clone as it is, as before.
+    let (worktree, why_not) = worktree_for(
+        clone_dir.as_deref(),
+        local.as_ref(),
+        record,
+        &diff.head_sha,
+        cancel,
+    )?;
+    notes.extend(why_not);
+    if let Some(wt) = worktree.as_ref().filter(|w| w.fetched()) {
+        tracing::debug!(
+            "AI run: fetched the review's head {} into the clone",
+            wt.head()
+        );
+    }
+    check(cancel)?;
+    // The rules and the review skill, from the target branch.
+    let full = matches!(scope, DiffScope::Full(_));
+    let base = rules_base(record, full, &diff)
+        .map(|sha| BaseFiles::new(sha, local.as_ref(), Some((provider, &record.review))));
+    let diff_paths: Vec<String> = diff.files.iter().map(|f| f.path.clone()).collect();
+    let rules = base
+        .as_ref()
+        .map(|b| context::rules(b, &diff_paths))
+        .unwrap_or_default();
+    let (skill, skill_note) = skills::resolve(
+        &ctx.settings.review_skill(&record.review),
+        ctx.claude_dir.as_deref(),
+        base.as_ref(),
+    );
+    notes.extend(skill_note);
+    let changed_rules = context::rules_changed(&review_paths(full, &diff, local.as_ref(), record));
+    if !changed_rules.is_empty() {
+        notes.push(format!(
+            "This merge request changes review rules or skills ({}); the target branch's versions were used",
+            context::listed(&changed_rules)
+        ));
+    }
+    check(cancel)?;
+    // What the agent may read besides its temp dir: the worktree, else the
+    // clone as it is. The deny rules close everything around it and its
+    // secret files (`.git`, `.env`, keys).
+    let read_dir: Option<PathBuf> = worktree
+        .as_ref()
+        .map(|w| w.path().to_path_buf())
+        .or_else(|| clone_dir.clone());
+    // The working directory is always the run's own temp dir: an agent
+    // started in the clone would load the checkout's own agent settings
+    // (hooks, env, an API key helper), which a PR branch can change.
+    let temp = TempDir::new().map_err(|_| "could not create a temp dir for the run".to_string())?;
+    write_snapshot(temp.path(), &diff, &threads)
+        .map_err(|_| "could not write the review snapshot".to_string())?;
+    let workspace = match (&worktree, &clone_dir) {
+        (Some(wt), _) => Workspace::Worktree {
+            path: wt.path(),
+            head: wt.head(),
+        },
+        (None, Some(c)) => Workspace::Clone(c),
+        (None, None) => Workspace::Snapshot,
+    };
+    let conventions: Vec<(String, String)> = rules
+        .files
+        .iter()
+        .map(|f| (f.path.clone(), f.text.clone()))
+        .collect();
+    let guidance = Guidance {
+        skill: skill.as_ref(),
+        truncated: rules
+            .files
+            .iter()
+            .filter(|f| f.truncated)
+            .map(|f| f.path.clone())
+            .collect(),
+        left_out: rules.left_out.clone(),
+        changed: changed_rules,
+    };
+    let run_context = RunContext {
+        rules_files: rules.files.iter().map(|f| f.path.clone()).collect(),
+        skill: skill.as_ref().map(|s| UsedSkill {
+            name: s.name.clone(),
+            source: s.source,
+        }),
+        worktree: worktree.is_some(),
+        notes,
+    };
+    let settings_file = match adapter.id {
+        "claude" => {
+            let mut allowed = vec![temp.path().to_path_buf()];
+            allowed.extend(read_dir.clone());
+            let file = temp.path().join("claude-settings.json");
+            let json = adapter::claude_settings(&allowed, read_dir.as_deref()).to_string();
+            std::fs::write(&file, json)
+                .map_err(|_| "could not write the agent's settings".to_string())?;
+            Some(file)
+        }
+        _ => None,
+    };
+    // Auggie has no allow-list: what it lists for this user (MCP tools
+    // included) is removed, all but the read tools.
+    let listed_tools = match adapter.id {
+        "auggie" => {
+            check(cancel)?;
+            let inv = Invocation {
+                program: PathBuf::from(&program),
+                args: vec!["tools".into(), "list".into()],
+                cwd: temp.path().to_path_buf(),
+                env: agent_env(),
+                stdin: None,
+                timeout: ctx.timeout.min(TOOL_LIST_TIMEOUT),
+                output: adapter::OutputKind::Text,
+            };
+            // Fail closed: without the listing, a tool that writes (an MCP
+            // server of the user's) would stay switched on.
+            match adapter::run_tracked(&inv, cancel, &ctx.child) {
+                Ok(listing) => {
+                    let tools = adapter::parse_auggie_tools(&listing);
+                    if tools.is_empty() {
+                        tracing::debug!("AI run: `auggie tools list` named no tools");
+                        return Err(TOOLS_UNLISTED.into());
+                    }
+                    tools
+                }
+                Err(adapter::AgentError::Cancelled) => return Err(super::CANCELLED.into()),
+                Err(e) => {
+                    tracing::debug!("AI run: `auggie tools list` failed: {}", e.message());
+                    return Err(TOOLS_UNLISTED.into());
+                }
+            }
+        }
+        _ => Vec::new(),
+    };
+    let dirs = RunDirs {
+        temp: temp.path(),
+        clone: read_dir.as_deref(),
+        settings: settings_file.as_deref(),
+        listed_tools: &listed_tools,
+    };
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let text = prompt::build(&PromptInput {
+        record,
+        description: None,
+        scope,
+        threads: asked,
+        existing,
+        posted: unfetched,
+        conventions,
+        guidance,
+        workspace,
+        nonce: &nonce,
+    });
+
+    let spawn = |prompt: &str| -> Result<String, String> {
+        check(cancel)?;
+        let inv = invocation(&adapter, &program, &dirs, prompt, ctx)?;
+        adapter::run_tracked(&inv, cancel, &ctx.child).map_err(|e| e.message())
+    };
+    let answer = spawn(&text)?;
+    let parsed = match output::parse(&answer) {
+        Ok(out) => out,
+        Err(first_error) => {
+            let retry = spawn(&prompt::repair(&text, &first_error))?;
+            output::parse(&retry)
+                .map_err(|e| format!("the agent's answer was invalid after a retry: {e}"))?
+        }
+    };
+    let mut run = output::filter(parsed, &paths, &known, &related);
+    dedupe::classify(&mut run, &raised, &diff);
+    // The worktree goes now (it would on any early return too).
+    drop(worktree);
+    Ok(RunOutput {
+        // The shas of the diff actually returned (the provider's contract),
+        // which for a run since the last review has the watermark as its
+        // left side.
+        head_sha: Some(diff.head_sha.clone()),
+        base_sha: Some(diff.base_sha.clone()),
+        context: run_context,
+        ..run
+    })
+}
+
+/// Whether `t` is the thread posting `f` made, by the platform's ids: the
+/// thread id and comment id the post returned, or (a finding posted before
+/// Argus kept them) the comment id in its URL (`#discussion_r<id>`,
+/// `#note_<id>`, `#issuecomment-<id>`). Never by text: the user may have
+/// edited what was posted.
+fn posted_as(t: &StoredThread, f: &Finding, ids: &PostedIds) -> bool {
+    if ids.thread.as_deref() == Some(t.thread.id.as_str()) {
+        return true;
+    }
+    let notes: Vec<String> = match &ids.note {
+        Some(n) => vec![n.clone()],
+        None => f
+            .posted_url
+            .as_deref()
+            .map(url_note_ids)
+            .unwrap_or_default(),
+    };
+    t.thread.notes.iter().any(|n| notes.contains(&n.id))
+}
+
+/// The comment ids a posted comment's URL may name, from its fragment: the
+/// fragment itself (`issuecomment-1`, a conversation entry's key) and its
+/// number after a known prefix.
+fn url_note_ids(url: &str) -> Vec<String> {
+    let Some((_, fragment)) = url.rsplit_once('#') else {
+        return Vec::new();
+    };
+    let mut ids = vec![fragment.to_string()];
+    for prefix in ["discussion_r", "note_", "r"] {
+        if let Some(n) = fragment.strip_prefix(prefix) {
+            if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+                ids.push(n.to_string());
+                break;
+            }
+        }
+    }
+    ids
+}
+
+/// Why an auggie run did not start: its tools could not be listed (the
+/// listing failed, timed out, or named none), so the ones that write cannot
+/// be removed.
+pub(crate) const TOOLS_UNLISTED: &str = "Could not list auggie's tools, so Argus can't switch off the ones that write; the run was not started";
+
+/// Most `auggie tools list` may take (it starts the user's MCP servers).
+const TOOL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The environment of every agent process (see [`adapter::sanitized_env`]).
+fn agent_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    adapter::sanitized_env(std::env::vars_os(), crate::platform::login_path())
+}
+
+fn invocation(
+    adapter: &Adapter,
+    program: &str,
+    dirs: &RunDirs<'_>,
+    prompt: &str,
+    ctx: &JobContext,
+) -> Result<Invocation, String> {
+    let (stdin, prompt_file) = match adapter.prompt {
+        PromptDelivery::Stdin => (Some(prompt.to_string()), None),
+        PromptDelivery::File(_) => {
+            let file = dirs.temp.join("prompt.md");
+            std::fs::write(&file, prompt).map_err(|_| "could not write the prompt".to_string())?;
+            (None, Some(file))
+        }
+    };
+    Ok(Invocation {
+        program: PathBuf::from(program),
+        args: adapter.args(dirs, prompt_file.as_deref(), &ctx.settings.ai.args),
+        cwd: dirs.temp.to_path_buf(),
+        env: agent_env(),
+        stdin,
+        timeout: ctx.timeout,
+        output: adapter.output,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::model::Severity;
+    use crate::ids::{ReviewId, ThreadId};
+    use crate::provider::Side;
+    use crate::testutil::{at, note, thread, AUTHOR, ME};
+
+    fn stored(author: &str, root: &str) -> StoredThread {
+        let mut root_note = note("1", author, at(10, 1));
+        root_note.body = root.into();
+        let t = thread("1", author, "h1", vec![root_note, note("2", ME, at(10, 2))]);
+        let review = ReviewId::from_key("r");
+        StoredThread {
+            thread_id: ThreadId::from_key(review, "1"),
+            review_id: review,
+            mine: true,
+            started_by_me: t.started_by(ME),
+            thread: t,
+        }
+    }
+
+    #[test]
+    fn a_posted_finding_is_found_by_the_platform_ids_not_its_text() {
+        let mut f = Finding {
+            id: crate::ai::FindingId::new(),
+            review_id: ReviewId::from_key("r"),
+            round: 1,
+            path: "src/cache.rs".into(),
+            line: 10,
+            side: Side::New,
+            severity: Severity::High,
+            title: "Off by one".into(),
+            body: "b".into(),
+            dismissed: false,
+            posted_at: Some(at(10, 0)),
+            posted_url: Some(
+                "https://github.example.test/acme-fixture/widgets/pull/12#discussion_r501".into(),
+            ),
+            repeat_of: None,
+            related_to: Vec::new(),
+        };
+        // The user rewrote the text before posting: the comment id finds it.
+        let mut mine = stored(ME, "Rewritten: the loop stops one early.");
+        mine.thread.notes[0].id = "501".into();
+        assert!(posted_as(&mine, &f, &PostedIds::default()));
+        // A colleague's thread with the finding's very title is not it.
+        let theirs = stored(AUTHOR, "**Off by one**\n\nb");
+        assert!(!posted_as(&theirs, &f, &PostedIds::default()));
+        // GitLab's note URL, and the ids the post returned.
+        f.posted_url = Some(
+            "https://gitlab.example.test/acme-fixture/widgets/-/merge_requests/3#note_501".into(),
+        );
+        assert!(posted_as(&mine, &f, &PostedIds::default()));
+        f.posted_url = None;
+        assert!(!posted_as(&mine, &f, &PostedIds::default()));
+        let by_thread = PostedIds {
+            thread: Some("1".into()),
+            note: None,
+        };
+        assert!(posted_as(&mine, &f, &by_thread));
+        let by_note = PostedIds {
+            thread: None,
+            note: Some("501".into()),
+        };
+        assert!(posted_as(&mine, &f, &by_note));
+        assert_eq!(
+            url_note_ids("https://github.example.test/o/r/pull/1#issuecomment-77"),
+            vec!["issuecomment-77".to_string()]
+        );
+    }
+}

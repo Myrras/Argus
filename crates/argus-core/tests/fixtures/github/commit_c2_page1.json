@@ -1,0 +1,31 @@
+{
+  "sha": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+  "commit": {
+    "message": "Make the TTL configurable",
+    "author": { "name": "Alice Fixture", "date": "2026-10-09T09:00:00Z" }
+  },
+  "author": { "login": "alice-fixture" },
+  "parents": [
+    { "sha": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" }
+  ],
+  "files": [
+    {
+      "sha": "f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4f4",
+      "filename": "src/cache.rs",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 0,
+      "changes": 2,
+      "patch": "@@ -0,0 +1,2 @@\n+use crate::config;\n+"
+    },
+    {
+      "sha": "f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5f5",
+      "filename": "src/new_name.rs",
+      "previous_filename": "src/old_name.rs",
+      "status": "renamed",
+      "additions": 0,
+      "deletions": 0,
+      "changes": 0
+    }
+  ]
+}

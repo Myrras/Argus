@@ -1,0 +1,1420 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Mutex};
+
+use super::*;
+use crate::provider::ProviderId;
+use crate::review::{mark_reviewed, ReviewStatus, RoundReason};
+use crate::testutil::{at, detail, note, review_ref, thread, AUTHOR, ME};
+
+/// A scripted provider: what it lists, what each review fetches as, and an
+/// optional failure for the whole provider.
+struct Fake {
+    id: ProviderId,
+    host: String,
+    list: Mutex<Vec<ReviewRef>>,
+    details: Mutex<HashMap<u64, CoreResult<ReviewDetail>>>,
+    threads: Mutex<HashMap<u64, Vec<Thread>>>,
+    down: Mutex<Option<fn() -> CoreError>>,
+    /// Reviews whose thread fetch fails, and those whose fetch panics.
+    threads_fail: Mutex<HashSet<u64>>,
+    threads_panic: Mutex<HashSet<u64>>,
+    limited: Mutex<Option<DateTime<Utc>>>,
+    /// `current_user` calls: the first call of every refresh.
+    calls: AtomicUsize,
+    /// When set, the next `fetch_review` says it started and waits for the
+    /// go-ahead: a test runs something in the middle of a refresh.
+    gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+    /// `fetch_review` calls per review number.
+    fetches: Mutex<HashMap<u64, usize>>,
+    /// `list_reviews` calls.
+    lists: AtomicUsize,
+}
+
+impl Fake {
+    fn new(id: ProviderId, host: &str) -> Self {
+        Self {
+            id,
+            host: host.into(),
+            list: Mutex::new(Vec::new()),
+            details: Mutex::new(HashMap::new()),
+            threads: Mutex::new(HashMap::new()),
+            down: Mutex::new(None),
+            threads_fail: Mutex::new(HashSet::new()),
+            threads_panic: Mutex::new(HashSet::new()),
+            limited: Mutex::new(None),
+            calls: AtomicUsize::new(0),
+            gate: Mutex::new(None),
+            fetches: Mutex::new(HashMap::new()),
+            lists: AtomicUsize::new(0),
+        }
+    }
+
+    /// Hold the next review fetch: returns (started, go).
+    fn hold_next_fetch(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (started_tx, started_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        *self.gate.lock().unwrap() = Some((started_tx, go_rx));
+        (started_rx, go_tx)
+    }
+
+    fn fetched(&self, n: u64) -> usize {
+        self.fetches.lock().unwrap().get(&n).copied().unwrap_or(0)
+    }
+
+    /// List `d` and serve it.
+    fn serve(&self, d: ReviewDetail, threads: Vec<Thread>) {
+        let n = d.review.number;
+        let mut list = self.list.lock().unwrap();
+        list.retain(|r| r.number != n);
+        list.push(d.review.clone());
+        self.threads.lock().unwrap().insert(n, threads);
+        self.details.lock().unwrap().insert(n, Ok(d));
+    }
+
+    fn unlist(&self, n: u64) {
+        self.list.lock().unwrap().retain(|r| r.number != n);
+    }
+}
+
+fn clone_err(e: &CoreError) -> CoreError {
+    match e {
+        CoreError::NotFound => CoreError::NotFound,
+        CoreError::Provider(m) => CoreError::Provider(m.clone()),
+        _ => CoreError::Provider("scripted failure".into()),
+    }
+}
+
+impl ReviewProvider for Fake {
+    fn id(&self) -> ProviderId {
+        self.id
+    }
+    fn host(&self) -> &str {
+        &self.host
+    }
+    fn current_user(&self) -> CoreResult<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        match *self.down.lock().unwrap() {
+            Some(e) => Err(e()),
+            None => Ok(ME.into()),
+        }
+    }
+    fn list_reviews(&self) -> CoreResult<Vec<ReviewRef>> {
+        self.lists.fetch_add(1, Ordering::SeqCst);
+        Ok(self.list.lock().unwrap().clone())
+    }
+    fn fetch_review(&self, r: &ReviewRef) -> CoreResult<ReviewDetail> {
+        *self.fetches.lock().unwrap().entry(r.number).or_default() += 1;
+        // Read before the gate: a held fetch returns what the platform had
+        // when it started, like a response already on its way.
+        let answer = match self.details.lock().unwrap().get(&r.number) {
+            Some(Ok(d)) => Some(Ok(d.clone())),
+            Some(Err(e)) => Some(Err(clone_err(e))),
+            None => None,
+        };
+        let gate = self.gate.lock().unwrap().take();
+        if let Some((started, go)) = gate {
+            started.send(()).unwrap();
+            go.recv().unwrap();
+        }
+        match answer {
+            Some(Ok(d)) => Ok(d),
+            Some(Err(e)) => {
+                // Like a real provider: a rate-limit reply starts its pause.
+                if crate::provider::is_rate_limited(&e) {
+                    *self.limited.lock().unwrap() = Some(at(10, 13));
+                }
+                Err(e)
+            }
+            None => Err(CoreError::NotFound),
+        }
+    }
+    fn fetch_threads(&self, r: &ReviewRef) -> CoreResult<Vec<Thread>> {
+        if self.threads_panic.lock().unwrap().contains(&r.number) {
+            panic!("scripted panic");
+        }
+        if self.threads_fail.lock().unwrap().contains(&r.number) {
+            return Err(CoreError::Provider(
+                "could not reach GitLab (timed out)".into(),
+            ));
+        }
+        Ok(self
+            .threads
+            .lock()
+            .unwrap()
+            .get(&r.number)
+            .cloned()
+            .unwrap_or_default())
+    }
+    fn file_at(&self, _: &ReviewRef, _: &str, _: &str) -> CoreResult<String> {
+        Err(CoreError::NotFound)
+    }
+    fn fetch_files(
+        &self,
+        _: &ReviewRef,
+        _: &crate::provider::DiffRange,
+    ) -> CoreResult<crate::provider::FileDiff> {
+        Err(CoreError::NotFound)
+    }
+    fn rate_limited_until(&self) -> Option<DateTime<Utc>> {
+        *self.limited.lock().unwrap()
+    }
+}
+
+fn detail_n(n: u64, head: &str) -> ReviewDetail {
+    let mut d = detail(head);
+    d.review = review_ref(n);
+    d
+}
+
+fn gitlab_detail(n: u64, head: &str) -> ReviewDetail {
+    let mut d = detail_n(n, head);
+    d.review.provider = ProviderId::Gitlab;
+    d.review.host = "gitlab.example.test".into();
+    d.review.repo = "grp/app".into();
+    d
+}
+
+fn github() -> Arc<Fake> {
+    Arc::new(Fake::new(ProviderId::Github, "github.com"))
+}
+
+fn as_providers(fakes: &[Arc<Fake>]) -> Vec<Arc<dyn ReviewProvider>> {
+    fakes
+        .iter()
+        .map(|f| f.clone() as Arc<dyn ReviewProvider>)
+        .collect()
+}
+
+#[test]
+fn persists_new_reviews_and_is_quiet_when_nothing_changed() {
+    let gh = github();
+    let t = thread("501", ME, "h1", vec![note("501", ME, at(10, 11))]);
+    gh.serve(detail_n(12, "h1"), vec![t]);
+    gh.serve(detail_n(7, "g1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(&[gh]);
+
+    let report = refresh_all(&providers, &store, at(10, 12));
+    assert!(report.errors.is_empty());
+    assert_eq!(report.changed.len(), 2);
+    assert_eq!(report.refreshed_at, at(10, 12));
+    let id = review_ref(12).id();
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.status, ReviewStatus::NeedsReview);
+    assert_eq!(rec.untouched_threads, 1);
+    assert!(!rec.fingerprint.is_empty());
+    assert_eq!(store.threads(id).unwrap().len(), 1);
+
+    let again = refresh_all(&providers, &store, at(10, 13));
+    assert!(again.changed.is_empty());
+    assert!(again.errors.is_empty());
+}
+
+#[test]
+fn new_commits_after_mark_reviewed_show_up_as_a_new_round() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 12));
+    let id = review_ref(12).id();
+    let rec = store.review(id).unwrap().unwrap();
+    store
+        .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))
+        .unwrap();
+
+    let reply = thread(
+        "501",
+        ME,
+        "h1",
+        vec![note("501", ME, at(10, 11)), note("502", AUTHOR, at(11, 8))],
+    );
+    gh.serve(detail_n(12, "h2"), vec![reply]);
+    let report = refresh_all(&providers, &store, at(11, 9));
+    assert_eq!(report.changed, [id]);
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.status, ReviewStatus::NeedsReReview);
+    assert_eq!(
+        rec.round_reasons,
+        [RoundReason::NewCommits, RoundReason::AuthorReplied]
+    );
+    assert_eq!(rec.round, 2);
+}
+
+#[test]
+fn one_provider_failing_does_not_stop_the_other() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    *gl.down.lock().unwrap() = Some(|| CoreError::GitlabAuth);
+    let store = Store::in_memory().unwrap();
+
+    let report = refresh_all(&as_providers(&[gh, gl]), &store, at(10, 12));
+    assert_eq!(report.changed, [review_ref(12).id()]);
+    assert_eq!(report.errors.len(), 1);
+    let e = &report.errors[0];
+    assert_eq!(e.provider, ProviderId::Gitlab);
+    assert_eq!(e.review, None);
+    assert!(e.unavailable);
+    assert_eq!(e.message, CoreError::GitlabAuth.to_string());
+}
+
+#[test]
+fn a_failing_review_is_reported_and_the_rest_persisted() {
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    gl.serve(gitlab_detail(21, "a1"), vec![]);
+    gl.serve(gitlab_detail(22, "b1"), vec![]);
+    gl.details
+        .lock()
+        .unwrap()
+        .insert(22, Err(CoreError::Provider("x".into())));
+    let store = Store::in_memory().unwrap();
+    let report = refresh_all(&as_providers(&[gl]), &store, at(10, 12));
+    assert_eq!(report.changed, [gitlab_detail(21, "a1").review.id()]);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(
+        report.errors[0].review,
+        Some(gitlab_detail(22, "b1").review.id())
+    );
+    assert!(!report.errors[0].unavailable);
+}
+
+#[test]
+fn reviews_that_drop_off_the_list_are_fetched_once_more() {
+    let gh = github();
+    gh.serve(detail_n(1, "h1"), vec![]);
+    gh.serve(detail_n(2, "h1"), vec![]);
+    gh.serve(detail_n(3, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 12));
+
+    // #1 merged without approval, #2 still open but no longer involves the
+    // user, #3 deleted.
+    let mut merged = detail_n(1, "h1");
+    merged.state = ReviewState::Merged;
+    gh.serve(merged, vec![]);
+    gh.unlist(1);
+    gh.unlist(2);
+    gh.unlist(3);
+    gh.details.lock().unwrap().remove(&3);
+
+    let report = refresh_all(&providers, &store, at(11, 9));
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.changed.len(), 3);
+    let get = |n| store.review(review_ref(n).id()).unwrap().unwrap();
+    assert_eq!(get(1).status, ReviewStatus::ClosedWithoutApproval);
+    assert!(get(1).is_active());
+    assert!(!get(2).listed && !get(2).is_active());
+    assert!(!get(3).listed);
+
+    // Merged is final: not fetched again.
+    gh.details.lock().unwrap().remove(&1);
+    let report = refresh_all(&providers, &store, at(11, 10));
+    assert!(report.errors.is_empty());
+}
+
+#[test]
+fn the_loop_refreshes_on_an_interval_and_on_demand_and_stops() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Arc::new(Store::in_memory().unwrap());
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = count.clone();
+    let changed = Arc::new(Mutex::new(Vec::new()));
+    let log = changed.clone();
+    let poller = Poller::start(
+        as_providers(&[gh]),
+        store.clone(),
+        Duration::from_millis(30),
+        move |r: &RefreshReport| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            log.lock().unwrap().extend(r.changed.clone());
+        },
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while count.load(Ordering::SeqCst) < 3 && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    poller.refresh_now();
+    poller.stop();
+    let after_stop = count.load(Ordering::SeqCst);
+    assert!(after_stop >= 3);
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(count.load(Ordering::SeqCst), after_stop);
+    // Only the first refresh changed anything.
+    assert_eq!(*changed.lock().unwrap(), [review_ref(12).id()]);
+    assert!(store.review(review_ref(12).id()).unwrap().is_some());
+}
+
+#[test]
+fn a_review_whose_threads_fail_or_panic_does_not_drop_the_others() {
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    for n in [21, 22, 23, 24, 25] {
+        gl.serve(gitlab_detail(n, "a1"), vec![]);
+    }
+    gl.threads_fail.lock().unwrap().insert(22);
+    gl.threads_panic.lock().unwrap().insert(24);
+    let store = Store::in_memory().unwrap();
+    let report = refresh_all(&as_providers(&[gl]), &store, at(10, 12));
+    let id = |n| gitlab_detail(n, "a1").review.id();
+    // Results keep the listing order.
+    assert_eq!(report.changed, [id(21), id(23), id(25)]);
+    let failed: Vec<_> = report.errors.iter().map(|e| e.review).collect();
+    assert_eq!(failed, [Some(id(22)), Some(id(24))]);
+    assert!(store.review(id(22)).unwrap().is_none());
+}
+
+#[test]
+fn a_rate_limited_provider_is_skipped_until_the_reset() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    gl.serve(gitlab_detail(21, "a1"), vec![]);
+    let until = at(10, 13);
+    *gl.limited.lock().unwrap() = Some(until);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(&[gh.clone(), gl.clone()]);
+
+    let report = refresh_all(&providers, &store, at(10, 12));
+    // GitHub refreshed; GitLab was not called at all.
+    assert_eq!(report.changed, [review_ref(12).id()]);
+    assert_eq!(gl.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(report.errors.len(), 1);
+    let e = &report.errors[0];
+    assert_eq!(
+        (e.provider, e.review, e.unavailable),
+        (ProviderId::Gitlab, None, false)
+    );
+    let hhmm = until
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert!(
+        e.message
+            .contains(&format!("GitLab is rate limited until {hhmm}")),
+        "{}",
+        e.message
+    );
+    assert_eq!(e.rate_limited_until, Some(until));
+    // Only a rate limit sets it.
+    let json = serde_json::to_value(e).unwrap();
+    assert_eq!(json["rateLimitedUntil"], "2026-10-10T13:00:00Z");
+
+    // Past the reset it is refreshed again.
+    let report = refresh_all(&providers, &store, at(10, 14));
+    assert!(report.errors.is_empty());
+    assert_eq!(report.changed, [gitlab_detail(21, "a1").review.id()]);
+    assert_eq!(gl.calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_limit_hit_halfway_is_one_provider_error() {
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    for n in [21, 22, 23] {
+        gl.serve(gitlab_detail(n, "a1"), vec![]);
+    }
+    let until = at(10, 13);
+    for n in [22, 23] {
+        gl.details.lock().unwrap().insert(
+            n,
+            Err(crate::provider::rate_limited(ProviderId::Gitlab, until)),
+        );
+    }
+    let store = Store::in_memory().unwrap();
+    let report = refresh_all(&as_providers(&[gl]), &store, at(10, 12));
+    assert_eq!(report.changed, [gitlab_detail(21, "a1").review.id()]);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].review, None);
+    assert!(report.errors[0].message.contains("rate limited until"));
+    assert_eq!(report.errors[0].rate_limited_until, Some(until));
+}
+
+#[test]
+fn a_poll_that_overlaps_mark_reviewed_keeps_the_watermark() {
+    let gh = github();
+    let mine = thread("501", ME, "h1", vec![note("501", ME, at(10, 11))]);
+    gh.serve(detail_n(12, "h1"), vec![mine]);
+    let core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    );
+    assert!(core.refresh().errors.is_empty());
+    let id = review_ref(12).id();
+
+    // The poll has read the review (its "before") and fetches a change (a
+    // new title); the user marks it reviewed in the middle; the poll
+    // stores after.
+    let mut d = detail_n(12, "h1");
+    d.review.title = "Renamed".into();
+    gh.serve(d, vec![]);
+    let (started, go) = gh.hold_next_fetch();
+    std::thread::scope(|s| {
+        let poll = s.spawn(|| core.refresh());
+        started.recv().unwrap();
+        let marked = core.mark_reviewed(id).unwrap();
+        assert_eq!(marked.status, ReviewStatus::WaitingOnAuthor);
+        go.send(()).unwrap();
+        assert_eq!(poll.join().unwrap().changed, [id]);
+    });
+    let rec = core.review(id).unwrap();
+    assert_eq!(rec.review.title, "Renamed");
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+    assert!(rec.last_reviewed_at.is_some());
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+}
+
+#[test]
+fn the_poll_never_writes_the_watermark_it_did_not_read() {
+    // `persist` with a stale `prev` (no watermark) over a stored one.
+    let store = Store::in_memory().unwrap();
+    let d = detail_n(12, "h1");
+    assert!(persist(
+        &store,
+        None,
+        &d,
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        store.begin_fetch()
+    )
+    .unwrap());
+    let stale = store.review(d.review.id()).unwrap().unwrap();
+    store.set_watermark(stale.id, "h1", at(10, 13)).unwrap();
+
+    let mut moved = detail_n(12, "h2");
+    moved.review.title = "Moved".into();
+    assert!(persist(
+        &store,
+        Some(&stale),
+        &moved,
+        &[],
+        ME,
+        true,
+        at(10, 14),
+        store.begin_fetch()
+    )
+    .unwrap());
+    let rec = store.review(stale.id).unwrap().unwrap();
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+    assert_eq!(rec.last_reviewed_at, Some(at(10, 13)));
+    // Classified against the stored watermark, not the stale one.
+    assert_eq!(rec.status, ReviewStatus::NeedsReReview);
+    assert_eq!(rec.round_reasons, [RoundReason::NewCommits]);
+    assert_eq!(rec.round, 2);
+}
+
+#[test]
+fn an_approval_made_in_argus_after_the_fetch_started_survives_it() {
+    let store = Store::in_memory().unwrap();
+    let d = detail_n(12, "h1");
+    persist(
+        &store,
+        None,
+        &d,
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        store.begin_fetch(),
+    )
+    .unwrap();
+    let id = d.review.id();
+    // Approved from Argus at 10:30, while a poll that started at 10:20
+    // still read the review as not approved.
+    store
+        .set_approved_at(id, Some(at(10, 12) + chrono::Duration::minutes(30)))
+        .unwrap();
+    let mut late = d.clone();
+    late.review.title = "Late".into();
+    persist(
+        &store,
+        None,
+        &late,
+        &[],
+        ME,
+        true,
+        at(10, 12) + chrono::Duration::minutes(20),
+        store.begin_fetch(),
+    )
+    .unwrap();
+    let rec = store.review(id).unwrap().unwrap();
+    assert!(rec.approved_at.is_some());
+    assert_eq!(rec.status, ReviewStatus::Approved);
+
+    // A poll that started after the approval and still sees none: revoked.
+    late.review.title = "Later".into();
+    persist(
+        &store,
+        None,
+        &late,
+        &[],
+        ME,
+        true,
+        at(10, 14),
+        store.begin_fetch(),
+    )
+    .unwrap();
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.approved_at, None);
+    assert_eq!(rec.status, ReviewStatus::NeedsReview);
+}
+
+#[test]
+fn a_review_off_the_list_is_fetched_once_then_daily() {
+    let gh = github();
+    gh.serve(detail_n(2, "h1"), vec![]);
+    gh.serve(detail_n(3, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 12));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (1, 1));
+
+    // #2 no longer involves the user; #3 is deleted.
+    gh.unlist(2);
+    gh.unlist(3);
+    gh.details.lock().unwrap().remove(&3);
+    // Dropping off: fetched once more, to learn why.
+    refresh_all(&providers, &store, at(11, 9));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (2, 2));
+    assert!(!store.review(review_ref(2).id()).unwrap().unwrap().listed);
+    // Then not on every poll...
+    refresh_all(&providers, &store, at(11, 10));
+    refresh_all(&providers, &store, at(11, 20));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (2, 2));
+    // ...but once a day, in case it was merged or closed meanwhile.
+    refresh_all(&providers, &store, at(12, 9));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (3, 3));
+    refresh_all(&providers, &store, at(12, 10));
+    assert_eq!((gh.fetched(2), gh.fetched(3)), (3, 3));
+
+    // Listed again: every poll, as before.
+    gh.serve(detail_n(2, "h1"), vec![]);
+    refresh_all(&providers, &store, at(12, 11));
+    refresh_all(&providers, &store, at(12, 12));
+    assert_eq!(gh.fetched(2), 5);
+    assert!(store.review(review_ref(2).id()).unwrap().unwrap().listed);
+}
+
+#[test]
+fn quitting_does_not_wait_for_a_refresh_under_way() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    );
+    let reports = Arc::new(AtomicUsize::new(0));
+    let seen = reports.clone();
+    let (started, go) = gh.hold_next_fetch();
+    core.start_polling(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+    });
+    // A refresh is on the network (a hung `gh` or a slow instance).
+    started.recv().unwrap();
+    let quit = std::time::Instant::now();
+    core.shutdown();
+    assert!(
+        quit.elapsed() < Duration::from_secs(2),
+        "quit waited {:?}",
+        quit.elapsed()
+    );
+    // The refresh still ends on its own, and reports nothing after the
+    // quit.
+    go.send(()).unwrap();
+    let id = review_ref(12).id();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while core.store.review(id).unwrap().is_none() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(reports.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn two_quick_saves_leave_the_poll_on_the_last_ones_providers() {
+    let a = Arc::new(Fake::new(ProviderId::Github, "a.example.test"));
+    let b = Arc::new(Fake::new(ProviderId::Github, "b.example.test"));
+    let mut core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&a)),
+    );
+    let (fa, fb) = (a.clone(), b.clone());
+    core.build_providers = Box::new(move |s: &crate::Settings| {
+        let f = if s.github.host == "b.example.test" {
+            &fb
+        } else {
+            &fa
+        };
+        vec![f.clone() as Arc<dyn ReviewProvider>]
+    });
+    let core = Arc::new(core);
+    core.start_polling(|_| {});
+    let save = |host: &str| {
+        let mut s = core.settings();
+        s.github.host = host.into();
+        s
+    };
+    let (first, second) = (save("a.example.test"), save("b.example.test"));
+    // The first save has read its providers for the new loop and not yet
+    // put the loop in place when the second one comes in. The second is
+    // given a moment to finish; serialized, it waits for the first instead.
+    let (done_tx, done_rx) = mpsc::channel();
+    let later = core.clone();
+    let handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::default();
+    let slot = handle.clone();
+    crate::AFTER_PROVIDERS_READ.with(|h| {
+        *h.borrow_mut() = Some(Box::new(move || {
+            *slot.lock().unwrap() = Some(std::thread::spawn(move || {
+                later.update_settings(second).unwrap();
+                let _ = done_tx.send(());
+            }));
+            let _ = done_rx.recv_timeout(Duration::from_millis(300));
+        }));
+    });
+    core.update_settings(first).unwrap();
+    let second_save = handle.lock().unwrap().take().expect("the second save ran");
+    second_save.join().unwrap();
+
+    assert_eq!(core.settings().github.host, "b.example.test");
+    let hosts: Vec<String> = core
+        .poller
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("polling")
+        .0
+        .providers
+        .iter()
+        .map(|p| p.host().to_string())
+        .collect();
+    assert_eq!(hosts, ["b.example.test"]);
+    core.shutdown();
+}
+
+#[test]
+fn saving_settings_does_not_wait_for_a_refresh_under_way() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = Arc::new(crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    ));
+    let (tx, rx) = mpsc::channel();
+    let (started, go) = gh.hold_next_fetch();
+    core.start_polling(move |r| {
+        let _ = tx.send(r.refreshed_at);
+    });
+    // A refresh is on the network (a hung `gh` or a slow instance).
+    started.recv().unwrap();
+    // GitHub off: the restarted loop has no provider, so nothing runs `gh`.
+    let mut s = core.settings();
+    s.github.enabled = false;
+    let (saved_tx, saved) = mpsc::channel();
+    let saver = core.clone();
+    std::thread::spawn(move || {
+        saver.update_settings(s).unwrap();
+        let _ = saved_tx.send(());
+    });
+    let in_time = saved.recv_timeout(Duration::from_secs(2)).is_ok();
+    // Let the held fetch end either way, so a failing test ends too.
+    go.send(()).unwrap();
+    assert!(in_time, "the save waited for the refresh under way");
+    // The loop restarted (with the same callback) even so.
+    assert!(core.poller.lock().unwrap().is_some());
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    core.shutdown();
+}
+
+/// Wait until `f` holds (another thread's progress), failing after 10 s.
+fn wait_until(what: &str, f: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !f() {
+        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A core polling a GitHub fake plus, once a GitLab URL is saved, a GitLab
+/// fake that is "not set up" until its token is stored (the keychain, read
+/// per call as `KeychainToken` does). Also counts the provider builds.
+fn core_with_gitlab_token(gh: &Arc<Fake>, gl: &Arc<Fake>) -> (Arc<crate::Core>, Arc<AtomicUsize>) {
+    *gl.down.lock().unwrap() = Some(|| CoreError::GitlabNotConfigured);
+    let mut core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(gh)),
+    );
+    let builds = Arc::new(AtomicUsize::new(0));
+    let (fgh, fgl, built) = (gh.clone(), gl.clone(), builds.clone());
+    core.build_providers = Box::new(move |s: &crate::Settings| {
+        built.fetch_add(1, Ordering::SeqCst);
+        let mut out = vec![fgh.clone() as Arc<dyn ReviewProvider>];
+        if s.gitlab_enabled() {
+            out.push(fgl.clone());
+        }
+        out
+    });
+    let keychain = gl.clone();
+    core.write_gitlab_token = Box::new(move |_url: &str, token: &str| {
+        *keychain.down.lock().unwrap() = token
+            .trim()
+            .is_empty()
+            .then_some(|| CoreError::GitlabNotConfigured);
+        Ok(())
+    });
+    (Arc::new(core), builds)
+}
+
+#[test]
+fn storing_the_gitlab_token_leaves_no_stale_not_set_up_error() {
+    // The Settings form saves the URL first and the token right after. The
+    // URL save restarts the loop, whose first refresh runs before the token
+    // is stored: GitLab "is not set up". That refresh is still on the
+    // network (GitHub) when the token comes in.
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    let (core, builds) = core_with_gitlab_token(&gh, &gl);
+    let (tx, rx) = mpsc::channel();
+    core.start_polling(move |r| {
+        let _ = tx.send(r.clone());
+    });
+    let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+
+    let (started, go) = gh.hold_next_fetch();
+    let mut s = core.settings();
+    s.gitlab.base_url = "http://gitlab.example.test".into();
+    core.update_settings(s).unwrap();
+    started.recv().unwrap();
+    wait_until("GitLab was asked without a token", || {
+        gl.calls.load(Ordering::SeqCst) >= 1
+    });
+    let built = builds.load(Ordering::SeqCst);
+
+    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
+    // A token is part of GitLab's setup: fresh providers, as for a save.
+    assert_eq!(builds.load(Ordering::SeqCst), built + 1);
+    go.send(()).unwrap();
+
+    // The refresh from before the token reports nothing; the next one
+    // reads GitLab with it, right away (not a poll interval later).
+    let next = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(
+        next.errors.is_empty(),
+        "a stale error was reported: {:?}",
+        next.errors
+    );
+    assert!(gl.calls.load(Ordering::SeqCst) >= 2);
+    core.shutdown();
+}
+
+#[test]
+fn storing_the_gitlab_token_without_a_loop_rebuilds_the_providers() {
+    let gh = github();
+    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
+    let (core, builds) = core_with_gitlab_token(&gh, &gl);
+    let mut s = core.settings();
+    s.gitlab.base_url = "https://gitlab.example.test".into();
+    core.update_settings(s).unwrap();
+    let built = builds.load(Ordering::SeqCst);
+    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
+    assert_eq!(builds.load(Ordering::SeqCst), built + 1);
+    assert!(core.poller.lock().unwrap().is_none(), "no loop was started");
+    assert!(core.refresh().errors.is_empty());
+}
+
+const FIXTURE_TOKEN: &str = "glpat-fixture-not-a-real-token";
+
+#[test]
+fn a_change_rebuilds_only_the_provider_it_is_about() {
+    // A rebuilt provider forgets its rate-limit pause and conditional
+    // cache: only the one whose setup changed is rebuilt.
+    let mut core = crate::Core::with_providers(Store::in_memory().unwrap(), Vec::new());
+    core.build_providers = Box::new(|s: &crate::Settings| {
+        let mut out: Vec<Arc<dyn ReviewProvider>> = Vec::new();
+        if s.github.enabled {
+            out.push(Arc::new(Fake::new(ProviderId::Github, &s.github.host)));
+        }
+        if s.gitlab_enabled() {
+            out.push(Arc::new(Fake::new(
+                ProviderId::Gitlab,
+                "gitlab.example.test",
+            )));
+        }
+        out
+    });
+    core.write_gitlab_token = Box::new(|_: &str, _: &str| Ok(()));
+    let get = |core: &crate::Core, id: ProviderId| {
+        core.providers()
+            .into_iter()
+            .find(|p| p.id() == id)
+            .expect("provider")
+    };
+    let mut s = core.settings();
+    s.gitlab.base_url = "https://gitlab.example.test".into();
+    core.update_settings(s.clone()).unwrap();
+    let (gh, gl) = (
+        get(&core, ProviderId::Github),
+        get(&core, ProviderId::Gitlab),
+    );
+
+    // The token is GitLab's: GitHub stays as it is.
+    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
+    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(!Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+    let gl = get(&core, ProviderId::Gitlab);
+
+    // Neither provider's section changed: both stay.
+    s.poll_interval_secs = 300;
+    core.update_settings(s.clone()).unwrap();
+    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+
+    // GitHub's section: GitLab stays.
+    s.github.host = "ghe.example.test".into();
+    core.update_settings(s.clone()).unwrap();
+    assert!(!Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+    let gh = get(&core, ProviderId::Github);
+
+    // GitLab's section: GitHub stays.
+    s.gitlab.base_url = "https://gitlab2.example.test".into();
+    core.update_settings(s).unwrap();
+    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
+    assert!(!Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
+}
+
+#[test]
+fn a_stopped_loop_waiting_for_the_refresh_lock_does_not_refresh() {
+    let gh = github();
+    let store = Arc::new(Store::in_memory().unwrap());
+    let reports = Arc::new(AtomicUsize::new(0));
+    let seen = reports.clone();
+    // A refresh under way (Shift+R) holds the lock when the loop starts.
+    let held = store.refreshing.lock().unwrap();
+    let poller = Poller::start(
+        as_providers(std::slice::from_ref(&gh)),
+        store.clone(),
+        Duration::from_secs(60),
+        move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+    // Settings saved meanwhile: this loop's providers are stale.
+    poller.request_stop();
+    drop(held);
+    poller.stop();
+    assert_eq!(
+        gh.calls.load(Ordering::SeqCst),
+        0,
+        "a stale provider was polled"
+    );
+    assert_eq!(reports.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn nothing_polls_after_shutdown() {
+    let core = crate::Core::with_providers(Store::in_memory().unwrap(), Vec::new());
+    core.shutdown();
+    core.start_polling(|_| panic!("polled after shutdown"));
+    assert!(core.poller.lock().unwrap().is_none());
+}
+
+#[test]
+fn a_fetch_that_started_earlier_never_overwrites_a_later_one() {
+    // A refresh started at 10:12 stored h2 and the user marked it; a fetch
+    // that started at 10:11 (still h1) lands after it.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let (earlier, later) = (store.begin_fetch(), store.begin_fetch());
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        later
+    )
+    .unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    store
+        .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))
+        .unwrap();
+
+    let stored = persist(
+        &store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        at(10, 11),
+        earlier,
+    )
+    .unwrap();
+    assert!(!stored);
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+    assert_eq!(rec.round, 1);
+    assert_eq!(rec.fetched_at, at(10, 12));
+}
+
+#[test]
+fn a_fetched_at_from_a_clock_that_ran_ahead_does_not_freeze_the_review() {
+    // Stored while the clock was a day ahead; corrected since.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let ahead = Utc::now() + chrono::Duration::days(1);
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        ahead,
+        store.begin_fetch()
+    )
+    .unwrap());
+    let now = Utc::now();
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        now,
+        store.begin_fetch()
+    )
+    .unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.fetched_at, now);
+    // Unchanged fetches move it too.
+    let later = Utc::now();
+    assert!(!persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        later,
+        store.begin_fetch()
+    )
+    .unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().fetched_at, later);
+}
+
+#[test]
+fn an_older_fetch_stays_older_when_the_clock_steps_back() {
+    // Fetch A starts at 10:15 (h1); the clock is set back an hour; fetch B
+    // starts at 09:15, sees the push (h2) and lands first. A, slower,
+    // lands last: by the wall clock it looks newer, but it started first.
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let a = store.begin_fetch();
+    let b = store.begin_fetch();
+    let (a_at, b_at) = (at(10, 10) + chrono::Duration::minutes(5), at(10, 9));
+    assert!(persist(&store, None, &detail_n(12, "h2"), &[], ME, true, b_at, b).unwrap());
+    assert!(!persist(&store, None, &detail_n(12, "h1"), &[], ME, true, a_at, a).unwrap());
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.fetched_at, b_at);
+    // A fetch that starts after B, whatever its clock says, lands.
+    let c = store.begin_fetch();
+    assert!(persist(
+        &store,
+        None,
+        &detail_n(12, "h3"),
+        &[],
+        ME,
+        true,
+        at(10, 8),
+        c
+    )
+    .unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().head_sha, "h3");
+}
+
+#[test]
+fn a_review_is_timed_when_its_fetch_starts_not_when_the_refresh_was_asked() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    // Each reading: the time it gave, and how far the provider got by then.
+    let readings: Mutex<Vec<(DateTime<Utc>, usize)>> = Mutex::new(Vec::new());
+    let clock = || {
+        // Only read once this refresh's turn came (the lock is held).
+        assert!(store.refreshing.try_lock().is_err(), "read before the lock");
+        let mut r = readings.lock().unwrap();
+        let t = at(10, 10) + chrono::Duration::minutes(r.len() as i64);
+        r.push((t, gh.calls.load(Ordering::SeqCst)));
+        t
+    };
+    let report = refresh_all_unless(&providers, &store, &clock, None).unwrap();
+    assert_eq!(report.errors, []);
+    let fetched_at = store
+        .review(review_ref(12).id())
+        .unwrap()
+        .unwrap()
+        .fetched_at;
+    let readings = readings.into_inner().unwrap();
+    let (_, calls) = readings
+        .iter()
+        .find(|(t, _)| *t == fetched_at)
+        .expect("fetched_at is a clock reading");
+    // Read after the provider's first call (`current_user`): per review.
+    assert_eq!(*calls, 1, "{readings:?}");
+}
+
+#[test]
+fn an_unchanged_fetch_still_counts_as_the_latest() {
+    let store = Store::in_memory().unwrap();
+    let id = review_ref(12).id();
+    let (s11, s12, s14) = (
+        store.begin_fetch(),
+        store.begin_fetch(),
+        store.begin_fetch(),
+    );
+    persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        at(10, 11),
+        s11,
+    )
+    .unwrap();
+    // Nothing changed at 10:14, but it is the newest look at the review.
+    assert!(!persist(
+        &store,
+        None,
+        &detail_n(12, "h2"),
+        &[],
+        ME,
+        true,
+        at(10, 14),
+        s14
+    )
+    .unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().fetched_at, at(10, 14));
+    // So a fetch from 10:12 that still saw the old head is older than it.
+    assert!(!persist(
+        &store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        at(10, 12),
+        s12
+    )
+    .unwrap());
+    assert_eq!(store.review(id).unwrap().unwrap().head_sha, "h2");
+}
+
+#[test]
+fn a_slow_poll_cannot_undo_a_refresh_that_overtook_it() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 10));
+    let id = review_ref(12).id();
+
+    // A poll starts at 10:11 and its fetch is on the network (h1); the
+    // author pushes h2; a refresh after a post (10:12) stores h2 and the
+    // user marks it reviewed; then the slow poll lands.
+    let (started, go) = gh.hold_next_fetch();
+    std::thread::scope(|s| {
+        let poll = s.spawn(|| refresh_all(&providers, &store, at(10, 11)));
+        started.recv().unwrap();
+        persist(
+            &store,
+            None,
+            &detail_n(12, "h2"),
+            &[],
+            ME,
+            true,
+            at(10, 12),
+            store.begin_fetch(),
+        )
+        .unwrap();
+        let rec = store.review(id).unwrap().unwrap();
+        store
+            .upsert_review(&mark_reviewed(&rec, &[], at(10, 13)))
+            .unwrap();
+        go.send(()).unwrap();
+        let report = poll.join().unwrap();
+        assert!(report.changed.is_empty(), "{:?}", report.changed);
+    });
+    let rec = store.review(id).unwrap().unwrap();
+    assert_eq!(rec.head_sha, "h2");
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h2"));
+    assert_eq!(rec.status, ReviewStatus::WaitingOnAuthor);
+    assert!(rec.round_reasons.is_empty());
+    assert_eq!(rec.round, 1);
+}
+
+#[test]
+fn refreshes_run_one_at_a_time() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    let (started, go) = gh.hold_next_fetch();
+    let busy = std::thread::scope(|s| {
+        let first = s.spawn(|| refresh_all(&providers, &store, at(10, 11)));
+        started.recv().unwrap();
+        // A second refresh (Shift+R while the poll runs) waits for the
+        // first instead of fetching alongside it.
+        let busy = store.refreshing.try_lock().is_err();
+        go.send(()).unwrap();
+        first.join().unwrap();
+        busy
+    });
+    assert!(busy, "a refresh under way holds the refresh lock");
+    assert!(store.refreshing.try_lock().is_ok());
+    assert_eq!(refresh_all(&providers, &store, at(10, 12)).errors, []);
+}
+
+// --- Refreshing one review ---
+
+/// A core over `fakes`, refreshed once.
+fn core_over(fakes: &[Arc<Fake>]) -> crate::Core {
+    let core = crate::Core::with_providers(Store::in_memory().unwrap(), as_providers(fakes));
+    assert_eq!(core.refresh().errors, []);
+    core
+}
+
+#[test]
+fn refreshing_one_review_fetches_only_that_review() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    gh.serve(detail_n(13, "k1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let (id12, id13) = (review_ref(12).id(), review_ref(13).id());
+    let lists = gh.lists.load(Ordering::SeqCst);
+
+    // Both move on the platform; only 12 is asked for.
+    gh.serve(
+        detail_n(12, "h2"),
+        vec![thread(
+            "t1",
+            AUTHOR,
+            "h2",
+            vec![note("n1", AUTHOR, at(10, 12))],
+        )],
+    );
+    gh.serve(detail_n(13, "k2"), vec![]);
+    let out = core.refresh_review(id12).unwrap();
+    assert!(out.changed);
+    assert_eq!(out.review.id, id12);
+    assert_eq!(out.review.head_sha, "h2");
+    assert_eq!(core.review(id12).unwrap().head_sha, "h2");
+    assert_eq!(core.threads(id12).unwrap().len(), 1);
+    // The other review is untouched and was not fetched; nothing listed.
+    assert_eq!(core.review(id13).unwrap().head_sha, "k1");
+    assert_eq!((gh.fetched(12), gh.fetched(13)), (2, 1));
+    assert_eq!(gh.lists.load(Ordering::SeqCst), lists);
+    // Its report for the AI pass names it.
+    assert_eq!(out.report().changed, [id12]);
+    assert_eq!(out.report().errors, []);
+
+    // Nothing moved since: unchanged, and the report names nothing.
+    let again = core.refresh_review(id12).unwrap();
+    assert!(!again.changed);
+    assert!(again.report().changed.is_empty());
+    assert_eq!(gh.fetched(12), 3);
+}
+
+#[test]
+fn refreshing_one_review_keeps_the_round_bookkeeping() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    core.mark_reviewed(id).unwrap();
+    assert_eq!(
+        core.review(id).unwrap().status,
+        ReviewStatus::WaitingOnAuthor
+    );
+
+    gh.serve(detail_n(12, "h2"), vec![]);
+    let rec = core.refresh_review(id).unwrap().review;
+    // Classified like a poll: a new round, the watermark kept.
+    assert_eq!(rec.status, ReviewStatus::NeedsReReview);
+    assert_eq!(rec.round, 2);
+    assert_eq!(rec.round_reasons, [RoundReason::NewCommits]);
+    assert_eq!(rec.last_reviewed_sha.as_deref(), Some("h1"));
+}
+
+#[test]
+fn an_unknown_review_is_not_found_without_a_call() {
+    let gh = github();
+    let core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(std::slice::from_ref(&gh)),
+    );
+    let err = core.refresh_review(review_ref(99).id()).unwrap_err();
+    assert!(matches!(err, CoreError::NotFound), "{err}");
+    assert_eq!(gh.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn a_rate_limited_provider_is_not_called_for_one_review() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    let until = Utc::now() + chrono::Duration::minutes(20);
+    *gh.limited.lock().unwrap() = Some(until);
+    let calls = gh.calls.load(Ordering::SeqCst);
+
+    let err = core.refresh_review(id).unwrap_err();
+    assert!(err.is_rate_limited(), "{err}");
+    let hhmm = until
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert!(
+        err.to_string()
+            .contains(&format!("GitHub is rate limited until {hhmm}")),
+        "{err}"
+    );
+    assert_eq!(gh.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(gh.fetched(12), 1);
+}
+
+#[test]
+fn a_limit_hit_during_one_review_names_the_providers_reset() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    // The fetch itself hits the limit (the fake then pauses until 13:00).
+    gh.details.lock().unwrap().insert(
+        12,
+        Err(crate::provider::rate_limited(
+            ProviderId::Github,
+            at(10, 12),
+        )),
+    );
+    let err = core.refresh_review(id).unwrap_err();
+    assert!(err.is_rate_limited(), "{err}");
+    let hhmm = at(10, 13)
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+        .to_string();
+    assert!(err.to_string().contains(&hhmm), "{err}");
+    assert_eq!(core.review(id).unwrap().head_sha, "h1");
+}
+
+#[test]
+fn one_review_waits_for_a_full_refresh_under_way_then_reads_afresh() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+
+    // A poll's fetch is on the network with h1; the author pushes h2; the
+    // user asks for this review. It must not read alongside the poll, and
+    // what it stores must be the push, not the poll's older copy.
+    let (started, go) = gh.hold_next_fetch();
+    std::thread::scope(|s| {
+        let poll = s.spawn(|| core.refresh());
+        started.recv().unwrap();
+        gh.serve(detail_n(12, "h2"), vec![]);
+        let one = s.spawn(|| core.refresh_review(id));
+        go.send(()).unwrap();
+        assert_eq!(poll.join().unwrap().errors, []);
+        let out = one.join().unwrap().unwrap();
+        assert!(out.changed);
+        assert_eq!(out.review.head_sha, "h2");
+    });
+    assert_eq!(core.review(id).unwrap().head_sha, "h2");
+    assert_eq!(gh.fetched(12), 3);
+}
+
+#[test]
+fn one_review_holds_the_refresh_lock_while_it_fetches() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    let (started, go) = gh.hold_next_fetch();
+    let busy = std::thread::scope(|s| {
+        let one = s.spawn(|| core.refresh_review(id));
+        started.recv().unwrap();
+        // A poll starting now waits for it.
+        let busy = core.store.refreshing.try_lock().is_err();
+        go.send(()).unwrap();
+        one.join().unwrap().unwrap();
+        busy
+    });
+    assert!(busy, "a single refresh under way holds the refresh lock");
+}
+
+#[test]
+fn one_review_joins_a_refresh_that_read_it_after_the_ask() {
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let store = Store::in_memory().unwrap();
+    let providers = as_providers(std::slice::from_ref(&gh));
+    refresh_all(&providers, &store, at(10, 10));
+    let id = review_ref(12).id();
+
+    // Asked; then the refresh it waited for read the review (h2) after the
+    // ask: that answer is already current, so no second read.
+    let asked = store.begin_fetch();
+    gh.serve(detail_n(12, "h2"), vec![]);
+    refresh_all(&providers, &store, at(10, 11));
+    let out = refresh_review_asked(gh.as_ref(), &store, id, asked, &|| at(10, 12)).unwrap();
+    assert!(!out.changed, "the full refresh reported it already");
+    assert_eq!(out.review.head_sha, "h2");
+    assert_eq!(gh.fetched(12), 2);
+
+    // A refresh that read it before the ask does not count: read again.
+    gh.serve(detail_n(12, "h3"), vec![]);
+    let asked = store.begin_fetch();
+    let out = refresh_review_asked(gh.as_ref(), &store, id, asked, &|| at(10, 13)).unwrap();
+    assert!(out.changed);
+    assert_eq!(out.review.head_sha, "h3");
+    assert_eq!(gh.fetched(12), 3);
+}
+
+#[test]
+fn a_poll_that_started_before_one_review_cannot_undo_it() {
+    // The single refresh overtakes a slower fetch of the same review (the
+    // post path's, which takes no lock): the older one is dropped.
+    let gh = github();
+    gh.serve(detail_n(12, "h1"), vec![]);
+    let core = core_over(std::slice::from_ref(&gh));
+    let id = review_ref(12).id();
+    let older = core.store.begin_fetch();
+    gh.serve(detail_n(12, "h2"), vec![]);
+    assert!(core.refresh_review(id).unwrap().changed);
+    assert!(!persist(
+        &core.store,
+        None,
+        &detail_n(12, "h1"),
+        &[],
+        ME,
+        true,
+        at(10, 11),
+        older
+    )
+    .unwrap());
+    assert_eq!(core.review(id).unwrap().head_sha, "h2");
+}

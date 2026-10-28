@@ -1,0 +1,180 @@
+/* The Conversation section: a card like a file's (FileDiffCard), first in
+   the review view. */
+.card {
+  margin: 0 var(--sp-3) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  overflow: clip;
+  scroll-margin-top: calc(var(--tabbar-h) + var(--sp-2));
+}
+
+.card[data-selected="true"] {
+  border-color: var(--accent);
+}
+
+.header {
+  position: sticky;
+  top: var(--tabbar-h);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--sp-2) 0 var(--sp-1);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.collapse {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+.caret {
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.caret[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  text-align: left;
+}
+
+.body {
+  min-width: 0;
+  background: var(--surface);
+}
+
+.threads {
+  padding: var(--sp-2) var(--sp-1);
+}
+
+.elsewhere {
+  border-top: 1px solid var(--border);
+}
+
+.elsewhere:first-child {
+  border-top: none;
+}
+
+.subTitle {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3) 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.subCount {
+  font-weight: 500;
+}
+
+/* The resolved split: Unresolved, Comments, Resolved. A quiet row per
+   group, its icon carrying the state's hue; lined up with the thread cards
+   below it. */
+.group + .group {
+  margin-top: var(--sp-2);
+}
+
+.groupHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  height: 24px;
+  margin: 0 var(--sp-3) 0 var(--sp-2);
+  padding: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+/* The foldable Resolved header is a full-row button; its padding takes
+   the place of the margin, so the icon stays in line. */
+button.groupHead {
+  width: calc(100% - var(--sp-3));
+  margin-left: 0;
+  padding: 0 var(--sp-2);
+  justify-content: flex-start;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.elsewhere .groupHead {
+  margin: var(--sp-1) var(--sp-3) 0;
+}
+
+.elsewhere button.groupHead {
+  width: calc(100% - var(--sp-1) - var(--sp-3));
+  margin-left: var(--sp-1);
+}
+
+.elsewhere .group:last-child {
+  padding-bottom: var(--sp-2);
+}
+
+.groupIcon {
+  flex-shrink: 0;
+}
+
+.group[data-group="unresolved"] .groupIcon {
+  color: var(--warning);
+}
+
+.group[data-group="comments"] .groupIcon {
+  color: var(--text-faint);
+}
+
+.group[data-group="resolved"] .groupIcon {
+  color: var(--success);
+}
+
+.groupLabel {
+  color: var(--text);
+}
+
+.group[data-group="resolved"] .groupLabel {
+  color: var(--text-muted);
+}
+
+.groupCount {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.placeholder {
+  margin: 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+
+.error {
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+}

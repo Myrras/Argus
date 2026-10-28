@@ -1,4 +1,7 @@
 # Argus — development tasks. Run `just` to see them.
+# Shared recipes (rust, frontend, ci, build-signed, sweep) come from the
+# ci-workflows clone: `ln -s /path/to/ci-workflows ~/.ci-workflows`.
+import? '~/.ci-workflows/common.just'
 
 # Show available recipes.
 default:
@@ -8,24 +11,61 @@ default:
 dev:
     pnpm tauri dev
 
-# Build the production desktop bundle (.app + .dmg).
 # Tauri's own dmg step uses HFS+, which is broken on macOS 26+, so we build
-# the .app here and package the .dmg ourselves (APFS) via scripts/make-dmg.sh.
+# the .app here and package the .dmg ourselves (APFS) via the shared make-dmg.sh.
+
+# Build the production desktop bundle (.app + .dmg).
 build:
     pnpm install
     pnpm tauri build --bundles app
-    ./scripts/make-dmg.sh
+    ~/.ci-workflows/scripts/make-dmg.sh
     @just sweep
 
-# Reclaim stale build artifacts (old dependency versions + other toolchains)
-# WITHOUT touching the current build, so `target/` stops growing without bound.
-# Runs automatically at the tail of `build`. No-op with a hint if cargo-sweep
-# isn't installed (`cargo install cargo-sweep`).
-sweep:
-    @command -v cargo-sweep >/dev/null 2>&1 \
-        && cargo sweep --installed >/dev/null && cargo sweep --time 7 >/dev/null \
-        && echo "recycled stale target/ artifacts" \
-        || echo "cargo-sweep not installed; skipping target/ recycle (cargo install cargo-sweep)"
+# Build + launch a debug .app signed with a STABLE self-signed cert (macOS).
+# `just dev` ad-hoc-signs the binary with a fresh identity every rebuild, so the
+# keychain (GitLab token) re-prompts each run and "Always Allow" never sticks.
+# This recipe keeps one signing identity across rebuilds, so a single "Always
+# Allow" persists. Tradeoff: runs a bundle, so there's NO hot reload — use
+# `just dev` for fast iteration and this when the keychain prompt is in your way.
+# One-time setup: create a self-signed *Code Signing* certificate named
+# "Argus Dev" (Keychain Access → Certificate Assistant → Create a Certificate);
+# to use a different name, edit src-tauri/tauri.dev-signed.conf.json.
+dev-signed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # _signed-conf comes from common.just: called here, not a dependency, so
+    # the justfile still parses in CI where the import resolves to nothing.
+    just _signed-conf
+    # Assigned apart from the export, so a failed lookup stops the recipe
+    # (`export X="$(…)"` takes export's status and hides it from set -e).
+    target_dir="$(just _target-dir)"
+    export CARGO_TARGET_DIR="$target_dir"
+    pnpm tauri build --debug --bundles app --config src-tauri/tauri.dev-signed.conf.json
+    just sweep
+    open "$CARGO_TARGET_DIR/debug/bundle/macos/Argus.app"
+
+# Build the signed release and put it in /Applications (no Finder window).
+# Copied next to it first and swapped in with mv, so a failed copy never
+# leaves /Applications without the app.
+install-signed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Called, not a dependency: see dev-signed.
+    just _build-signed
+    app="$(just _target-dir)/release/bundle/macos/Argus.app"
+    dest="/Applications/Argus.app"
+    tmp="/Applications/.Argus.app.tmp"
+    old="/Applications/.Argus.app.old"
+    rm -rf "$tmp" "$old"
+    ditto "$app" "$tmp"
+    if [ -e "$dest" ]; then mv "$dest" "$old"; fi
+    if ! mv "$tmp" "$dest"; then
+        if [ -e "$old" ]; then mv "$old" "$dest"; fi
+        echo "error: could not install $dest" >&2
+        exit 1
+    fi
+    rm -rf "$old"
+    echo "Installed → $dest"
 
 # Regenerate the app icons from src-tauri/icons/source/argus.svg (needs
 # rsvg-convert: `brew install librsvg`). Only the desktop icons are kept.
@@ -38,30 +78,39 @@ icons:
 check:
     cargo check --workspace
 
-# Run all tests (Rust workspace + frontend).
-test:
-    cargo test --workspace
-    -pnpm test
+# Rust needs cargo-llvm-cov (`rustup component add llvm-tools-preview &&
+# cargo install cargo-llvm-cov`); HTML lands in target/llvm-cov/html, the
+# frontend's (Vitest + v8) in coverage/.
+# Line coverage of both suites (not part of `just ci`).
+coverage:
+    @command -v cargo-llvm-cov >/dev/null 2>&1 \
+        || { echo "cargo-llvm-cov not installed: rustup component add llvm-tools-preview && cargo install cargo-llvm-cov"; exit 1; }
+    cargo llvm-cov --workspace --no-report
+    cargo llvm-cov report --summary-only --ignore-filename-regex '(testutil|guarantees)\.rs$'
+    cargo llvm-cov report --html --ignore-filename-regex '(testutil|guarantees)\.rs$'
+    pnpm test:coverage
 
 # Run only the core unit + integration tests.
 test-core:
     cargo test -p argus-core
 
-# Lint: clippy with warnings-as-errors + frontend lint.
-lint:
-    cargo clippy --workspace --all-targets -- -D warnings
-    -pnpm lint
+# Only the integration test binary: `#[ignore]` also marks measurements such as
+# `big_review_timings`, which must not run here. Run by the nightly workflow.
+
+# Real GitHub API, read-only (needs gh and INTEGRATION_TOKEN; skips without it).
+test-integration:
+    cargo test -p argus-core --test github_integration -- --ignored --nocapture
 
 # Format Rust + frontend.
 format:
     cargo fmt --all
-    -pnpm format
+    pnpm format
 
 # Set the version and sync it across Cargo.toml, tauri.conf.json, package.json.
 # Usage: just version 0.2.0
 version new:
-    bash ./scripts/sync-version.sh --set {{new}}
+    bash ~/.ci-workflows/scripts/sync-version.sh --set {{ new }}
 
 # Verify the version is identical across all three manifests.
 version-check:
-    bash ./scripts/sync-version.sh --check
+    bash ~/.ci-workflows/scripts/sync-version.sh --check

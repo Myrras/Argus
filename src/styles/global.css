@@ -1,4 +1,4 @@
-/** Global resets, base element styling, and shared primitives. */
+/** Global resets, base element styling, and shared primitives for Argus (Iris's). */
 
 @import "./tokens.css";
 
@@ -25,12 +25,23 @@ body {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   overflow: hidden;
+  /* WKWebView (Tauri on macOS) only honours the prefixed property. */
+  -webkit-user-select: none;
   user-select: none;
 }
 
 #root {
   display: flex;
   flex-direction: column;
+}
+
+/* Custom title bar drag handle (Windows, where decorations are off). WebView2
+   uses the CSS app-region for window dragging incl. touch/pen; interactive
+   children opt back out with `app-region: no-drag`. No-op on macOS (the native
+   title bar handles dragging and the attribute isn't rendered there). */
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+  app-region: drag;
 }
 
 button {
@@ -42,18 +53,29 @@ button {
   border-radius: var(--radius-sm);
   padding: var(--sp-1) var(--sp-3);
   cursor: pointer;
+  /* Centre icon + label and space them; components that need a different
+     layout override `display` themselves. */
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--sp-1);
+  /* No `opacity` here: the disabled dim (below) switches at once. A fading
+     opacity gets the button its own compositing layer in WebKit, and when
+     the same render also moves it (a busy label resizes its neighbour in a
+     right-aligned footer), WKWebView leaves the old paint behind: a stale,
+     enabled-looking copy beside the dimmed one. */
   transition:
     background var(--dur-1) var(--ease-out),
     border-color var(--dur-1) var(--ease-out),
     color var(--dur-1) var(--ease-out),
     transform var(--dur-1) var(--ease-out),
-    box-shadow var(--dur-1) var(--ease-out),
-    opacity var(--dur-1) var(--ease-out);
+    box-shadow var(--dur-1) var(--ease-out);
   white-space: nowrap;
+  /* Stay unselectable even inside a container that opts into `user-select:
+     text` (chat log, comment threads, …) — a button's label is an action, not
+     prose to select. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 button:hover:not(:disabled) {
@@ -105,6 +127,30 @@ button.ghost:hover:not(:disabled) {
   background: var(--surface-hover);
 }
 
+/* A square, borderless icon-only button. It always carries an aria-label
+   and a title (the tooltip says what it does), since the glyph alone may
+   not. `aria-pressed="true"` marks a toggle that is on. */
+button.iconButton {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+button.iconButton:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-hover);
+  border-color: transparent;
+}
+
+button.iconButton[aria-pressed="true"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 input,
 select {
   font-family: inherit;
@@ -115,6 +161,7 @@ select {
   border-radius: var(--radius-sm);
   padding: var(--sp-2) var(--sp-3);
   width: 100%;
+  -webkit-user-select: text;
   user-select: text;
   transition:
     border-color var(--dur-1) var(--ease-out),
@@ -125,6 +172,7 @@ input:focus,
 select:focus {
   outline: none;
   border-color: var(--accent);
+  /* Soft focus ring that fades in with the border. */
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
@@ -165,7 +213,7 @@ label {
 }
 
 /*
- * Theme crossfade. `themeStore.toggle()` flips `data-theme` inside a view
+ * Theme crossfade. `themeStore.setTheme()` flips `data-theme` inside a view
  * transition where supported; this tunes the root cross-fade to our scale.
  * Ignored entirely by WebViews without the View Transitions API.
  */
@@ -188,10 +236,34 @@ label {
 }
 
 /**
+ * Shared spinner. A 1em ring sized to the surrounding font; color follows
+ * `currentColor` so it inherits whatever text tone it sits in.
+ */
+.spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  border: 2px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin var(--dur-spin) linear infinite;
+  vertical-align: -0.15em;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/**
  * Reduced-motion guard. When the user (or OS) asks for less motion, neutralize
- * animations and transitions globally rather than auditing every component.
- * We zero durations rather than `animation: none` so animations that set a
- * final state via `forwards` still resolve to it.
+ * animations and transitions globally rather than auditing every component:
+ * near-instant durations keep state changes legible without movement. Pairs
+ * with `prefersReducedMotion()` in `src/lib/motion.ts`, which skips JS-driven
+ * exit delays. `scroll-behavior: auto` also disables smooth programmatic
+ * scrolling. We zero durations rather than `animation: none` so animations that
+ * set a final state via `forwards` still resolve to it.
  */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -202,4 +274,37 @@ label {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+  /* View-transition pseudo-elements are not matched by `*`. */
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}
+
+/* Manual override from SettingsModal → settingsStore. The store sets
+ * data-reduce-motion="true" when the user turns the toggle on; turning it off
+ * removes the attribute, so the OS-level media query above still wins for
+ * users who have reduced motion enabled at the OS level. */
+html[data-reduce-motion="true"] *,
+html[data-reduce-motion="true"] *::before,
+html[data-reduce-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+html[data-reduce-motion="true"]::view-transition-group(*),
+html[data-reduce-motion="true"]::view-transition-old(*),
+html[data-reduce-motion="true"]::view-transition-new(*) {
+  animation: none !important;
+}
+
+/* Real text stays selectable inside the otherwise unselectable shell. */
+input,
+textarea,
+select,
+pre {
+  -webkit-user-select: text;
+  user-select: text;
 }

@@ -1,0 +1,38 @@
+[
+  {
+    "id": 8004,
+    "html_url": "https://github.com/acme-fixture/widgets/pull/12#issuecomment-8004",
+    "user": { "login": "alice-fixture", "id": 1002, "type": "User" },
+    "body": "Moved it to settings in c3.",
+    "created_at": "2026-10-10T15:00:00Z",
+    "updated_at": "2026-10-10T15:00:00Z",
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 8005,
+    "html_url": "https://github.com/acme-fixture/widgets/pull/12#issuecomment-8005",
+    "user": { "login": "rev-fixture", "id": 1001, "type": "User" },
+    "body": "> Ready for review. The cache TTL is open for discussion.\n\nI would keep 60s as the default.",
+    "created_at": "2026-10-10T16:00:00Z",
+    "updated_at": "2026-10-10T16:00:00Z",
+    "author_association": "MEMBER"
+  },
+  {
+    "id": 8006,
+    "html_url": "https://github.com/acme-fixture/widgets/pull/12#issuecomment-8006",
+    "user": { "login": "carol-fixture", "id": 1003, "type": "User" },
+    "body": "> Should the TTL come from settings\n\nAgreed, settings is better.",
+    "created_at": "2026-10-10T17:00:00Z",
+    "updated_at": "2026-10-10T17:00:00Z",
+    "author_association": "CONTRIBUTOR"
+  },
+  {
+    "id": 8007,
+    "html_url": "https://github.com/acme-fixture/widgets/pull/12#issuecomment-8007",
+    "user": { "login": "alice-fixture", "id": 1002, "type": "User" },
+    "body": "> CI is green on my fork.\n\nThanks!",
+    "created_at": "2026-10-10T18:00:00Z",
+    "updated_at": "2026-10-10T18:00:00Z",
+    "author_association": "MEMBER"
+  }
+]

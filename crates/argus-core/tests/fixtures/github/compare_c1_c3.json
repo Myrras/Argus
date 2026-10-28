@@ -1,0 +1,18 @@
+{
+  "status": "ahead",
+  "ahead_by": 2,
+  "behind_by": 0,
+  "merge_base_commit": { "sha": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1" },
+  "commits": [],
+  "files": [
+    {
+      "sha": "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "filename": "src/cache.rs",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0,
+      "changes": 1,
+      "patch": "@@ -2,0 +3 @@\n+    // a minute"
+    }
+  ]
+}

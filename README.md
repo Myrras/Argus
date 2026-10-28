@@ -10,15 +10,18 @@ Rust + Tauri 2 + React + TypeScript + Vite. Forked from
 - Node 22 + `pnpm` 10
 - Tauri 2 system prerequisites: <https://tauri.app/start/prerequisites/>
 - `just` (`brew install just`)
+- A clone of [`ci-workflows`](https://github.com/RobbieMinderhoud/ci-workflows), symlinked as `~/.ci-workflows` (for `just ci` and the shared scripts)
 
 ## Get started
 
 ```
 pnpm install
 just dev    # run the app (hot reload)
-just test   # Rust + frontend tests
-just lint   # clippy -D warnings + eslint
+just ci     # fmt, clippy, tests, eslint, vitest, build (shared common.just)
 just build  # .app + .dmg
 ```
+
+CI runs the shared workflows from `ci-workflows`; `just test-integration` runs
+the opt-in tests against the real GitHub API (needs `gh` and `INTEGRATION_TOKEN`).
 
 See `CLAUDE.md` for the layout and conventions, `CHANGELOG.md` for releases.

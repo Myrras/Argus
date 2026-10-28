@@ -1,0 +1,84 @@
+/* Centered welcome card inside the detail island (no review selected);
+   Iris's WelcomeScreen styles. */
+.welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  color: var(--text-muted);
+  animation: fadeRise var(--dur-4) var(--ease-out);
+}
+
+.logo {
+  color: var(--accent);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  color: var(--text);
+}
+
+.subtitle {
+  margin: 0;
+  max-width: 320px;
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+.keys {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.keys kbd {
+  padding: 0 var(--sp-1);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.openBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-md);
+  color: var(--accent-contrast);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.openBtn:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.openBtn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.openBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@keyframes fadeRise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}

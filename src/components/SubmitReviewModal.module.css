@@ -1,0 +1,235 @@
+/* Submit review: the verdicts, the summary (Write / Preview), the drafts
+   switch and the outcome. Tokens only. */
+.body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.verdicts {
+  /* A fieldset defaults to min-width: min-content, which can push the
+     dialog wider than its card (a horizontal scrollbar). */
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.legend {
+  margin-bottom: var(--sp-1);
+  padding: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+/* One card per verdict: the radio in its own column, the text in the
+   rest. A grid, so the global `label` and `input` rules (block label,
+   inputs at 100% width with padding) can never hand the radio the card's
+   width and squeeze the text out of it. */
+.verdict {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--sp-2);
+  min-width: 0;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-md);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    border-color var(--dur-1) var(--ease-out),
+    background var(--dur-1) var(--ease-out);
+}
+
+.verdict:hover {
+  border-color: var(--border-strong);
+}
+
+.verdict[data-checked="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+/* global.css styles every input as a text field; the radio is a radio. */
+.verdict input[type="radio"] {
+  width: auto;
+  height: auto;
+  margin: 3px 0 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* The name, the muted hint beside it, wrapping inside the card. */
+.verdictText {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--sp-2);
+  row-gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.verdictName {
+  font-weight: 500;
+}
+
+.verdictHint {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.tab {
+  height: 24px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-muted);
+}
+
+.tab[aria-selected="true"] {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+
+.optional {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.field {
+  width: 100%;
+  min-height: 96px;
+  resize: vertical;
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  transition:
+    border-color var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-1) var(--ease-out);
+}
+
+.field:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.field::placeholder {
+  color: var(--text-faint);
+}
+
+.preview {
+  min-height: 96px;
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.nothing {
+  margin: 0;
+  color: var(--text-faint);
+}
+
+.drafts {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.drafts input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.text {
+  margin: 0;
+  line-height: 1.55;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.text code {
+  padding: 0 2px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.warning {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+}
+
+.error {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--danger);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.errorTitle {
+  margin: 0;
+}
+
+.refused {
+  margin: var(--sp-1) 0 0;
+  padding-left: var(--sp-4);
+}
+
+/* The primary's labels in one grid cell: the button is as wide as the
+   widest, so the footer never shifts (see `StableLabel`). */
+.stableLabel {
+  display: inline-grid;
+}
+
+.stableLabel > span {
+  grid-area: 1 / 1;
+  text-align: center;
+}
+
+.stableLabel > [data-current="false"] {
+  visibility: hidden;
+}

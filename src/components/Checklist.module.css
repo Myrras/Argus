@@ -1,0 +1,115 @@
+/* "Look here yourself" in the AI island. */
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.count {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty,
+.note {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+
+.note {
+  font-size: var(--fs-xs);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item {
+  border-radius: var(--radius-sm);
+  transition: background var(--dur-1) var(--ease-out);
+}
+
+.item:hover {
+  background: var(--surface-hover);
+}
+
+.label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.label input {
+  /* Global inputs are full width; a checkbox is not. */
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+/* Under the text, in line with it (past the checkbox). */
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2) var(--sp-1) calc(var(--sp-2) * 2 + 14px);
+}
+
+.item[data-checked="true"] .label span {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.earlierToggle {
+  align-self: flex-start;
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.caret {
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.caret[data-open="true"] {
+  transform: rotate(90deg);
+}
+
+.earlier {
+  padding-left: var(--sp-2);
+}
+
+.roundTitle {
+  margin: 0 0 2px;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--text-faint);
+}
