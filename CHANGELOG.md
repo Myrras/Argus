@@ -11,6 +11,8 @@ when it merges.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-28
+
 ### Changed
 
 - Every pull request now needs exactly one release label (`patch`, `minor` or
