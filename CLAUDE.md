@@ -13,8 +13,10 @@ macOS-first; Windows kept in mind.
 The skeleton — Cargo workspace shape, `justfile`, `scripts/`, CI, shared config
 files, design tokens, layering/IPC conventions — comes from
 <https://github.com/RobbieMinderhoud/rust-application-boilerplate>
-(`../rust-application-boilerplate` locally). CI/release setup follows the
-sibling app Iris (`../Iris`).
+(`../rust-application-boilerplate` locally). CI, release and the shared
+recipes and scripts come from
+<https://github.com/RobbieMinderhoud/ci-workflows> (see Versioning, CI &
+releases).
 
 - **Rule:** a change to the **shared skeleton or conventions** (not Argus
   domain code) also goes as a **PR against the boilerplate**.
@@ -535,18 +537,26 @@ colors/durations/easings.
 `just` lists recipes. The Tauri CLI is the local dev-dependency (`pnpm tauri …`).
 
 ```
-just dev            # Vite + Tauri, hot reload
-just build          # .app + APFS .dmg (scripts/make-dmg.sh)
-just dev-signed     # debug .app, stable signing identity (no hot reload)
-just build-signed   # release .app, stable signing identity
-just install-signed # build-signed + copy to /Applications
-just test           # cargo test --workspace + vitest
-just test-core      # argus-core only
-just lint           # clippy -D warnings + eslint
-just format         # rustfmt + prettier
-just version-check  # versions in sync across manifests
-just coverage       # cargo-llvm-cov + Vitest v8 (not in `just test` or CI)
+just dev              # Vite + Tauri, hot reload
+just build            # .app + APFS .dmg (shared make-dmg.sh)
+just dev-signed       # debug .app, stable signing identity (no hot reload)
+just build-signed     # release .app, stable signing identity (common.just)
+just install-signed   # build-signed + copy to /Applications
+just ci               # what CI runs: rust, then frontend (common.just)
+just rust             # rustfmt, clippy -D warnings, cargo test (common.just)
+just frontend         # prettier, eslint, vitest, build (common.just)
+just test-core        # argus-core only
+just test-integration # real GitHub API, read-only; needs gh + INTEGRATION_TOKEN
+just format           # rustfmt + prettier
+just version-check    # versions in sync across manifests
+just coverage         # cargo-llvm-cov + Vitest v8 (not in `just ci`)
 ```
+
+`ci`, `rust`, `frontend`, `build-signed` and `sweep` come from the shared
+`common.just`, imported from `~/.ci-workflows/common.just`: symlink a clone of
+ci-workflows there (`ln -s /path/to/ci-workflows ~/.ci-workflows`). Don't define
+recipes with those names here. `test-integration` must not depend on
+`common.just` recipes: in CI the import resolves to nothing.
 
 ### macOS keychain prompt during development
 
@@ -583,6 +593,19 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
   head (`git/worktree_tests.rs`, `ai/tests.rs` `review_repo`); skills from
   a fake Claude config dir (`JobContext::claude_dir`,
   `Core::set_claude_dir`), never the real `~/.claude`.
+- **Integration tests** (`crates/argus-core/tests/github_integration.rs`):
+  the GitHub provider against the real API, read-only, on the public repo
+  `RobbieMinderhoud/ci-workflows` (merged PRs #1 and #2). All `#[ignore]`d;
+  `just test-integration` runs only that binary with `--ignored` (never
+  `--workspace -- --ignored`: that would also run measurements such as
+  `big_review_timings`). Needs the `gh` CLI and `INTEGRATION_TOKEN` (a token
+  that can read public repos; the test hands it to `gh` as `GH_TOKEN`); unset,
+  each test prints "skipped" and passes. Locally:
+  `INTEGRATION_TOKEN=$(gh auth token) just test-integration`. CI runs it
+  nightly (`integration.yml`, secret `INTEGRATION_TOKEN`). No writes, ever.
+  **GitLab has no real-API test:** the instance is internal and unreachable
+  from GitHub runners, so GitLab stays on its local double
+  (`gitlab_provider.rs`).
 - **New provider fixture:** save the anonymised API response under
   `tests/fixtures/<github|gitlab>/`, add its route (the `case` in the fake
   `gh` of `github_provider.rs`, `fixture_routes` in `gitlab_provider.rs`),
@@ -623,15 +646,56 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
 
 ## Versioning, CI & releases
 
+CI, release and installer builds are thin callers (`.github/workflows/`, pinned
+`@v1`) of <https://github.com/RobbieMinderhoud/ci-workflows>; behaviour lives
+there, see its README. Shared scripts (`changelog.sh`, `next-version.sh`,
+`sync-version.sh`, `make-dmg.sh`) live there too; `just version`,
+`just version-check` and `just build` call `~/.ci-workflows/scripts/`.
+
 - SemVer. `[workspace.package]` version in the root `Cargo.toml` is the source
-  of truth; `scripts/sync-version.sh` propagates it (`--check` detects drift).
-- `.github/workflows/ci.yml`: macOS job (fmt, clippy, `cargo test --workspace`,
-  typecheck, lint, vitest, build), Windows job (`argus-core` fmt/clippy/test),
-  a `changelog` job on PRs, and a `release` job on push to main.
+  of truth; `sync-version.sh` propagates it (`--check` detects drift).
+- `ci.yml`: frontend and Rust checks (`just frontend` / `just rust`), a
+  Windows job (`cargo test -p argus-core`) and the `ci-ok` gate; on push to
+  `main` the release follows. `pr-checks.yml`: changelog entry and release
+  label. `build.yml` (dispatch-only, run by the release): .dmg and NSIS
+  installers. `integration.yml`: nightly `just test-integration`.
+- **Rust checks run on ubuntu** (the shared job installs the Tauri system
+  packages). Code and tests must pass on Linux as well as macOS: gate anything
+  that needs a desktop session or macOS (keychain, Finder, `open`) behind
+  `cfg`, and keep tests off the real keychain.
+- **Windows runs on push to `main` and on PRs with the `windows` label**
+  (adding the label re-runs CI for the PR). It gates the release.
+- Required checks on `main`: `ci / ci-ok`, `pr-checks / Changelog entry`,
+  `pr-checks / Release label`. Don't require `ci / frontend`, `ci / rust` or
+  `ci / windows`. The labels `patch`, `minor`, `major` and `windows` must exist.
 - **Every PR adds an entry under `## [Unreleased]` in `CHANGELOG.md`**
-  (user-facing voice). Merging to main releases it: patch by default, `minor` /
-  `major` PR label bumps more. The first release ships the `Cargo.toml` version.
-  `build.yml` (dispatch-only) builds the .dmg and NSIS installers.
+  (user-facing voice) and carries exactly one of `patch` / `minor` / `major`:
+  merging to main releases it and the label sets the bump (the highest across
+  PRs since the last tag). The first release ships the `Cargo.toml` version.
 - `RELEASE_DEPLOY_KEY` (optional secret) lets the release commit through a
   protected main; without it the job falls back to `GITHUB_TOKEN`.
+  `INTEGRATION_TOKEN` (secret) is for the nightly integration run.
 - Do **not** create tags or releases by hand without explicit approval.
+
+### When to add the `windows` label
+
+Add `windows` to a PR when it:
+
+- touches `cfg(windows)`, `cfg(unix)` or `target_os` code, or platform-specific modules
+- changes file paths, path separators, drive letters or case sensitivity; process spawning, PTY or shell quoting; environment variables; WSL
+- changes the Windows settings in `tauri.conf.json` (bundle, NSIS) or installer scripts
+- adds or upgrades a dependency with platform-specific code (`tauri`, `windows-rs`, `portable-pty`, …) or bumps the Rust toolchain
+- fixes a Windows bug
+
+Skip it for frontend-only, docs-only and purely cross-platform logic changes. If unsure, add it: `main` runs Windows after the merge anyway, and a failure there blocks the release.
+
+Windows-sensitive spots in this repo (all in `crates/argus-core/src/` unless noted):
+
+- `platform.rs`: finding `gh`, `claude`, `auggie` (login shell on Unix, `where` and `%COMSPEC%` on Windows), `CREATE_NO_WINDOW`
+- `git/mod.rs` (git lookup, process spawning), `provider/github.rs` (spawning `gh`)
+- `ai/adapter.rs`: agent spawning, sandbox and absolute-path checks (`cfg!(windows)`)
+- `open/mod.rs` and `src-tauri/src/opener.rs`: opening files in an editor, what runs instead of opens (`RUNS_ON_OPEN_WINDOWS`)
+- `provider/gitlab.rs`: the keychain (`keyring` `windows-native` vs `apple-native`; Secret Service on Linux)
+- `src-tauri/src/lib.rs` (macOS-only menu bar; the title-bar window controls and Settings gear elsewhere), `src-tauri/src/main.rs` (`windows_subsystem`)
+- `src-tauri/tauri.conf.json` (bundle, icons) and `build.yml` (NSIS installer)
+- tests with Unix fake scripts (`fake gh`, fake agents, git fixtures) carry `#[cfg_attr(windows, ignore)]`; the Windows job runs clippy on the whole workspace but tests `-p argus-core` only, so `src-tauri` tests run on Linux only

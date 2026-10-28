@@ -1,0 +1,22 @@
+# Nightly and on demand: `just test-integration`, the read-only GitHub provider
+# tests (crates/argus-core/tests/github_integration.rs).
+name: Integration tests
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    uses: RobbieMinderhoud/ci-workflows/.github/workflows/integration.yml@v1
+    # The GitHub provider talks to the real API (read-only); gh ships on the
+    # ubuntu runner. GitLab is internal, so it has no real-API test.
+    # libdbus: argus-core links the Secret Service keyring backend on Linux.
+    with:
+      apt-packages: libdbus-1-dev pkg-config
+    secrets:
+      INTEGRATION_TOKEN: ${{ secrets.INTEGRATION_TOKEN }}

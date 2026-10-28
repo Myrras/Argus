@@ -1,4 +1,7 @@
 # Argus — development tasks. Run `just` to see them.
+# Shared recipes (rust, frontend, ci, build-signed, sweep) come from the
+# ci-workflows clone: `ln -s /path/to/ci-workflows ~/.ci-workflows`.
+import? '~/.ci-workflows/common.just'
 
 # Show available recipes.
 default:
@@ -8,24 +11,15 @@ default:
 dev:
     pnpm tauri dev
 
-# Build the production desktop bundle (.app + .dmg).
 # Tauri's own dmg step uses HFS+, which is broken on macOS 26+, so we build
-# the .app here and package the .dmg ourselves (APFS) via scripts/make-dmg.sh.
+# the .app here and package the .dmg ourselves (APFS) via the shared make-dmg.sh.
+
+# Build the production desktop bundle (.app + .dmg).
 build:
     pnpm install
     pnpm tauri build --bundles app
-    ./scripts/make-dmg.sh
+    ~/.ci-workflows/scripts/make-dmg.sh
     @just sweep
-
-# Reclaim stale build artifacts (old dependency versions + other toolchains)
-# WITHOUT touching the current build, so `target/` stops growing without bound.
-# Runs automatically at the tail of `build`. No-op with a hint if cargo-sweep
-# isn't installed (`cargo install cargo-sweep`).
-sweep:
-    @command -v cargo-sweep >/dev/null 2>&1 \
-        && cargo sweep --installed >/dev/null && cargo sweep --time 7 >/dev/null \
-        && echo "recycled stale target/ artifacts" \
-        || echo "cargo-sweep not installed; skipping target/ recycle (cargo install cargo-sweep)"
 
 # Build + launch a debug .app signed with a STABLE self-signed cert (macOS).
 # `just dev` ad-hoc-signs the binary with a fresh identity every rebuild, so the
@@ -46,16 +40,6 @@ dev-signed: _signed-conf
     pnpm tauri build --debug --bundles app --config src-tauri/tauri.dev-signed.conf.json
     just sweep
     open "$CARGO_TARGET_DIR/debug/bundle/macos/Argus.app"
-
-# Build a SIGNED release .app for personal install (macOS), and show it in
-# Finder. Reuses the stable signing identity in tauri.dev-signed.conf.json
-# (that file only sets bundle.macOS.signingIdentity, so it's equally valid for
-# release). A stable identity means macOS keychain "Always Allow" persists and
-# the app launches with no Gatekeeper prompt on this machine. Output:
-# <target dir>/release/bundle/macos/Argus.app. Install: drag it into
-# /Applications, or run `just install-signed`.
-build-signed: _build-signed
-    open "$(just _target-dir)/release/bundle/macos"
 
 # Build the signed release and put it in /Applications (no Finder window).
 # Copied next to it first and swapped in with mv, so a failed copy never
@@ -78,33 +62,6 @@ install-signed: _build-signed
     rm -rf "$old"
     echo "Installed → $dest"
 
-# The signed release build behind build-signed and install-signed. Only the
-# .app is built (--bundles app): the .dmg step isn't needed for a personal
-# install. The target dir is made absolute first (see _target-dir).
-_build-signed: _signed-conf
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Assigned apart from the export, so a failed lookup stops the recipe
-    # (`export X="$(…)"` takes export's status and hides it from set -e).
-    target_dir="$(just _target-dir)"
-    export CARGO_TARGET_DIR="$target_dir"
-    pnpm install
-    pnpm tauri build --bundles app --config src-tauri/tauri.dev-signed.conf.json
-    just sweep
-
-# The cargo target directory as an absolute path, resolved from the repo root.
-# tauri runs cargo from src-tauri/, where a relative CARGO_TARGET_DIR would
-# point elsewhere than the recipes look: the signed recipes export this to the
-# build so both agree.
-_target-dir:
-    @cargo metadata --format-version 1 --no-deps | node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => console.log(JSON.parse(s).target_directory))'
-
-# Guard for the signed recipes. The config is gitignored (it names *your*
-# machine's signing identity), so a fresh clone or git worktree does not have it
-# and tauri would fail with an opaque config error instead.
-_signed-conf:
-    @test -f src-tauri/tauri.dev-signed.conf.json || { echo "error: src-tauri/tauri.dev-signed.conf.json is missing."; echo "It is gitignored (machine-specific signing identity), so copy it from another checkout of this repo, or create it per 'macOS keychain prompt during development' in CLAUDE.md."; echo "Your identities: security find-identity -v -p codesigning"; exit 1; }
-
 # Regenerate the app icons from src-tauri/icons/source/argus.svg (needs
 # rsvg-convert: `brew install librsvg`). Only the desktop icons are kept.
 icons:
@@ -115,11 +72,6 @@ icons:
 # Type-check the whole Rust workspace without building.
 check:
     cargo check --workspace
-
-# Run all tests (Rust workspace + frontend).
-test:
-    cargo test --workspace
-    -pnpm test
 
 # Rust needs cargo-llvm-cov (`rustup component add llvm-tools-preview &&
 # cargo install cargo-llvm-cov`); HTML lands in target/llvm-cov/html, the
@@ -137,21 +89,23 @@ coverage:
 test-core:
     cargo test -p argus-core
 
-# Lint: clippy with warnings-as-errors + frontend lint.
-lint:
-    cargo clippy --workspace --all-targets -- -D warnings
-    -pnpm lint
+# Run the opt-in integration tests against the real GitHub API (needs the `gh`
+# CLI and INTEGRATION_TOKEN; skips with a message without it). Only the
+# integration test binaries: `#[ignore]` also marks measurements such as
+# `big_review_timings`, which must not run here. Run by the nightly workflow.
+test-integration:
+    cargo test -p argus-core --test github_integration -- --ignored --nocapture
 
 # Format Rust + frontend.
 format:
     cargo fmt --all
-    -pnpm format
+    pnpm format
 
 # Set the version and sync it across Cargo.toml, tauri.conf.json, package.json.
 # Usage: just version 0.2.0
 version new:
-    bash ./scripts/sync-version.sh --set {{new}}
+    bash ~/.ci-workflows/scripts/sync-version.sh --set {{ new }}
 
 # Verify the version is identical across all three manifests.
 version-check:
-    bash ./scripts/sync-version.sh --check
+    bash ~/.ci-workflows/scripts/sync-version.sh --check
