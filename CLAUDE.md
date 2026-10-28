@@ -667,9 +667,10 @@ there, see its README. Shared scripts (`changelog.sh`, `next-version.sh`,
   (adding the label re-runs CI for the PR). It gates the release.
 - Required checks on `main`: `ci / ci-ok`, `pr-checks / Changelog entry`,
   `pr-checks / Release label`. Don't require `ci / frontend`, `ci / rust` or
-  `ci / windows`. The labels `patch`, `minor`, `major` and `windows` must exist.
+  `ci / windows`. The labels `release:patch`, `release:minor`, `release:major`, `no-release` and `windows` must exist.
 - **Every PR adds an entry under `## [Unreleased]` in `CHANGELOG.md`**
-  (user-facing voice) and carries exactly one of `patch` / `minor` / `major`:
+  (user-facing voice) and carries exactly one of `release:patch` / `release:minor` / `release:major`
+  (`no-release` for CI, config or docs-only PRs, no entry needed):
   merging to main releases it and the label sets the bump (the highest across
   PRs since the last tag). The first release ships the `Cargo.toml` version.
 - `RELEASE_DEPLOY_KEY` (optional secret) lets the release commit through a
