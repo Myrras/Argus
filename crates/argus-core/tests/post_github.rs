@@ -127,12 +127,37 @@ fn fake() -> Fake {
     );
     std::fs::write(&gh, script).unwrap();
     std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    wait_until_executable(&gh);
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&bodies);
     Fake {
         gh: gh.to_string_lossy().into_owned(),
         log,
         bodies,
         _dir: dir,
     }
+}
+
+/// A test thread that forks while another one is still writing the script
+/// holds its write fd until it execs, so running the script then fails with
+/// "text file busy" (the provider reports `gh` as unavailable). Run it once,
+/// retrying until the spawn works; the run's log entries are removed by the
+/// caller.
+#[cfg(unix)]
+fn wait_until_executable(gh: &std::path::Path) {
+    for _ in 0..400 {
+        match std::process::Command::new(gh)
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            // ETXTBSY is 26 on Linux and macOS (its ErrorKind needs Rust 1.83).
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            _ => return,
+        }
+    }
+    panic!("{} stayed busy for 2 s", gh.display());
 }
 
 #[cfg(not(unix))]
