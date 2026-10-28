@@ -2,6 +2,10 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 
+#[path = "../tests/support/script.rs"]
+mod script;
+pub use script::write_executable;
+
 use crate::provider::{
     Anchor, Note, ProviderId, ReviewDetail, ReviewRef, ReviewState, Side, Thread,
 };

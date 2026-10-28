@@ -7,6 +7,9 @@
 // On Windows the fake is never built, so its helpers go unused.
 #![cfg_attr(windows, allow(dead_code))]
 
+#[path = "support/script.rs"]
+mod script;
+
 use std::path::{Path, PathBuf};
 
 use argus_core::provider::{
@@ -134,7 +137,6 @@ impl Fake {
 
 #[cfg(unix)]
 fn script(body: &str) -> Fake {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("calls.log");
     let gh = dir.path().join("gh");
@@ -143,8 +145,7 @@ fn script(body: &str) -> Fake {
         fixtures().display(),
         log.display()
     );
-    std::fs::write(&gh, script).unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script::write_executable(&gh, &script);
     Fake {
         gh: gh.to_string_lossy().into_owned(),
         log,

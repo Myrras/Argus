@@ -179,10 +179,8 @@ fn batch_records_parse() {
 
 #[cfg(unix)]
 fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testutil::write_executable(&p, &format!("#!/bin/sh\n{body}\n"));
     p
 }
 
@@ -974,19 +972,16 @@ fn a_removed_line_posts_against_the_left_side_the_clone_found() {
     // they post too.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let bin = tempfile::tempdir().unwrap();
         let claude = bin.path().join("claude");
         let answer = serde_json::json!({
             "type": "result", "subtype": "success", "is_error": false,
             "result": r#"{"findings":[],"checklist":[],"verdicts":[]}"#
         });
-        std::fs::write(
+        crate::testutil::write_executable(
             &claude,
-            format!("#!/bin/sh\ncat > /dev/null\necho '{answer}'\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\ncat > /dev/null\necho '{answer}'\n"),
+        );
         let mut settings = core.settings();
         settings.ai.adapter = "claude".into();
         settings.ai.binary = Some(claude.to_string_lossy().into_owned());

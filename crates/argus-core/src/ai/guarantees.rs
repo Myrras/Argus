@@ -296,12 +296,7 @@ impl Agent {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let script = dir.path().join("claude");
-        std::fs::write(&script, FAKE_CLAUDE).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        crate::testutil::write_executable(&script, FAKE_CLAUDE);
         let mut settings = Settings::default();
         settings.github.enabled = false;
         settings.ai.binary = Some(script.to_string_lossy().into_owned());

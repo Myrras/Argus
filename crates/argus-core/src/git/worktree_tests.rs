@@ -487,22 +487,19 @@ fn the_fetch_env_keeps_the_users_git_auth_and_no_token() {
 #[test]
 #[cfg(unix)]
 fn every_changing_git_command_runs_without_hooks_or_tokens() {
-    use std::os::unix::fs::PermissionsExt;
     // A fake git that logs its argv and environment, then fails: every
     // changing command Argus runs comes through it.
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("log");
     let git = dir.path().join("git");
-    std::fs::write(
+    crate::testutil::write_executable(
         &git,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf 'ARGS %s\\n' \"$*\" >> '{}'\nenv >> '{}'\nexit 1\n",
             log.display(),
             log.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let repo = Repo {
         git: git.clone(),
         dir: dir.path().to_path_buf(),
@@ -566,7 +563,6 @@ fn slugs_are_recognised_exactly() {
 #[test]
 #[cfg(unix)]
 fn a_hook_the_branch_ships_never_runs() {
-    use std::os::unix::fs::PermissionsExt;
     let Some(r) = setup() else { return };
     let review = review_ref(12);
     // The branch adds a husky-style post-checkout hook, and the clone (as
@@ -574,8 +570,7 @@ fn a_hook_the_branch_ships_never_runs() {
     let marker = r.clone.parent().unwrap().join("hook-ran");
     let hook = r.fx.path.join(".husky/post-checkout");
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testutil::write_executable(&hook, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
     let head = r.push_review_head(&review, "x\n");
     git_in(&r.clone, &["config", "core.hooksPath", ".husky"]);
     let clone = r.open();

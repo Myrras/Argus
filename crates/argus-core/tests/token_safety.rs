@@ -7,6 +7,9 @@
 
 #![cfg_attr(windows, allow(dead_code))]
 
+#[path = "support/script.rs"]
+mod script;
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
@@ -105,15 +108,13 @@ exit 1
 /// one, which Argus then never names).
 #[cfg(unix)]
 fn fake_gh(account: Option<&str>) -> (tempfile::TempDir, GithubProvider) {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let gh = dir.path().join("gh");
     let script = format!(
         "#!/bin/sh\nDIR='{}'\nTOKEN='{GH_TOKEN}'\n{FAKE_GH}",
         dir.path().display()
     );
-    std::fs::write(&gh, script).unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script::write_executable(&gh, &script);
     std::fs::write(dir.path().join("status"), "500 Internal Server Error").unwrap();
     let provider = GithubProvider::with_binary(
         gh.to_string_lossy().into_owned(),
@@ -309,15 +310,13 @@ exit 1
 #[test]
 #[cfg(unix)]
 fn github_resolve_refusals_never_carry_the_token() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let gh = dir.path().join("gh");
     let script = format!(
         "#!/bin/sh\nDIR='{}'\nTOKEN='{GH_TOKEN}'\n{FAKE_GH_RESOLVE}",
         dir.path().display()
     );
-    std::fs::write(&gh, script).unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    script::write_executable(&gh, &script);
     let gh = GithubProvider::with_binary(gh.to_string_lossy().into_owned(), "github.com", None);
     // GraphQL's own error shape on top of the REST ones.
     let mut all = bodies();

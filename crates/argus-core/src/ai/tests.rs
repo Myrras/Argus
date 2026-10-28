@@ -1375,12 +1375,7 @@ fn posting_findings_of_another_review_or_nothing_is_safe() {
 
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    std::fs::write(&path, body).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    crate::testutil::write_executable(&path, body);
     path
 }
 
