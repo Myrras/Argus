@@ -76,7 +76,7 @@ check:
 # Rust needs cargo-llvm-cov (`rustup component add llvm-tools-preview &&
 # cargo install cargo-llvm-cov`); HTML lands in target/llvm-cov/html, the
 # frontend's (Vitest + v8) in coverage/.
-# Line coverage of both suites (not part of `just test` or CI).
+# Line coverage of both suites (not part of `just ci`).
 coverage:
     @command -v cargo-llvm-cov >/dev/null 2>&1 \
         || { echo "cargo-llvm-cov not installed: rustup component add llvm-tools-preview && cargo install cargo-llvm-cov"; exit 1; }
@@ -89,10 +89,10 @@ coverage:
 test-core:
     cargo test -p argus-core
 
-# Run the opt-in integration tests against the real GitHub API (needs the `gh`
-# CLI and INTEGRATION_TOKEN; skips with a message without it). Only the
-# integration test binaries: `#[ignore]` also marks measurements such as
+# Only the integration test binary: `#[ignore]` also marks measurements such as
 # `big_review_timings`, which must not run here. Run by the nightly workflow.
+
+# Real GitHub API, read-only (needs gh and INTEGRATION_TOKEN; skips without it).
 test-integration:
     cargo test -p argus-core --test github_integration -- --ignored --nocapture
 
