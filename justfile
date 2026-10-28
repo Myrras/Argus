@@ -30,9 +30,12 @@ build:
 # One-time setup: create a self-signed *Code Signing* certificate named
 # "Argus Dev" (Keychain Access → Certificate Assistant → Create a Certificate);
 # to use a different name, edit src-tauri/tauri.dev-signed.conf.json.
-dev-signed: _signed-conf
+dev-signed:
     #!/usr/bin/env bash
     set -euo pipefail
+    # _signed-conf comes from common.just: called here, not a dependency, so
+    # the justfile still parses in CI where the import resolves to nothing.
+    just _signed-conf
     # Assigned apart from the export, so a failed lookup stops the recipe
     # (`export X="$(…)"` takes export's status and hides it from set -e).
     target_dir="$(just _target-dir)"
@@ -44,9 +47,11 @@ dev-signed: _signed-conf
 # Build the signed release and put it in /Applications (no Finder window).
 # Copied next to it first and swapped in with mv, so a failed copy never
 # leaves /Applications without the app.
-install-signed: _build-signed
+install-signed:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Called, not a dependency: see dev-signed.
+    just _build-signed
     app="$(just _target-dir)/release/bundle/macos/Argus.app"
     dest="/Applications/Argus.app"
     tmp="/Applications/.Argus.app.tmp"
