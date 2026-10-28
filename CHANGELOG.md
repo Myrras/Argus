@@ -11,6 +11,8 @@ when it merges.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-28
+
 ### Added
 
 - The review cockpit: one list of the GitHub pull requests and GitLab merge
