@@ -99,9 +99,11 @@ just version-check  # versions in sync across manifests
   typecheck, lint, vitest, build), Windows job (`argus-core` fmt/clippy/test),
   a `changelog` job on PRs, and a `release` job on push to main.
 - **Every PR adds an entry under `## [Unreleased]` in `CHANGELOG.md`**
-  (user-facing voice). Merging to main releases it: patch by default, `minor` /
-  `major` PR label bumps more. The first release ships the `Cargo.toml` version.
+  (user-facing voice). Merging to main releases it: the PR's
+  `patch` / `minor` / `major` label sets the bump. The first release ships the `Cargo.toml` version.
   `build.yml` (dispatch-only) builds the .dmg and NSIS installers.
+- **Every PR needs exactly one of `patch`, `minor` or `major`**, enforced by the
+  `Release label` check (`release-label.yml`). Direct pushes default to patch.
 - `RELEASE_DEPLOY_KEY` (optional secret) lets the release commit through a
   protected main; without it the job falls back to `GITHUB_TOKEN`.
 - Do **not** create tags or releases by hand without explicit approval.
