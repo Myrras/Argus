@@ -101,6 +101,14 @@ when it merges.
 - On a pull request too large for GitHub to find its merge base, removed lines
   take no comments instead of landing on the wrong line.
 
+## [0.1.1] - 2026-10-28
+
+### Changed
+
+- Every pull request now needs exactly one release label (`patch`, `minor` or
+  `major`). A `Release label` check fails the PR without it, and the label sets
+  the version bump on merge.
+
 ## [0.1.0] - 2026-10-16
 
 ### Added
