@@ -1,38 +1,41 @@
 /**
- * What needs attention in the sidebar's Providers section: GitHub unavailable, GitLab not set up,
- * off for an unusable URL or without a token, and the last refresh's errors the status does not
+ * What needs attention in the sidebar's Providers section: an enabled
+ * account that is not logged in or could not be checked, a missing CLI, no
+ * accounts at all, and the last refresh's errors the accounts do not
  * already explain.
  */
 
 import type {
+  Account,
   ProviderId,
-  ProviderStatus,
   RefreshError,
   RefreshReport,
 } from "../ipc/types";
+import { CLI } from "./accounts";
 import { PROVIDER_LABEL } from "./reviews";
 import { clockTime } from "./time";
 
 export interface BannerItem {
   key: string;
-  /** The provider it is about; its Settings button opens that tab. */
+  /** The provider it is about. */
   provider: ProviderId;
   tone: "warning" | "info";
   text: string;
-  /** Offer the Settings button. */
+  /** Offer the Settings button (Settings → Accounts). */
   settings?: boolean;
+  /** The account (`provider:host`) to highlight there. */
+  account?: string;
   /** The core's full message, for a tooltip, when the text is reworded. */
   detail?: string;
 }
 
-/** When each provider's setup (settings, GitLab token) last changed, in ms since the epoch. */
+/** When each provider's setup (settings) last changed, in ms since the epoch. */
 export type SetupChanges = Partial<Record<ProviderId, number>>;
 
 /**
  * The last refresh's errors that still describe the current setup. A refresh that began before a
- * provider's setup changed ran with the old one: saving the GitLab URL restarts the poll, which
- * refreshes before the token is stored, and its "GitLab is not set up" would stay until the next
- * report. Such errors are dropped; the refresh the change started brings its own.
+ * provider's setup changed ran with the old one: its "Not logged in to <host>" would stay until
+ * the next report. Such errors are dropped; the refresh the change started brings its own.
  */
 export function currentErrors(
   report: RefreshReport | null,
@@ -46,71 +49,87 @@ export function currentErrors(
   });
 }
 
-/** The problems, derived from the status and the last refresh. */
+/** The problems, derived from the accounts and the last refresh. */
 export function bannerItems(
-  status: ProviderStatus | null,
+  accounts: readonly Account[] | null,
   errors: readonly RefreshError[],
 ): BannerItem[] {
   const items: BannerItem[] = [];
-  const down = new Set<ProviderId>();
-  if (status?.github.enabled && !status.github.installed) {
-    down.add("github");
-    items.push({
-      key: "gh-missing",
-      provider: "github",
-      tone: "warning",
-      text: "GitHub unavailable: the gh CLI was not found. Install it and run gh auth login.",
-    });
-  } else if (status?.github.enabled && !status.github.loggedIn) {
-    down.add("github");
-    items.push({
-      key: "gh-login",
-      provider: "github",
-      tone: "warning",
-      text: `GitHub unavailable: gh is not logged in for ${status.github.host}. Run gh auth login.`,
-      settings: true,
-    });
+  /** `provider:host` of the enabled accounts that cannot be used. */
+  const down = new Set<string>();
+  const missing = new Set<ProviderId>();
+  for (const a of accounts ?? []) {
+    const label = PROVIDER_LABEL[a.provider];
+    const cli = CLI[a.provider];
+    switch (a.state.kind) {
+      case "loggedIn":
+        break;
+      case "cliMissing":
+        // Only for a provider the user set up before.
+        if (!a.enabled) break;
+        missing.add(a.provider);
+        items.push({
+          key: `missing:${a.provider}`,
+          provider: a.provider,
+          tone: "warning",
+          text: `${label} unavailable: the ${cli} CLI was not found. Install it and run ${cli} auth login.`,
+          settings: true,
+          account: a.key,
+        });
+        break;
+      case "notLoggedIn":
+        if (!a.enabled) break;
+        down.add(a.key);
+        items.push({
+          key: `login:${a.key}`,
+          provider: a.provider,
+          tone: "warning",
+          text: `${label} unavailable: ${cli} is not logged in to ${a.host}. Run ${a.loginCommand}.`,
+          settings: true,
+          account: a.key,
+          detail: a.state.message ?? undefined,
+        });
+        break;
+      case "error":
+        if (!a.enabled) break;
+        items.push({
+          key: `error:${a.key}`,
+          provider: a.provider,
+          tone: "warning",
+          text: a.host
+            ? `${label} (${a.host}): ${a.state.message}`
+            : `${label}: ${a.state.message}`,
+          settings: !a.host,
+          account: a.key,
+        });
+        break;
+    }
   }
-  if (status && !status.gitlab.configured) {
-    down.add("gitlab");
+  // No host at all: say how to start.
+  if (accounts && !accounts.some((a) => a.host) && missing.size < 2) {
     items.push({
-      key: "gl-setup",
-      provider: "gitlab",
+      key: "no-accounts",
+      provider: "github",
       tone: "info",
-      text: "GitLab is not set up.",
-      settings: true,
-    });
-  } else if (status?.gitlab.problem === "invalidUrl") {
-    // A hand-edited settings file: saving settings refuses such a URL.
-    down.add("gitlab");
-    items.push({
-      key: "gl-url",
-      provider: "gitlab",
-      tone: "warning",
-      text: "GitLab is off: its URL must start with https:// or http:// and have no user, query or fragment. Fix it in Settings.",
-      settings: true,
-    });
-  } else if (status?.gitlab.configured && !status.gitlab.tokenPresent) {
-    down.add("gitlab");
-    items.push({
-      key: "gl-token",
-      provider: "gitlab",
-      tone: "warning",
-      text: "GitLab has no token: add one in Settings.",
+      text: "No accounts yet: log in with gh auth login or glab auth login.",
       settings: true,
     });
   }
 
-  // Refresh errors the status above does not already explain.
+  // Refresh errors the accounts above do not already explain.
   const seen = new Set<string>();
   const perReview: Partial<Record<ProviderId, number>> = {};
   for (const e of errors) {
-    if (e.unavailable && down.has(e.provider)) continue;
+    if (
+      e.unavailable &&
+      (missing.has(e.provider) || down.has(`${e.provider}:${e.host}`))
+    )
+      continue;
     if (e.review !== null) {
       perReview[e.provider] = (perReview[e.provider] ?? 0) + 1;
       continue;
     }
-    const key = `${e.provider}:${e.message}`;
+    const key = `${e.provider}:${e.host}:${e.message}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const until = clockTime(e.rateLimitedUntil);
@@ -119,7 +138,7 @@ export function bannerItems(
         key,
         provider: e.provider,
         tone: "info",
-        text: `${PROVIDER_LABEL[e.provider]}: rate limited until ${until}`,
+        text: `${PROVIDER_LABEL[e.provider]} (${e.host}): rate limited until ${until}`,
         detail: e.message,
       });
       continue;
@@ -128,8 +147,9 @@ export function bannerItems(
       key,
       provider: e.provider,
       tone: "warning",
-      text: `${PROVIDER_LABEL[e.provider]}: ${e.message}`,
+      text: `${PROVIDER_LABEL[e.provider]} (${e.host}): ${e.message}`,
       settings: e.unavailable,
+      account: `${e.provider}:${e.host}`,
     });
   }
   for (const p of Object.keys(perReview) as ProviderId[]) {

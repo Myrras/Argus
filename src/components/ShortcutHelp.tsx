@@ -35,6 +35,11 @@ const SCOPES: { scope: ActionScope; title: string; help: string }[] = [
     title: "In a comment",
     help: "While writing a comment, reply or finding edit.",
   },
+  {
+    scope: "find",
+    title: "Find in review",
+    help: "While the find bar is open; Enter and Shift+Enter in its field too.",
+  },
   { scope: "app", title: "Everywhere", help: "Also in text fields." },
 ];
 

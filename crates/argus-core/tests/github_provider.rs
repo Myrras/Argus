@@ -643,44 +643,6 @@ fn unavailable_gh_is_an_error_not_a_panic() {
 
 #[test]
 #[cfg_attr(windows, ignore)]
-fn auth_status_checks_gh_locally() {
-    use argus_core::provider::GhAuth;
-
-    let fake = script(FAKE);
-    assert_eq!(
-        fake.provider("github.com", Some("work")).auth_status(),
-        GhAuth {
-            installed: true,
-            logged_in: true
-        }
-    );
-    // No token for this account (and for the active account the fake has
-    // none either).
-    assert_eq!(
-        fake.provider("github.com", Some("nobody")).auth_status(),
-        GhAuth {
-            installed: true,
-            logged_in: false
-        }
-    );
-    assert!(fake
-        .calls()
-        .contains("auth token --hostname github.com --user work"));
-    // Never a network call.
-    assert!(!fake.calls().contains("api "));
-
-    let missing = GithubProvider::with_binary("/nonexistent/argus-fixture/gh", "github.com", None);
-    assert_eq!(
-        missing.auth_status(),
-        GhAuth {
-            installed: false,
-            logged_in: false
-        }
-    );
-}
-
-#[test]
-#[cfg_attr(windows, ignore)]
 fn commit_diff_reads_every_page_and_the_first_parent() {
     let fake = script(FAKE);
     let gh = fake.provider("github.com", None);

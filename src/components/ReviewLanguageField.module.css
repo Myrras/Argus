@@ -1,0 +1,9 @@
+/* The review language picker: the select, and the name field under it for
+   Other…. Spacing only; the controls are styled globally. */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}

@@ -15,7 +15,14 @@
  * Both take the thread's `useThreadHistory` state.
  */
 
-import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
 import type {
   StoredThread,
@@ -34,6 +41,8 @@ import {
   type ColumnLine,
 } from "../lib/threadHistory";
 import { age, fullTime } from "../lib/time";
+import { noteUnit } from "../lib/findInReview";
+import { useFindCurrentIn } from "../state/findStore";
 import type { ThreadHistoryState } from "../lib/useThreadHistory";
 import {
   CommitIcon,
@@ -237,16 +246,25 @@ function When({ at, now }: { at: string | null; now: number }) {
 function NoteBody({
   body,
   renderFence,
+  findUnit,
 }: {
   body: string;
   renderFence?: RenderFence;
+  findUnit?: string;
 }) {
   const long = isLongBody(body);
   const [more, setMore] = useState(false);
+  // The find bar went to a match in here: show all of it.
+  const found = useFindCurrentIn(findUnit);
+  useEffect(() => {
+    if (found && long) setMore(true);
+  }, [found, long]);
   return (
     <>
       <div className={styles.body} data-folded={long && !more}>
-        <Markdown renderFence={renderFence}>{body}</Markdown>
+        <Markdown renderFence={renderFence} findUnit={findUnit}>
+          {body}
+        </Markdown>
       </div>
       {long && (
         <button
@@ -267,10 +285,13 @@ export function Timeline({
   entries,
   now,
   renderFence,
+  threadId,
 }: {
   entries: readonly TimelineEntry[];
   now: number;
   renderFence?: RenderFence;
+  /** The thread's id: its notes' find units (`findInReview.noteUnit`). */
+  threadId?: string;
 }) {
   return (
     <ol className={styles.timeline} aria-label="Timeline">
@@ -290,7 +311,13 @@ export function Timeline({
                   <When at={e.at} now={now} />
                 </div>
                 <div className={styles.noteBody}>
-                  <NoteBody body={e.body} renderFence={renderFence} />
+                  <NoteBody
+                    body={e.body}
+                    renderFence={renderFence}
+                    findUnit={
+                      threadId ? noteUnit(threadId, e.noteId) : undefined
+                    }
+                  />
                 </div>
               </>
             ) : e.kind === "commit" ? (

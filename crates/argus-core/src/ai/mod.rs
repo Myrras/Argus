@@ -4,6 +4,8 @@
 //!
 //! - [`adapter`]: the CLIs, their read-only flags, the token-free env, the
 //!   spawn/timeout/kill loop.
+//! - [`auggie`]: which auggie a binary is (from its `--help`), and its
+//!   argv for a review or a "Write with AI" turn.
 //! - [`prompt`]: the prompt text (consts) and its assembly.
 //! - [`output`]: JSON extraction and strict validation of the answer.
 //! - [`dedupe`]: sets aside findings and checklist items the review
@@ -26,6 +28,7 @@
 
 pub(crate) mod adapter;
 mod api;
+pub(crate) mod auggie;
 pub(crate) mod context;
 pub(crate) mod dedupe;
 pub(crate) mod job;

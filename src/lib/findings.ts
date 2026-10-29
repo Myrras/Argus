@@ -16,6 +16,7 @@ import type {
   VerdictLabel,
 } from "../ipc/types";
 import type { DiffSide } from "./diffThreads";
+import { languageLabel } from "./repositories";
 import { SOURCE_LABEL } from "./reviewSkills";
 
 export const SEVERITIES: Severity[] = ["high", "medium", "low"];
@@ -259,7 +260,8 @@ export function aiChipText(run: AiRunState, findings: number): string {
 /**
  * What the last successful run was given besides the diff, one line each,
  * for the AI chip's tooltip: the rules files, the review skill, the
- * worktree, and what did not go as set up. Empty without a context.
+ * language it was asked to write in, the worktree, and what did not go as
+ * set up. Empty without a context.
  */
 export function aiContextLines(context: RunContext | null): string[] {
   if (!context) return [];
@@ -269,6 +271,14 @@ export function aiContextLines(context: RunContext | null): string[] {
   return [
     `Rules: ${context.rulesFiles.length > 0 ? context.rulesFiles.join(", ") : "none found"}`,
     `Review skill: ${skill}`,
+    // A run from before languages has none.
+    ...(context.language
+      ? [
+          context.language.kind === "auto"
+            ? "Language: Auto (the merge request's)"
+            : `Language: ${languageLabel(context.language)}`,
+        ]
+      : []),
     ...(context.worktree ? ["Read a worktree at the review's head"] : []),
     ...context.notes,
   ];

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACTIONS,
   DEFAULT_KEYMAP,
+  actionDef,
   activeActions,
   bindingFromEvent,
   bindingProblem,
@@ -14,9 +15,11 @@ import {
   ownsEnter,
   parseBinding,
   resolveKeymap,
+  scopesShareKeys,
   serializeBinding,
   shortcutHint,
   withHint,
+  type ActionId,
   type KeyEventLike,
 } from "./keymap";
 
@@ -212,6 +215,16 @@ describe("defaults", () => {
     expect(formatBinding("Alt+KeyR", false)).toBe("Alt+R");
   });
 
+  it("hide whitespace changes on a bare W, in the review view", () => {
+    expect(DEFAULT_KEYMAP.toggleWhitespace).toEqual(["KeyW"]);
+    const w = ev({ key: "w", code: "KeyW" });
+    expect(findAction(w, DEFAULT_KEYMAP, "files", true)).toBe(
+      "toggleWhitespace",
+    );
+    expect(findAction(w, DEFAULT_KEYMAP, "list", true)).toBeNull();
+    expect(isBrowserShortcut(w, true)).toBe(false);
+  });
+
   it("all parse, none repeats, none is fixed or refused", () => {
     for (const mac of [true, false]) {
       const seen = new Map<string, string>();
@@ -224,8 +237,15 @@ describe("defaults", () => {
             expect(bindingProblem(parsed!, mac), `${a.id} ${b}`).toBeNull();
           }
           const other = seen.get(b);
-          // No default key is shared any more (↑/↓ are the list's only).
-          expect(other, `${b} used by ${a.id} and ${other}`).toBe(undefined);
+          // No default key is shared any more (↑/↓ are the list's only),
+          // except between a composer and the find bar: the composer
+          // handles its own first.
+          if (
+            other === undefined ||
+            !scopesShareKeys(a.scope, actionDef(other as ActionId).scope)
+          ) {
+            expect(other, `${b} used by ${a.id} and ${other}`).toBe(undefined);
+          }
           seen.set(b, a.id);
         }
       }

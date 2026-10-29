@@ -30,10 +30,12 @@ vi.mock("./DiffEditor", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import type { StoredThread } from "../ipc/types";
 import { useAppShortcuts } from "../lib/useAppShortcuts";
 import { clearContentsCache, useCodeViewStore } from "../state/codeViewStore";
+import { useCloneSuggestStore } from "../state/cloneSuggestStore";
 import { clearCommentableCache, useCommentStore } from "../state/commentStore";
 import { useFocusStore } from "../state/focusStore";
 import { useHistoryStore } from "../state/historyStore";
@@ -44,7 +46,7 @@ import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, thread } from "../test/fixtures";
 import { ReviewDetail } from "./ReviewDetail";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const initialReviews = useReviewStore.getState();
 const initialThreads = useThreadStore.getState();
 const initialCode = useCodeViewStore.getState();
@@ -141,6 +143,7 @@ beforeEach(() => {
     posting: {},
     focus: null,
   });
+  useCloneSuggestStore.setState({ byReview: {}, dismissed: {}, busy: {} });
   mockInvoke.mockImplementation(((cmd: string, args?: unknown) => {
     const a = (args ?? {}) as Record<string, unknown>;
     switch (cmd) {
@@ -150,6 +153,9 @@ beforeEach(() => {
         return Promise.resolve(files);
       case "file_contents":
         return Promise.resolve("a\nb\nc");
+      // No clone is set and none is found, so no suggestion bar.
+      case "suggest_clone":
+        return Promise.resolve(null);
       case "resolve_thread": {
         // The platform's state after the write; the re-read shows it.
         threads = threads.map((t) =>
@@ -394,13 +400,20 @@ describe("the keys over a folded Resolved group", () => {
       awayOpen.threadId,
       onCache.threadId,
     ]);
-    // At the end it stays and says so.
+    // At the end it loops to the first and says so.
     fireEvent.click(down);
+    expect(focused()).toBe(mineOpen.threadId);
+    expect(
+      useToastStore
+        .getState()
+        .toasts.some((t) => t.message === "Wrapped to the first open thread"),
+    ).toBe(true);
+    fireEvent.click(up);
     expect(focused()).toBe(onCache.threadId);
     expect(
       useToastStore
         .getState()
-        .toasts.some((t) => t.message === "No more open threads"),
+        .toasts.some((t) => t.message === "Wrapped to the last open thread"),
     ).toBe(true);
     fireEvent.click(up);
     expect(focused()).toBe(awayOpen.threadId);

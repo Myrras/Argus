@@ -7,7 +7,7 @@
 mod support;
 
 use argus_core::history::{SnapshotSource, ThreadResolution, TimelineEvent};
-use argus_core::provider::{Anchor, Side, Thread};
+use argus_core::provider::{Anchor, ProviderId, Side, Thread};
 use argus_core::{Core, LineStatus};
 
 use support::*;
@@ -25,6 +25,7 @@ fn anchor(side: Side) -> Anchor {
         head_sha: "c1".into(),
         diff_hunk: None,
         current_line: None,
+        outside_diff: false,
     }
 }
 
@@ -133,6 +134,7 @@ fn githubs_current_line_places_a_thread_the_walk_cannot() {
             line_new: Some(12),
             head_sha: "f0rce".into(),
             current_line: Some(12),
+            outside_diff: false,
             ..anchor(Side::New)
         },
         false,
@@ -217,13 +219,15 @@ fn an_unreachable_platform_degrades_and_recovers() {
 fn a_review_without_its_provider_still_shows_its_threads() {
     let p = Platform::new();
     let core = core_over(&p);
-    // GitHub turned off: the providers are rebuilt without it.
-    let mut s = core.settings();
-    s.github.enabled = false;
-    core.update_settings(s).unwrap();
     let id = the_review(&core).id;
+    let mine = thread_map(&core)[MY_THREAD].thread_id;
+    // github.com switched off: the providers are rebuilt without it, the
+    // review stays stored (out of the list).
+    core.update_settings(host_off(&core, ProviderId::Github, "github.com"))
+        .unwrap();
+    assert!(core.reviews().unwrap().is_empty());
     assert_eq!(core.threads(id).unwrap().len(), 2);
-    let h = history(&core, MY_THREAD);
+    let h = core.thread_history(mine).unwrap();
     assert!(matches!(h.status, LineStatus::Unlocated { .. }));
     assert_eq!(h.timeline.len(), 1);
     // The code view says why instead of failing silently.

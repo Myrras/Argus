@@ -130,14 +130,27 @@ describe("threadsOnFile", () => {
       oldPath: "src/old.rs",
     });
     expect(got).toEqual([onNew, onOld]);
-    expect(threadCounts([onNew, { ...onOld, mine: true }])).toEqual({
-      total: 2,
-      mine: 1,
+  });
+
+  it("counts only open threads for the card headers, outdated ones too", () => {
+    const open = thread({ resolvable: true });
+    const mineOpen = thread({ resolvable: true, mine: true });
+    const outdated = thread({ resolvable: true, mine: true, outdated: true });
+    const comment = thread({ mine: true });
+    expect(threadCounts([open, mineOpen, outdated, comment])).toEqual({
+      open: 3,
+      mine: 2,
     });
-    // One the user replied in is highlighted as theirs too.
+    // Resolving one, outdated or not, takes it out of both numbers.
     expect(
-      threadCounts([onNew, { ...onOld, mine: true, startedByMe: false }]),
-    ).toEqual({ total: 2, mine: 1 });
+      threadCounts([open, mineOpen, { ...outdated, resolved: true }]),
+    ).toEqual({ open: 2, mine: 1 });
+    expect(
+      threadCounts([
+        { ...mineOpen, resolved: true },
+        { ...outdated, resolved: true },
+      ]),
+    ).toEqual({ open: 0, mine: 0 });
   });
 });
 
@@ -202,6 +215,14 @@ describe("mapOldLine", () => {
     expect(mapOldLine([chunk], a, b, 2)).toBe(3);
     expect(mapOldLine([chunk], a, b, 3)).toBe(4);
     expect(mapOldLine([chunk], a, b, 4)).toBe(5);
+  });
+
+  it("maps by lines when unchanged lines differ in whitespace", () => {
+    // Whitespace hidden: "  keep3" and "keep3" count as the same line.
+    const wa = Text.of(["keep1", "gone", "    keep3", "keep4"]);
+    const c = { ...chunk, fromA: wa.line(2).from, toA: wa.line(3).from };
+    expect(mapOldLine([c], wa, b, 4)).toBe(5);
+    expect(mapOldLine([c], wa, b, 3)).toBe(4);
   });
 });
 

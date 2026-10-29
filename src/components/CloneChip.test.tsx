@@ -48,7 +48,7 @@ beforeEach(() => {
   }) as typeof invoke);
   status = found();
   useCloneStatusStore.setState({ byReview: {} });
-  useSettingsRequestStore.setState({ request: null });
+  useSettingsRequestStore.setState({ request: null, repo: null });
   useToastStore.setState({ toasts: [] });
   useBackendSettingsStore.setState({
     settings: settings({ clonePaths: { [`${r.host}/${r.repo}`]: PATH } }),
@@ -102,7 +102,7 @@ describe("CloneChip", () => {
     );
   });
 
-  it("warns when the clone is set but not found, and opens Settings → AI", async () => {
+  it("warns when the clone is set but not found, and opens Settings → Repositories on it", async () => {
     status = found({ found: false, head: null, matchesReviewHead: false });
     render(<CloneChip review={r} />);
     const chip = await screen.findByRole("button", {
@@ -111,11 +111,14 @@ describe("CloneChip", () => {
     expect(chip).toHaveAttribute("data-state", "missing");
     expect(chip.title).toContain(`Local clone not found: ${PATH}`);
     fireEvent.click(chip);
-    expect(useSettingsRequestStore.getState().request).toBe("ai");
+    expect(useSettingsRequestStore.getState()).toMatchObject({
+      request: "repositories",
+      repo: `${r.host}/${r.repo}`,
+    });
     expect(calls("reveal_clone")).toHaveLength(0);
   });
 
-  it("is a quiet 'No local clone' that opens Settings → AI when none is set", async () => {
+  it("is a quiet 'No local clone' that opens Settings → Repositories on it when none is set", async () => {
     status = {
       configured: false,
       path: null,
@@ -128,7 +131,10 @@ describe("CloneChip", () => {
     const chip = await screen.findByRole("button", { name: "No local clone" });
     expect(chip).toHaveAttribute("data-state", "none");
     fireEvent.click(chip);
-    expect(useSettingsRequestStore.getState().request).toBe("ai");
+    expect(useSettingsRequestStore.getState()).toMatchObject({
+      request: "repositories",
+      repo: `${r.host}/${r.repo}`,
+    });
     expect(calls("reveal_clone")).toHaveLength(0);
   });
 

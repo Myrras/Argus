@@ -7,10 +7,10 @@
  * corrects the outer scroller only right after a wheel event or with the
  * editor focused, so the column does it itself.
  *
- * On every scroll it notes a few elements under the top edge and where
- * they are; when the content's size changes (and nothing scrolled the
- * column since) it scrolls by however far the first one still in the page
- * moved. Navigation (a reveal, a tree click,
+ * After every scrolled frame it notes a few elements under the top edge
+ * and where they are; when the content's size changes (and nothing
+ * scrolled the column since) it scrolls by however far the first one still
+ * in the page moved. Navigation (a reveal, a tree click,
  * "show in the code") pauses it while its own scroll runs
  * (`pauseScrollAnchor`): only navigation scrolls the page.
  */
@@ -35,6 +35,21 @@ export interface ScrollAnchorEnv {
   /** Call `onResize` when the content changes size; returns the stop. */
   observe: (onResize: () => void) => () => void;
   now: () => number;
+  /**
+   * Run `fn` once the frame being scrolled has been laid out (default:
+   * after the next animation frame). Noting the anchors asks where
+   * elements are, which lays the page out; inside the scroll event it
+   * would do so a second time per frame, while diffs mount and unmount.
+   */
+  afterFrame?: (fn: () => void) => void;
+}
+
+function nextFrameThen(fn: () => void): void {
+  if (typeof requestAnimationFrame !== "function") {
+    setTimeout(fn, 0);
+    return;
+  }
+  requestAnimationFrame(() => setTimeout(fn, 0));
 }
 
 interface Noted {
@@ -49,20 +64,39 @@ export function createScrollAnchor(
   let noted: Noted[] = [];
   let at = column.scrollTop;
   let stopped = false;
+  /** Scrolled since the anchors were noted; they are noted after the frame. */
+  let scrolled = false;
+  let pending = false;
+  const afterFrame = env.afterFrame ?? nextFrameThen;
 
   const capture = () => {
+    scrolled = false;
     at = column.scrollTop;
     noted = env
       .pick()
       .map((el) => ({ el, top: el.getBoundingClientRect().top }));
   };
 
+  const onScroll = () => {
+    scrolled = true;
+    if (pending) return;
+    pending = true;
+    afterFrame(() => {
+      pending = false;
+      if (!stopped && scrolled) capture();
+    });
+  };
+
   const restore = () => {
     if (stopped) return;
-    // Paused for navigation, or the column was scrolled since (CodeMirror
-    // scrolling to a line, the browser clamping a shorter page) before its
-    // scroll event came: what moved is that scroll, not to be undone.
-    if (env.now() < pausedUntil || Math.abs(column.scrollTop - at) >= 1) {
+    // Paused for navigation, or the column was scrolled since (by the
+    // user, CodeMirror scrolling to a line, the browser clamping a shorter
+    // page): what moved is that scroll, not to be undone.
+    if (
+      scrolled ||
+      env.now() < pausedUntil ||
+      Math.abs(column.scrollTop - at) >= 1
+    ) {
       capture();
       return;
     }
@@ -75,14 +109,14 @@ export function createScrollAnchor(
   };
 
   capture();
-  column.addEventListener("scroll", capture, { passive: true });
+  column.addEventListener("scroll", onScroll, { passive: true });
   const stop = env.observe(restore);
   return {
     capture,
     restore,
     destroy: () => {
       stopped = true;
-      column.removeEventListener("scroll", capture);
+      column.removeEventListener("scroll", onScroll);
       stop();
     },
   };
@@ -92,16 +126,20 @@ export function createScrollAnchor(
 const HEADER_PX = 40;
 const PROBES = [0, 160, 360];
 
+/** What the column's own sticky bars cover: its toolbar and the find bar. */
+export function stickyBarsHeight(column: HTMLElement): number {
+  const toolbar = column.firstElementChild as HTMLElement | null;
+  const find = column.querySelector<HTMLElement>(":scope > [data-find-bar]");
+  return (toolbar?.offsetHeight ?? 0) + (find?.offsetHeight ?? 0);
+}
+
 /**
  * Where the reader's eye is in the page column: just under its sticky
- * toolbar and the card header stuck beneath it (viewport y).
+ * toolbar (and find bar) and the card header stuck beneath it (viewport y).
  */
 export function readingEdge(column: HTMLElement): number {
-  const toolbar = column.firstElementChild as HTMLElement | null;
   return (
-    column.getBoundingClientRect().top +
-    (toolbar?.offsetHeight ?? 0) +
-    HEADER_PX
+    column.getBoundingClientRect().top + stickyBarsHeight(column) + HEADER_PX
   );
 }
 
@@ -150,10 +188,9 @@ export function anchorColumn(
 function columnOf(card: HTMLElement) {
   const column = card.closest<HTMLElement>('[data-slot="diff"]');
   if (!column) return null;
-  const toolbar = column.firstElementChild as HTMLElement | null;
   return {
     column,
-    edge: column.getBoundingClientRect().top + (toolbar?.offsetHeight ?? 0),
+    edge: column.getBoundingClientRect().top + stickyBarsHeight(column),
   };
 }
 

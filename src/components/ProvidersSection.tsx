@@ -1,15 +1,17 @@
 /**
  * The sidebar's Providers section (pinned under the review list): one line
- * per provider with its state, then what needs attention — GitHub
- * unavailable, GitLab not set up or without a token, and the last refresh's
- * per-provider errors (`lib/banner`). Informational only: the list keeps
- * working with whatever providers do work. Collapsible like Iris's sidebar
- * sections; collapsed, the title counts the problems.
+ * per account Argus polls (every enabled host of the user's gh and glab)
+ * with its state, then what needs attention — a host not logged in or not
+ * reachable, a missing CLI, no accounts at all, and the last refresh's
+ * errors (`lib/banner`). Informational only: the list keeps working with
+ * whatever hosts do work. "Settings" opens Settings → Accounts on the host.
+ * Collapsible like Iris's sidebar sections; collapsed, the title counts the
+ * problems.
  */
 
-import type { ProviderId, ProviderStatus, RefreshError } from "../ipc/types";
+import type { Account, RefreshError } from "../ipc/types";
 import { bannerItems } from "../lib/banner";
-import { INSECURE_NOTE, providerLines } from "../lib/providers";
+import { providerLines } from "../lib/providers";
 import { useLayoutStore } from "../state/layoutStore";
 import { ProvidersIcon } from "./icons";
 import { SectionTitle } from "./SectionTitle";
@@ -17,18 +19,19 @@ import sidebar from "./Sidebar.module.css";
 import styles from "./ProvidersSection.module.css";
 
 export function ProvidersSection({
-  status,
+  accounts,
   errors,
   onOpenSettings,
 }: {
-  status: ProviderStatus | null;
+  accounts: readonly Account[] | null;
   errors: readonly RefreshError[];
-  /** Opens Settings on that provider's tab. */
-  onOpenSettings: (provider: ProviderId) => void;
+  /** Opens Settings → Accounts, on that account (`provider:host`) if any. */
+  onOpenSettings: (account?: string) => void;
 }) {
   const collapsed = useLayoutStore((s) => s.providersCollapsed);
   const setCollapsed = useLayoutStore((s) => s.setProvidersCollapsed);
-  const items = bannerItems(status, errors);
+  const items = bannerItems(accounts, errors);
+  const lines = accounts ? providerLines(accounts) : [];
 
   return (
     <section className={sidebar.subsection} aria-label="Providers">
@@ -45,11 +48,13 @@ export function ProvidersSection({
         className={`${sidebar.sectionBody}${collapsed ? ` ${sidebar.sectionBodyCollapsed}` : ""}`}
       >
         <div className={sidebar.sectionBodyInner}>
-          {!status ? (
-            <p className={styles.muted}>Checking providers…</p>
+          {!accounts ? (
+            <p className={styles.muted}>Checking accounts…</p>
+          ) : lines.length === 0 ? (
+            <p className={styles.muted}>No accounts in use.</p>
           ) : (
             <ul className={styles.lines}>
-              {providerLines(status).map((line) => (
+              {lines.map((line) => (
                 <li key={line.key} className={styles.line}>
                   <span
                     className={styles.dot}
@@ -60,11 +65,6 @@ export function ProvidersSection({
                   {line.host && (
                     <span className={styles.host} title={line.host}>
                       {line.host}
-                    </span>
-                  )}
-                  {line.insecure && (
-                    <span className={styles.insecure} title={INSECURE_NOTE}>
-                      Unencrypted
                     </span>
                   )}
                   <span className={styles.state} data-tone={line.tone}>
@@ -88,7 +88,7 @@ export function ProvidersSection({
                     <button
                       type="button"
                       className={`ghost ${styles.action}`}
-                      onClick={() => onOpenSettings(item.provider)}
+                      onClick={() => onOpenSettings(item.account)}
                     >
                       Settings
                     </button>

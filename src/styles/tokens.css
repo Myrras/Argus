@@ -51,6 +51,10 @@
   --diff-add-strong: color-mix(in srgb, var(--success) 30%, transparent);
   --diff-del-bg: color-mix(in srgb, var(--danger) 12%, transparent);
   --diff-del-strong: color-mix(in srgb, var(--danger) 30%, transparent);
+  /* Find in the review (Cmd+F): every match, and the current one. */
+  --find-match: rgba(227, 179, 65, 0.3);
+  --find-current: rgba(240, 136, 62, 0.65);
+  --find-current-ring: #f0883e;
 
   /* Typography */
   --font-sans:
@@ -108,6 +112,7 @@
   /* Layout constants */
   --sidebar-w: 280px;
   --tabbar-h: 38px;
+  --findbar-h: 36px; /* the review page's find bar, under its toolbar */
   --file-tree-w: 240px; /* the review view's file tree, while expanded */
   --ai-panel-w: 340px; /* the AI island right of the review, while open */
 
@@ -162,6 +167,10 @@
   --success: #1a7f37;
   --info: #0969da;
 
+  --find-match: rgba(212, 167, 44, 0.32);
+  --find-current: rgba(251, 143, 68, 0.6);
+  --find-current-ring: #bc4c00;
+
   --shadow-sm: 0 1px 2px rgba(31, 35, 40, 0.1);
   --shadow-md: 0 4px 16px rgba(31, 35, 40, 0.15);
   --shadow-lg: 0 12px 40px rgba(31, 35, 40, 0.2);
@@ -196,6 +205,10 @@
   --warning-bg: #f9f0c1;
   --success: #98971a;
   --info: #458588;
+
+  --find-match: rgba(215, 153, 33, 0.35);
+  --find-current: rgba(214, 93, 14, 0.5);
+  --find-current-ring: #af3a03;
 
   --shadow-sm: 0 1px 2px rgba(60, 56, 54, 0.12);
   --shadow-md: 0 4px 16px rgba(60, 56, 54, 0.18);

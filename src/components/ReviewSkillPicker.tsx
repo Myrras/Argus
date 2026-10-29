@@ -1,24 +1,18 @@
 /**
- * Settings → AI → Review skill: per repository, the code-review skill whose
- * criteria the AI pass applies (`Settings.reviewSkills`, keyed `host/repo`
- * like the local clones). One card per repository the user has a clone or
- * a choice for, or a review of; "Change" opens the picker inside the card:
- * a filter over a scrolling list with Auto and None on top, then the
- * skills whose name says "review" by source (yours, plugins, the
- * project's), each with its description. Picking one applies it at once
- * (the family's model for choices) and closes the picker.
+ * Settings → Repositories → Review skill: per repository, the code-review
+ * skill whose criteria the AI pass applies (`Settings.reviewSkills`, keyed
+ * `host/repo` like the local clones). `ReviewSkillField` sits in the
+ * repository's card: the current choice in full and "Change", which opens
+ * the picker inside the card: a filter over a scrolling list with Auto and
+ * None on top, then the skills whose name says "review" by source (yours,
+ * plugins, the project's), each with its description. Picking one applies
+ * it at once (the family's model for choices) and closes the picker.
  *
  * Arrow keys move between the choices (from the filter too); the choices
  * are a radio group.
  */
 
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent,
-} from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type {
   ReviewSkill,
@@ -35,113 +29,67 @@ import {
   choiceFor,
   choiceSummary,
   filterSkills,
-  knownRepos,
   sameChoice,
   withChoice,
 } from "../lib/reviewSkills";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useReviewSkillsStore } from "../state/reviewSkillsStore";
-import { useReviewStore } from "../state/reviewStore";
 import { CheckIcon } from "./icons";
 import own from "./ReviewSkillPicker.module.css";
 import styles from "./SettingsModal.module.css";
 
-export function ReviewSkillsSection() {
+/** The review skill of `repo`: its choice, and the picker on "Change". */
+export function ReviewSkillField({ repo }: { repo: string }) {
   const settings = useBackendSettingsStore((s) => s.settings);
   const save = useBackendSettingsStore((s) => s.save);
-  const reviews = useReviewStore((s) => s.reviews);
   const load = useReviewSkillsStore((s) => s.load);
-  const [open, setOpen] = useState<string | null>(null);
-  const repos = useMemo(
-    () => knownRepos(settings, reviews),
-    [settings, reviews],
-  );
-  const key = repos.join("\n");
-  // Listed once per repository when the section shows: the cards say what
-  // Auto picks without opening.
+  const list = useReviewSkillsStore((s) => s.lists[repo] ?? null);
+  const [open, setOpen] = useState(false);
+  // Listed once when the card shows: the summary says what Auto picks
+  // without opening.
   useEffect(() => {
-    for (const repo of key ? key.split("\n") : []) void load(repo);
-  }, [key, load]);
+    void load(repo);
+  }, [repo, load]);
 
-  const choose = (repo: string, choice: ReviewSkillChoice) => {
-    setOpen(null);
-    if (!settings || sameChoice(choice, choiceFor(settings, repo))) return;
+  const choice = choiceFor(settings, repo);
+  const choose = (next: ReviewSkillChoice) => {
+    setOpen(false);
+    if (!settings || sameChoice(next, choiceFor(settings, repo))) return;
     void save({
-      reviewSkills: withChoice(settings.reviewSkills, repo, choice),
+      reviewSkills: withChoice(settings.reviewSkills, repo, next),
     });
   };
 
   return (
-    <section className={styles.section}>
-      <h3 className={styles.sectionLabel}>Review skill</h3>
-      <small className={styles.rowHelp}>
-        The code-review skill whose checks the analysis applies, per repository.
-        Its text goes into the prompt; it never posts or runs anything.
-      </small>
-      {settings && repos.length === 0 && (
-        <p className={styles.empty}>
-          No repositories yet. They show here once Argus lists a review or you
-          add a clone.
-        </p>
-      )}
-      {repos.map((repo) => (
-        <RepoCard
-          key={repo}
-          repo={repo}
-          choice={choiceFor(settings, repo)}
-          open={open === repo}
-          onToggle={() => {
-            if (open !== repo) void load(repo);
-            setOpen(open === repo ? null : repo);
+    <div className={own.field} data-slot="review-skill">
+      <div className={own.fieldHeader}>
+        {/* Wrapping, not truncated: the skill is read in full. */}
+        <span
+          className={`${styles.cardDetail} ${styles.cardDetailWrap}`}
+          data-slot="skill-choice"
+        >
+          {choiceSummary(choice, list)}
+        </span>
+        <button
+          type="button"
+          className={styles.pushRight}
+          aria-expanded={open}
+          disabled={!settings}
+          aria-label={
+            open
+              ? `Close the review skill picker of ${repo}`
+              : `Choose the review skill of ${repo}`
+          }
+          onClick={() => {
+            if (!open) void load(repo);
+            setOpen(!open);
           }}
-          onChoose={(c) => choose(repo, c)}
-        />
-      ))}
-    </section>
-  );
-}
-
-function RepoCard({
-  repo,
-  choice,
-  open,
-  onToggle,
-  onChoose,
-}: {
-  repo: string;
-  choice: ReviewSkillChoice;
-  open: boolean;
-  onToggle: () => void;
-  onChoose: (choice: ReviewSkillChoice) => void;
-}) {
-  const list = useReviewSkillsStore((s) => s.lists[repo] ?? null);
-  const summary = choiceSummary(choice, list);
-  return (
-    <div className={styles.card} role="group" aria-label={repo}>
-      <div className={styles.cardHeader}>
-        <span className={styles.cardName}>{repo}</span>
-        {!open && (
-          <span className={styles.cardDetail} title={summary}>
-            {summary}
-          </span>
-        )}
-        <div className={`${styles.cardActions} ${styles.pushRight}`}>
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-label={
-              open
-                ? `Close the review skill picker of ${repo}`
-                : `Choose the review skill of ${repo}`
-            }
-            onClick={onToggle}
-          >
-            {open ? "Done" : "Change"}
-          </button>
-        </div>
+        >
+          {open ? "Done" : "Change"}
+        </button>
       </div>
       {open && (
-        <Picker repo={repo} choice={choice} list={list} onChoose={onChoose} />
+        <Picker repo={repo} choice={choice} list={list} onChoose={choose} />
       )}
     </div>
   );

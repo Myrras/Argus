@@ -124,7 +124,7 @@ export function revealItem(item: FocusItem, env: RevealEnv): () => void {
 }
 
 /** The height the sticky toolbar and card header cover at the top. */
-function coveredTop(el: HTMLElement, column: HTMLElement): number {
+export function coveredTop(el: HTMLElement, column: HTMLElement): number {
   const header = el
     .closest<HTMLElement>("[data-file-card]")
     ?.querySelector<HTMLElement>(":scope > header");

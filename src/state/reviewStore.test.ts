@@ -37,6 +37,7 @@ const report = (at: string): RefreshReport => ({
   errors: [
     {
       provider: "gitlab",
+      host: "gitlab.example.test",
       review: null,
       message: "timed out",
       unavailable: false,
@@ -232,6 +233,7 @@ describe("reviewStore", () => {
       headSha: a.headSha,
       verdict: "requestChanges",
       summary: "Please add a test.",
+      scriptIds: [],
     });
     expect(useReviewStore.getState().reviews[0].status).toBe("waitingOnAuthor");
     expect(useReviewStore.getState().approving).toBeNull();
@@ -251,6 +253,7 @@ describe("reviewStore", () => {
       headSha: a.headSha,
       verdict: "approve",
       summary: null,
+      scriptIds: [],
     });
   });
 

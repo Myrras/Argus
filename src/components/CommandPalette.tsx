@@ -150,7 +150,9 @@ function usePaletteItems(setMode: (m: Mode) => void): PaletteItem[] {
       // Composer keys only mean something inside a comment; the palette
       // itself is open already.
       if (a.scope === "composer" || a.id === "openPalette") continue;
-      if (a.scope === "files" && !review) continue;
+      if ((a.scope === "files" || a.id === "find") && !review) continue;
+      // Next / previous match: the bar's own buttons and keys.
+      if (a.scope === "find") continue;
       out.push({
         id: `action:${a.id}`,
         section: "Actions",

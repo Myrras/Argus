@@ -13,6 +13,15 @@ export interface DiffRevealer {
    * block `key`; false when this editor does not hold that block (yet).
    */
   reveal: (key: string) => boolean;
+  /**
+   * Scroll to line `line` of `side` (the find bar's match), opening the
+   * collapsed stretch around it (both sides of a split view); in the
+   * unified view a removed line is the block above its chunk. False when
+   * the editor is not up yet.
+   */
+  revealLine?: (side: "old" | "new", line: number) => boolean;
+  /** The head line at the page column's reading edge, if inside this diff. */
+  readingLine?: () => number | null;
 }
 
 /** A thread's block key in a `DiffEditor`. */
@@ -89,4 +98,65 @@ export function rememberBlockHeight(signature: string, height: number): void {
 /** The measured height of these blocks, or -1 (CodeMirror's "unknown"). */
 export function blockHeight(signature: string): number {
   return heights.get(signature) ?? -1;
+}
+
+// -- Opened stretches ---------------------------------------------------------
+
+/**
+ * The folded stretches of unchanged code the user (or a thread, the
+ * composer, a reveal) opened, per editor: the review page unmounts diffs
+ * far from the viewport (`FileDiffCard`), and a diff mounted again opens
+ * them again rather than folding what the reader had opened. Keyed by the
+ * editor's file, side, layout, whitespace mode and contents
+ * (`stretchKey`): a stretch is a position in one document as one diff
+ * folds it.
+ */
+const opened = new Map<string, Set<number>>();
+/** Enough for every diff of a few large reviews; oldest dropped first. */
+const MAX_OPENED = 2000;
+
+/** A short fingerprint of a document: its length and its two ends. */
+function fingerprint(text: string): string {
+  return `${text.length}:${text.slice(0, 24)}:${text.slice(-24)}`;
+}
+
+export function stretchKey(
+  path: string,
+  view: number,
+  layout: string,
+  hideWhitespace: boolean,
+  original: string,
+  modified: string,
+): string {
+  return [
+    path,
+    view,
+    layout,
+    hideWhitespace ? "w" : "",
+    fingerprint(original),
+    fingerprint(modified),
+  ].join("\u0000");
+}
+
+/** Note that the stretches starting at `positions` were opened. */
+export function rememberOpened(key: string, positions: readonly number[]) {
+  if (positions.length === 0) return;
+  const set = opened.get(key) ?? new Set<number>();
+  for (const p of positions) set.add(p);
+  opened.delete(key);
+  opened.set(key, set);
+  if (opened.size > MAX_OPENED) {
+    const oldest = opened.keys().next().value;
+    if (oldest !== undefined) opened.delete(oldest);
+  }
+}
+
+/** The stretches opened in this editor before, to open again. */
+export function openedStretches(key: string): number[] {
+  return [...(opened.get(key) ?? [])];
+}
+
+/** Tests: forget every opened stretch. */
+export function clearOpenedStretches(): void {
+  opened.clear();
 }

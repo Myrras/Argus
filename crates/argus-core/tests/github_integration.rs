@@ -19,6 +19,8 @@ use argus_core::provider::{
     DiffRange, FileDiff, FileStatus, GithubProvider, ProviderId, ReviewProvider, ReviewRef,
     ReviewState,
 };
+use argus_core::store::Store;
+use argus_core::{AccountState, Core, Settings};
 
 const REPO: &str = "RobbieMinderhoud/ci-workflows";
 /// PR #2 "Lean CI defaults": one commit on top of `PR2_BASE`, merged.
@@ -66,12 +68,30 @@ fn paths(diff: &FileDiff) -> Vec<&str> {
 #[test]
 #[ignore = "integration: real GitHub API, needs INTEGRATION_TOKEN; run with just test-integration"]
 fn gh_is_installed_and_logged_in() {
-    let Some(gh) = provider() else { return };
-    let auth = gh.auth_status();
-    assert!(auth.installed, "the gh CLI is not installed");
+    if provider().is_none() {
+        return;
+    }
+    // Settings → Accounts as the app sees it: what `gh auth status` says
+    // about github.com (`glab` may be missing; only GitHub is checked).
+    let core = Core::with_cli(
+        Store::in_memory().unwrap(),
+        Settings::default(),
+        "gh",
+        "glab",
+    );
+    let accounts = core.list_accounts(true);
+    let github = accounts
+        .iter()
+        .find(|a| a.provider == ProviderId::Github && a.host == "github.com");
+    let state = github.map(|a| &a.state);
     assert!(
-        auth.logged_in,
-        "gh has no token (is INTEGRATION_TOKEN valid?)"
+        !matches!(state, Some(AccountState::CliMissing { .. })),
+        "the gh CLI is not installed"
+    );
+    assert_eq!(
+        state,
+        Some(&AccountState::LoggedIn),
+        "gh has no login for github.com (is INTEGRATION_TOKEN valid?)"
     );
 }
 

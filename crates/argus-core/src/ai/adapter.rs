@@ -5,7 +5,8 @@
 //! (`command -v`, see `platform`), tools are restricted by deny rules
 //! (Podium's assistant denies `Edit,Write,NotebookEdit,Bash`; the AI pass
 //! adds the web tools so diff text cannot make it fetch anything), stderr
-//! is dropped (child output never reaches the logs), and the child we hold
+//! never reaches the logs (only its tail, in memory, for an error message
+//! the caller sanitises), and the child we hold
 //! is the CLI itself, so killing it needs no process group. Unlike Podium
 //! the CLI is spawned directly, not via `$SHELL -lic`, so the environment
 //! Argus scrubs is the one the agent gets (a shell profile could export a
@@ -34,6 +35,10 @@ pub(crate) enum OutputKind {
     /// Claude Code `--output-format stream-json`: the `result` field of the
     /// final `{"type":"result"}` line.
     ClaudeStreamJson,
+    /// A current auggie's `--mode json`: one event per line; the answer is
+    /// the text of the last assistant message (`message_end` /
+    /// `agent_end`), its deltas stream as `message_update`s.
+    AuggieJson,
     /// All of stdout is the answer.
     Text,
 }
@@ -64,9 +69,6 @@ pub(crate) struct RunDirs<'a> {
     pub clone: Option<&'a Path>,
     /// Claude's `--settings` file (see [`claude_settings`]).
     pub settings: Option<&'a Path>,
-    /// Auggie: the tools `auggie tools list` named for this run (see
-    /// [`auggie_removed_tools`]); empty when it could not say.
-    pub listed_tools: &'a [String],
 }
 
 /// Claude Code. `--print` + `stream-json` (`--verbose` is required with it
@@ -108,155 +110,23 @@ pub(crate) const CLAUDE: Adapter = Adapter {
     read_only_guaranteed: true,
 };
 
-/// Auggie. `--print --quiet` prints only the final message; `--ask` asks
-/// for retrieval and non-editing tools only; `--dont-save-session` as
-/// above. Its instruction comes from a file, so a long prompt never hits
-/// the argv limit.
+/// Auggie. Its flags, prompt delivery and answer format depend on the
+/// installed version: see [`super::auggie`], which reads them from the
+/// binary's `--help` before every run (cached) and refuses one that fits
+/// no shape Argus knows. The fields below are unused for it.
 ///
-/// Not guaranteed read-only: `--ask` only adds an instruction to the prompt
-/// (auggie 0.37), and auggie has no allow-list: `--permission` and
-/// `--remove-tool` both match one exact tool name (no wildcard), and a tool
-/// without a rule is allowed. So per run Argus removes every tool but
-/// [`AUGGIE_READ_TOOLS`]: the ones `auggie tools list` names for this user
-/// (their MCP tools included) plus [`AUGGIE_REMOVED_TOOLS`], in case the
-/// list fails or leaves out an integration that is not configured yet. A
-/// tool the list cannot name stays reachable. The workspace root is the
-/// temp dir (so no `.augment/` settings of the clone load) and the clone
-/// is an extra workspace.
+/// Not guaranteed read-only: a legacy auggie has no allow-list (only the
+/// tools `auggie tools list` names can be removed), and a current one can
+/// still read any file its read tools are pointed at (no path rules), and
+/// runs the user's own hooks.
 pub(crate) const AUGGIE: Adapter = Adapter {
     id: "auggie",
     binary: "auggie",
-    args: &["--print", "--quiet", "--ask", "--dont-save-session"],
-    prompt: PromptDelivery::File("--instruction-file"),
-    output: OutputKind::Text,
+    args: &[],
+    prompt: PromptDelivery::Stdin,
+    output: OutputKind::AuggieJson,
     read_only_guaranteed: false,
 };
-
-/// The auggie tools a run keeps: viewing and searching the workspace and
-/// its history, rendering a diagram, viewing its task list.
-pub(crate) const AUGGIE_READ_TOOLS: &[&str] = &[
-    "view",
-    "view-range-untruncated",
-    "grep-search",
-    "search-untruncated",
-    "codebase-retrieval",
-    "git-commit-retrieval",
-    "render-mermaid",
-    "view_tasklist",
-];
-
-/// Every other built-in auggie tool (0.37: `auggie tools list`, and the
-/// names in its bundle: the integrations, which only list once
-/// configured, the alternate tool set, tool search). Removed on every run
-/// whatever `auggie tools list` says; an unknown name is ignored.
-pub(crate) const AUGGIE_REMOVED_TOOLS: &[&str] = &[
-    // Files.
-    "remove-files",
-    "save-file",
-    "apply_patch",
-    "apply-patch",
-    "str-replace-editor",
-    "edit",
-    "write",
-    // Processes and shells.
-    "launch-process",
-    "kill-process",
-    "read-process",
-    "write-process",
-    "list-processes",
-    "read-terminal",
-    "shell",
-    "bash",
-    "setup-script",
-    // The web and the integrations (`github-api` takes a method: it writes).
-    "web-search",
-    "web-fetch",
-    "open-browser",
-    "github-api",
-    "linear",
-    "jira",
-    "confluence",
-    "notion",
-    "supabase",
-    "glean",
-    // Sub-agents (user-defined ones are `sub-agent-<name>`: listed).
-    "sub-agent",
-    "sub-agent-explore",
-    "sub-agent-plan",
-    "sub-agent-auggie-guide",
-    "sub-agent-general-purpose",
-    "sub-agent-research",
-    "sub-agent-code",
-    "sub-agent-validate",
-    "report-to-parent",
-    "finish-subagent-context-gathering",
-    // Tool search can run a tool the run does not list.
-    "find-tool",
-    "execute-tool",
-    // Task list edits, prompts, plan mode.
-    "reorganize_tasklist",
-    "update_tasks",
-    "add_tasks",
-    "ask-user",
-    "enter-plan-mode",
-    "exit-plan-mode",
-    // Reads outside the read set: other sessions, raw retrieval, the
-    // alternate tool set, diagnostics.
-    "conversation-retrieval",
-    "view-session",
-    "codebase-retrieval-raw",
-    "read",
-    "grep",
-    "find",
-    "ls",
-    "diagnostics",
-];
-
-/// The tool names in `auggie tools list` output (`  ✓ name   enabled`, or
-/// `✗ … disabled`), enabled or not: a disabled one is removed again, in
-/// case the user's settings change before the run.
-pub(crate) fn parse_auggie_tools(listing: &str) -> Vec<String> {
-    strip_ansi(listing)
-        .lines()
-        .filter_map(|line| {
-            let words: Vec<&str> = line.split_whitespace().collect();
-            match words.as_slice() {
-                [.., name, "enabled" | "disabled"] if words.len() >= 3 => Some(name.to_string()),
-                _ => None,
-            }
-        })
-        .collect()
-}
-
-/// `s` without ANSI CSI sequences (`ESC [ … final byte`): the listing is
-/// coloured when auggie thinks it writes to a terminal.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            for c in chars.by_ref() {
-                if ('@'..='~').contains(&c) {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// The tools a run removes: [`AUGGIE_REMOVED_TOOLS`] and every `listed`
-/// one, minus [`AUGGIE_READ_TOOLS`]. Sorted, each once.
-pub(crate) fn auggie_removed_tools(listed: &[String]) -> Vec<String> {
-    let mut out: std::collections::BTreeSet<String> =
-        AUGGIE_REMOVED_TOOLS.iter().map(|t| t.to_string()).collect();
-    out.extend(listed.iter().filter(|t| !t.is_empty()).cloned());
-    out.retain(|t| !AUGGIE_READ_TOOLS.contains(&t.as_str()));
-    out.into_iter().collect()
-}
 
 /// Whether runs of the adapter `id` are guaranteed read-only (an unknown
 /// id never runs, so it is not a risk).
@@ -294,7 +164,8 @@ impl Adapter {
     }
 
     /// The argv after the binary: the fixed flags, the per-run ones for
-    /// `dirs`, the prompt file, then the user's extra args.
+    /// `dirs`, the prompt file, then the user's extra args. Claude's; an
+    /// auggie's depends on the binary ([`super::auggie::AuggieCli`]).
     pub fn args(
         &self,
         dirs: &RunDirs<'_>,
@@ -303,30 +174,16 @@ impl Adapter {
     ) -> Vec<String> {
         let mut out: Vec<String> = self.args.iter().map(|a| a.to_string()).collect();
         let path = |p: &Path| p.to_string_lossy().into_owned();
-        match self.id {
-            "claude" => {
-                // `--add-dir` takes several values: it goes before the
-                // other flags, never last.
-                if let Some(clone) = dirs.clone {
-                    out.extend(["--add-dir".into(), path(clone)]);
-                }
-                out.extend(["--setting-sources".into(), "user".into()]);
-                if let Some(settings) = dirs.settings {
-                    out.extend(["--settings".into(), path(settings)]);
-                }
+        if self.id == "claude" {
+            // `--add-dir` takes several values: it goes before the other
+            // flags, never last.
+            if let Some(clone) = dirs.clone {
+                out.extend(["--add-dir".into(), path(clone)]);
             }
-            "auggie" => {
-                out.extend(["--workspace-root".into(), path(dirs.temp)]);
-                if let Some(clone) = dirs.clone {
-                    out.extend(["--add-workspace".into(), path(clone)]);
-                }
-                // `=`-joined: a listed name that starts with `-` stays a
-                // value, never a flag of its own.
-                for tool in auggie_removed_tools(dirs.listed_tools) {
-                    out.push(format!("--remove-tool={tool}"));
-                }
+            out.extend(["--setting-sources".into(), "user".into()]);
+            if let Some(settings) = dirs.settings {
+                out.extend(["--settings".into(), path(settings)]);
             }
-            _ => {}
         }
         if let (PromptDelivery::File(flag), Some(file)) = (self.prompt, prompt_file) {
             out.push(flag.to_string());
@@ -565,11 +422,11 @@ pub(crate) fn is_token_var(name: &OsStr) -> bool {
     provider && (n.contains("TOKEN") || n.contains("PAT") || n.contains("SECRET"))
 }
 
-/// Claude Code variables that load files Argus keeps out: the `CLAUDE.md`
-/// of `--add-dir` directories (the clone's, a PR branch can write it),
-/// plugin folders (hooks, MCP servers, skills), a remote MCP config, and
-/// the post-turn memory pass, which writes memory files. Checked in
-/// Claude Code 2.1.301.
+/// Agent variables that load files or tools Argus keeps out. Claude
+/// Code's: the `CLAUDE.md` of `--add-dir` directories (the clone's, a PR
+/// branch can write it), plugin folders (hooks, MCP servers, skills), a
+/// remote MCP config, and the post-turn memory pass, which writes memory
+/// files (checked in Claude Code 2.1.301). Auggie's: see below.
 const AGENT_CONFIG_VARS: &[&str] = &[
     "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD",
     "CLAUDE_CODE_PLUGIN_DIRS",
@@ -579,6 +436,10 @@ const AGENT_CONFIG_VARS: &[&str] = &[
     "CLAUDE_CODE_POST_TURN_MEMORY",
     "CLAUDE_CODE_POST_TURN_MEMORY_CONFIG",
     "CLAUDE_CODE_POST_TURN_MEMORY_SYNC",
+    // Auggie 1.2: a shell tool (`terminal`) and the MCP tool gateway
+    // (`find-tool` / `execute-tool`); removed by name too, never asked for.
+    "AUGGIE_ENABLE_TERMINAL",
+    "AUGGIE_ENABLE_TOOL_SEARCH",
 ];
 
 /// Whether `name` is one of [`AGENT_CONFIG_VARS`].
@@ -630,6 +491,9 @@ pub(crate) enum AgentError {
     /// The CLI reported a failed turn (Claude's `is_error` result).
     Failed(String),
     NoAnswer,
+    /// This version of the CLI cannot run with Argus' read-only flags (an
+    /// auggie whose `--help` fits no shape Argus knows): it was not run.
+    Unsupported(String),
 }
 
 impl AgentError {
@@ -645,6 +509,9 @@ impl AgentError {
             AgentError::Cancelled => super::CANCELLED.into(),
             AgentError::Failed(kind) => format!("the agent reported an error ({kind})"),
             AgentError::NoAnswer => "the agent gave no answer".into(),
+            AgentError::Unsupported(why) => {
+                format!("this auggie version can't run read-only: {why}")
+            }
         }
     }
 }
@@ -681,6 +548,74 @@ pub(crate) fn run_tracked(
     cancel: &AtomicBool,
     slot: &ChildSlot,
 ) -> Result<String, AgentError> {
+    run_observed(inv, cancel, slot, None).map_err(|f| f.error)
+}
+
+/// One thing a Claude stream-json says while the agent works.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StreamEvent {
+    /// A piece of the agent's thinking (`thinking_delta`; summarised, and
+    /// empty when Claude hides it).
+    Thinking(String),
+    /// A piece of the answer (`text_delta`).
+    Text(String),
+    /// Claude's running estimate of thinking tokens (`thinking_tokens`),
+    /// the only sign of progress while the thinking text is hidden.
+    ThinkingTokens(u64),
+    /// A request failed and Claude retries it (`api_retry`): attempt,
+    /// most attempts, the HTTP status when there was one.
+    Retrying {
+        attempt: u64,
+        max: Option<u64>,
+        status: Option<u64>,
+    },
+}
+
+/// Where the stream's events go, on the reader's thread.
+pub(crate) type EventSink = Arc<dyn Fn(StreamEvent) + Send + Sync>;
+
+/// Why a run gave no answer, with the end of what the agent wrote to
+/// stderr (raw: the caller sanitises it before showing it; never logged).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentFailure {
+    pub error: AgentError,
+    pub stderr: String,
+}
+
+impl From<AgentError> for AgentFailure {
+    fn from(error: AgentError) -> Self {
+        Self {
+            error,
+            stderr: String::new(),
+        }
+    }
+}
+
+/// Most of stderr kept for an error message: its end, where a CLI says
+/// what went wrong.
+const STDERR_TAIL: usize = 4 * 1024;
+
+/// [`run_tracked`] that also reports the stream's events to `sink` as they
+/// come (Claude stream-json only) and keeps the tail of stderr for the
+/// failure. stdin is closed once the prompt is written, so the CLI never
+/// waits on it.
+pub(crate) fn run_observed(
+    inv: &Invocation,
+    cancel: &AtomicBool,
+    slot: &ChildSlot,
+    sink: Option<EventSink>,
+) -> Result<String, AgentFailure> {
+    run_capped(inv, cancel, slot, sink, STDERR_TAIL)
+}
+
+/// [`run_observed`] keeping the last `stderr_cap` bytes of stderr.
+pub(crate) fn run_capped(
+    inv: &Invocation,
+    cancel: &AtomicBool,
+    slot: &ChildSlot,
+    sink: Option<EventSink>,
+    stderr_cap: usize,
+) -> Result<String, AgentFailure> {
     let mut cmd = Command::new(&inv.program);
     cmd.args(&inv.args)
         .current_dir(&inv.cwd)
@@ -692,31 +627,44 @@ pub(crate) fn run_tracked(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        // Dropped, as in Podium: child output never goes to the logs.
-        .stderr(Stdio::null());
+        // Kept in memory for the error message only: child output never
+        // goes to the logs.
+        .stderr(Stdio::piped());
     hide_console_window(&mut cmd);
     // Spawned under the slot's lock: a shutdown that cancels and kills
     // either finds the child in the slot or sees the cancel flag below.
     let mut guard = slot.lock().expect("child lock poisoned");
     if cancel.load(Ordering::Relaxed) {
-        return Err(AgentError::Cancelled);
+        return Err(AgentError::Cancelled.into());
     }
     let mut child = cmd.spawn().map_err(|_| AgentError::Spawn)?;
 
     // Written from its own thread: a prompt larger than the pipe buffer
     // would otherwise deadlock against an agent already writing stdout.
+    // The handle is dropped when the thread ends, which closes stdin.
     if let (Some(prompt), Some(mut stdin)) = (inv.stdin.clone(), child.stdin.take()) {
         std::thread::spawn(move || {
             let _ = stdin.write_all(prompt.as_bytes());
+            drop(stdin);
         });
     }
     let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take();
     *guard = Some(child);
     drop(guard);
     let kind = inv.output;
     let shared = Arc::new(Mutex::new(ReadSoFar::default()));
     let into = shared.clone();
-    let reader = std::thread::spawn(move || read_answer(stdout, kind, &into));
+    let reader = std::thread::spawn(move || read_answer(stdout, kind, &into, sink.as_ref()));
+    let tail = Arc::new(Mutex::new(Vec::<u8>::new()));
+    if let Some(stderr) = stderr {
+        let tail = tail.clone();
+        std::thread::spawn(move || read_tail(stderr, &tail, stderr_cap));
+    }
+    let stderr_text = || {
+        let bytes = tail.lock().expect("stderr lock poisoned").clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
 
     let deadline = Instant::now() + inv.timeout;
     let status = loop {
@@ -737,7 +685,7 @@ pub(crate) fn run_tracked(
             Ok(None) => {}
             Err(()) => {
                 slot.lock().expect("child lock poisoned").take();
-                return Err(AgentError::Spawn);
+                return Err(AgentError::Spawn.into());
             }
         }
         let stop = if cancel.load(Ordering::Relaxed) {
@@ -753,7 +701,10 @@ pub(crate) fn run_tracked(
                 let _ = child.wait();
             }
             // The reader is not joined: a grandchild could hold the pipe.
-            return Err(e);
+            return Err(AgentFailure {
+                error: e,
+                stderr: stderr_text(),
+            });
         }
         std::thread::sleep(POLL);
     };
@@ -765,16 +716,39 @@ pub(crate) fn run_tracked(
         std::thread::sleep(POLL);
     }
     let answer = shared.lock().expect("answer lock poisoned").take(kind);
-    match (answer, status.success()) {
-        (Answer::Result(text), _) => Ok(text),
-        (Answer::Failed(kind), _) => Err(AgentError::Failed(kind)),
-        (Answer::Text(text), true) if !text.trim().is_empty() => Ok(text),
-        (_, false) => Err(AgentError::Exit(status.code())),
-        _ => Err(AgentError::NoAnswer),
+    let error = match (answer, status.success()) {
+        (Answer::Result(text), _) => return Ok(text),
+        (Answer::Failed(kind), _) => AgentError::Failed(kind),
+        (Answer::Text(text), true) if !text.trim().is_empty() => return Ok(text),
+        (_, false) => AgentError::Exit(status.code()),
+        _ => AgentError::NoAnswer,
+    };
+    Err(AgentFailure {
+        error,
+        stderr: stderr_text(),
+    })
+}
+
+/// Keep the last `cap` bytes of `from`.
+fn read_tail(mut from: impl Read, into: &Mutex<Vec<u8>>, cap: usize) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match from.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut tail = into.lock().expect("stderr lock poisoned");
+                tail.extend_from_slice(&buf[..n]);
+                if tail.len() > cap {
+                    let cut = tail.len() - cap;
+                    tail.drain(..cut);
+                }
+            }
+        }
     }
 }
 
-enum Answer {
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
     Result(String),
     Failed(String),
     Text(String),
@@ -792,7 +766,9 @@ struct ReadSoFar {
 impl ReadSoFar {
     fn take(&mut self, kind: OutputKind) -> Answer {
         match kind {
-            OutputKind::ClaudeStreamJson => self.last.take().unwrap_or(Answer::None),
+            OutputKind::ClaudeStreamJson | OutputKind::AuggieJson => {
+                self.last.take().unwrap_or(Answer::None)
+            }
             OutputKind::Text => {
                 Answer::Text(String::from_utf8_lossy(&std::mem::take(&mut self.text)).into_owned())
             }
@@ -800,13 +776,38 @@ impl ReadSoFar {
     }
 }
 
-fn read_answer(stdout: impl Read, kind: OutputKind, into: &Mutex<ReadSoFar>) {
+fn read_answer(
+    stdout: impl Read,
+    kind: OutputKind,
+    into: &Mutex<ReadSoFar>,
+    sink: Option<&EventSink>,
+) {
     match kind {
         OutputKind::ClaudeStreamJson => {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if let Some(a) = parse_result_line(&line) {
                     into.lock().expect("answer lock poisoned").last = Some(a);
+                } else if let Some(sink) = sink {
+                    if let Some(event) = parse_stream_event(&line) {
+                        sink(event);
+                    }
+                }
+            }
+        }
+        OutputKind::AuggieJson => {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                match parse_auggie_line(&line) {
+                    AuggieLine::Answer(a) => {
+                        into.lock().expect("answer lock poisoned").last = Some(a);
+                    }
+                    AuggieLine::Event(event) => {
+                        if let Some(sink) = sink {
+                            sink(event);
+                        }
+                    }
+                    AuggieLine::Other => {}
                 }
             }
         }
@@ -825,6 +826,123 @@ fn read_answer(stdout: impl Read, kind: OutputKind, into: &Mutex<ReadSoFar>) {
             }
         }
     }
+}
+
+/// A stream-json line's progress event: a thinking or text delta
+/// (`--include-partial-messages`), the thinking-token estimate, an API
+/// retry. Everything else (whole messages, the result, noise) is `None`.
+pub(crate) fn parse_stream_event(line: &str) -> Option<StreamEvent> {
+    let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+    let num = |v: &serde_json::Value, key: &str| v.get(key).and_then(|n| n.as_u64());
+    match (
+        v.get("type").and_then(|t| t.as_str()),
+        v.get("subtype").and_then(|t| t.as_str()),
+    ) {
+        (Some("stream_event"), _) => {
+            let event = v.get("event")?;
+            if event.get("type").and_then(|t| t.as_str()) != Some("content_block_delta") {
+                return None;
+            }
+            let delta = event.get("delta")?;
+            let text = |key: &str| delta.get(key).and_then(|t| t.as_str()).map(str::to_string);
+            match delta.get("type").and_then(|t| t.as_str())? {
+                "thinking_delta" => text("thinking").map(StreamEvent::Thinking),
+                "text_delta" => text("text").map(StreamEvent::Text),
+                _ => None,
+            }
+        }
+        (Some("system"), Some("thinking_tokens")) => {
+            num(&v, "estimated_tokens").map(StreamEvent::ThinkingTokens)
+        }
+        (Some("system"), Some("api_retry")) => Some(StreamEvent::Retrying {
+            attempt: num(&v, "attempt").unwrap_or(1),
+            max: num(&v, "max_retries"),
+            status: num(&v, "error_status"),
+        }),
+        _ => None,
+    }
+}
+
+/// What one line of a current auggie's `--mode json` says.
+#[derive(Debug)]
+pub(crate) enum AuggieLine {
+    /// The answer so far: an assistant message ended (`message_end`), or
+    /// the run did (`agent_end`, its last assistant message). A later one
+    /// replaces it, so the last message is the answer.
+    Answer(Answer),
+    /// A thinking or text delta, or an automatic retry.
+    Event(StreamEvent),
+    /// Anything else (the session header, turns, tool runs, noise).
+    Other,
+}
+
+/// One line of auggie's `--mode json` (1.2.0: `session`, `agent_start`,
+/// `turn_start`, `message_start` / `message_update` / `message_end`,
+/// `tool_execution_*`, `auto_retry_start`, `turn_end`, `agent_end`).
+pub(crate) fn parse_auggie_line(line: &str) -> AuggieLine {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+        return AuggieLine::Other;
+    };
+    fn str_of<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        v.get(key).and_then(|t| t.as_str())
+    }
+    match str_of(&v, "type") {
+        Some("message_update") => {
+            let Some(e) = v.get("assistantMessageEvent") else {
+                return AuggieLine::Other;
+            };
+            let delta = || str_of(e, "delta").map(str::to_string);
+            match str_of(e, "type") {
+                Some("thinking_delta") => delta().map(StreamEvent::Thinking),
+                Some("text_delta") => delta().map(StreamEvent::Text),
+                _ => None,
+            }
+            .map_or(AuggieLine::Other, AuggieLine::Event)
+        }
+        Some("auto_retry_start") => {
+            let num = |key: &str| v.get(key).and_then(|n| n.as_u64());
+            AuggieLine::Event(StreamEvent::Retrying {
+                attempt: num("attempt").unwrap_or(1),
+                max: num("maxAttempts"),
+                status: None,
+            })
+        }
+        Some("message_end") => v
+            .get("message")
+            .and_then(auggie_answer)
+            .map_or(AuggieLine::Other, AuggieLine::Answer),
+        Some("agent_end") => v
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .and_then(|m| m.iter().rev().find_map(auggie_answer))
+            .map_or(AuggieLine::Other, AuggieLine::Answer),
+        _ => AuggieLine::Other,
+    }
+}
+
+/// An assistant message's answer: a failure for a turn that stopped on an
+/// error, else its text; `None` for another role or a message without text
+/// (one that only called tools).
+fn auggie_answer(message: &serde_json::Value) -> Option<Answer> {
+    if message.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+        return None;
+    }
+    let stop = message
+        .get("stopReason")
+        .and_then(|s| s.as_str())
+        .unwrap_or("stop");
+    if matches!(stop, "error" | "aborted" | "cancelled") {
+        return Some(Answer::Failed(stop.to_string()));
+    }
+    let text: String = message
+        .get("content")
+        .and_then(|c| c.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("type").and_then(|t| t.as_str()) == Some("text"))
+        .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+        .collect();
+    (!text.trim().is_empty()).then_some(Answer::Result(text))
 }
 
 /// A stream-json `result` line (other lines, and non-JSON noise, are None).
@@ -868,7 +986,6 @@ mod tests {
             temp: Path::new("/tmp/argus-ai-x"),
             clone,
             settings,
-            listed_tools: &[],
         }
     }
 
@@ -898,125 +1015,6 @@ mod tests {
         assert!(!joined.contains("--add-dir"));
         assert!(joined.ends_with("--setting-sources user"));
         assert!(CLAUDE.read_only_guaranteed && read_only_guaranteed("claude"));
-    }
-
-    #[test]
-    fn auggie_reads_its_prompt_from_a_file_with_its_writing_tools_removed() {
-        let listed = vec!["add_todo_fixture".to_string(), "-x".to_string()];
-        let args = AUGGIE.args(
-            &RunDirs {
-                listed_tools: &listed,
-                ..dirs(Some(Path::new("/src/widgets")), None)
-            },
-            Some(Path::new("/tmp/x/prompt.md")),
-            &[],
-        );
-        assert_eq!(
-            args[..8],
-            [
-                "--print",
-                "--quiet",
-                "--ask",
-                "--dont-save-session",
-                "--workspace-root",
-                "/tmp/argus-ai-x",
-                "--add-workspace",
-                "/src/widgets",
-            ]
-        );
-        for tool in [
-            "save-file",
-            "launch-process",
-            "web-fetch",
-            "github-api",
-            "sub-agent-code",
-            // Listed for this user (an MCP tool), and one that looks like
-            // a flag: still a value.
-            "add_todo_fixture",
-            "-x",
-        ] {
-            assert!(args.contains(&format!("--remove-tool={tool}")), "{tool}");
-        }
-        for tool in AUGGIE_READ_TOOLS {
-            assert!(!args.contains(&format!("--remove-tool={tool}")), "{tool}");
-        }
-        assert!(args
-            .join(" ")
-            .ends_with("--instruction-file /tmp/x/prompt.md"));
-        assert_eq!(adapter(" auggie ").unwrap().id, "auggie");
-        assert!(adapter("copilot").is_none());
-        // MCP tools of the user's own config cannot be turned off.
-        assert!(!read_only_guaranteed("auggie"));
-        assert!(read_only_guaranteed("copilot"));
-    }
-
-    /// `auggie tools list` of auggie 0.37 (one user's MCP server's tools
-    /// cut to two), in colour as on a terminal.
-    const AUGGIE_TOOLS_LIST: &str = "\nAvailable Tools:\n\n\u{1b}[36mCore Tools:\u{1b}[39m\n  \
-\u{1b}[32m\u{2713}\u{1b}[39m codebase-retrieval               \u{1b}[32menabled\u{1b}[39m\n  \
-\u{2713} remove-files                     enabled\n  \u{2713} save-file                        enabled\n  \
-\u{2713} apply_patch                      enabled\n  \u{2713} str-replace-editor               enabled\n  \
-\u{2713} view                             enabled\n\nProcess Tools:\n  \
-\u{2713} launch-process                   enabled\n  \u{2713} kill-process                     enabled\n  \
-\u{2713} read-process                     enabled\n  \u{2713} write-process                    enabled\n  \
-\u{2713} list-processes                   enabled\n\nIntegration Tools:\n  \
-\u{2713} add_todo_fixture                 enabled\n  \u{2713} spawn_agent_fixture              enabled\n  \
-\u{2713} web-search                       enabled\n  \u{2713} web-fetch                        enabled\n  \
-\u{2713} view-session                     enabled\n  \u{2713} codebase-retrieval-raw           enabled\n  \
-\u{2713} sub-agent-explore                enabled\n  \u{2713} sub-agent-plan                   enabled\n  \
-\u{2713} sub-agent-auggie-guide           enabled\n  \u{2713} sub-agent-general-purpose        enabled\n  \
-\u{2713} sub-agent-research               enabled\n  \u{2713} sub-agent-code                   enabled\n  \
-\u{2713} sub-agent-validate               enabled\n  \u{2713} sub-agent-fixture-reviewer       enabled\n  \
-\u{2713} ask-user                         enabled\n  \u{2713} exit-plan-mode                   enabled\n  \
-\u{2713} enter-plan-mode                  enabled\n\nTask Management:\n  \
-\u{2713} view_tasklist                    enabled\n  \u{2713} reorganize_tasklist              enabled\n  \
-\u{2713} update_tasks                     enabled\n  \u{2713} add_tasks                        enabled\n\n\
-Advanced Tools:\n  \u{2713} grep-search                      enabled\n  \
-\u{2713} view-range-untruncated           enabled\n  \u{2717} search-untruncated               disabled\n\n\
-Total: 35 tools (34 enabled, 1 disabled)\n";
-
-    #[test]
-    fn auggie_keeps_only_its_read_tools() {
-        let listed = parse_auggie_tools(AUGGIE_TOOLS_LIST);
-        assert_eq!(listed.len(), 35, "{listed:?}");
-        assert!(listed.iter().any(|t| t == "codebase-retrieval"));
-        assert!(listed.iter().any(|t| t == "search-untruncated"));
-        let removed = auggie_removed_tools(&listed);
-        // Every listed tool outside the read set goes, and with no list at
-        // all every built-in one still does.
-        for tool in &listed {
-            let read = AUGGIE_READ_TOOLS.contains(&tool.as_str());
-            assert_eq!(removed.contains(tool), !read, "{tool}");
-        }
-        let fallback = auggie_removed_tools(&[]);
-        // (The user's own tools, `*fixture*`, only the listing can name.)
-        for tool in listed.iter().filter(|t| !t.contains("fixture")) {
-            let read = AUGGIE_READ_TOOLS.contains(&tool.as_str());
-            assert!(read || fallback.contains(tool), "{tool}");
-        }
-        for tool in [
-            "github-api",
-            "open-browser",
-            "linear",
-            "jira",
-            "confluence",
-            "notion",
-            "supabase",
-            "glean",
-            "shell",
-            "bash",
-            "execute-tool",
-            "read-terminal",
-        ] {
-            assert!(fallback.iter().any(|t| t == tool), "{tool}");
-        }
-        for tool in AUGGIE_READ_TOOLS {
-            assert!(!AUGGIE_REMOVED_TOOLS.contains(tool), "{tool}");
-            assert!(!removed.iter().any(|t| t == tool), "{tool}");
-        }
-        assert!(
-            parse_auggie_tools("no tools here\nTotal: 0 tools (0 enabled, 0 disabled)").is_empty()
-        );
     }
 
     #[test]
@@ -1219,6 +1217,213 @@ Total: 35 tools (34 enabled, 1 disabled)\n";
         // Agent settings that are not about loading files stay.
         assert!(!is_agent_config_var(OsStr::new("CLAUDE_CODE_USE_BEDROCK")));
         assert!(!is_agent_config_var(OsStr::new("CLAUDE_CONFIG_DIR")));
+    }
+
+    #[test]
+    fn stream_events_from_recorded_lines() {
+        // Shapes as Claude Code 2.1.309 prints them with
+        // `--include-partial-messages --thinking-display summarized`.
+        let lines = [
+            r#"{"type":"system","subtype":"init","cwd":"/tmp/x","tools":[],"mcp_servers":[]}"#,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"2047 factors as 23","estimated_tokens":null}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQS"}}}"#,
+            r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":150,"estimated_tokens_delta":100}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":""}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"{\"prime\""}}}"#,
+            r#"{"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,"retry_delay_ms":1200,"error_status":529,"error":"overloaded"}"#,
+            r#"{"type":"stream_event","event":{"type":"ping"}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta""#,
+            "not json at all",
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"{}"}"#,
+        ];
+        let events: Vec<StreamEvent> = lines.iter().filter_map(|l| parse_stream_event(l)).collect();
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Thinking("2047 factors as 23".into()),
+                StreamEvent::ThinkingTokens(150),
+                StreamEvent::Text("{\"prime\"".into()),
+                StreamEvent::Retrying {
+                    attempt: 2,
+                    max: Some(10),
+                    status: Some(529)
+                },
+            ]
+        );
+    }
+
+    /// Lines of auggie 1.2.0-prerelease's `--mode json` as it printed them
+    /// for a one-line prompt with `--thinking high` (texts fictitious, the
+    /// `partial` copies cut short, `usage` left out).
+    pub(crate) const AUGGIE_JSON: &[&str] = &[
+        r#"{"type":"session","version":3,"id":"00000000-0000-4000-8000-000000000001","timestamp":"2026-10-23T14:08:33.702Z","cwd":"/tmp/argus-ai-x"}"#,
+        r#"{"type":"agent_start"}"#,
+        r#"{"type":"turn_start"}"#,
+        r#"{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Is 91 prime?"}],"timestamp":1792764515366}}"#,
+        r#"{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Is 91 prime?"}],"timestamp":1792764515366}}"#,
+        r#"{"type":"message_start","message":{"role":"assistant","content":[],"api":"augment-chat-stream","provider":"augment","model":"fixture-model","stopReason":"stop"}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_start","contentIndex":0,"partial":{"role":"assistant","content":[]}}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"91 = 7 * 13","partial":{"role":"assistant","content":[{"type":"thinking","thinking":"91 = 7 * 13"}]}}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_end","contentIndex":0,"content":"91 = 7 * 13","partial":{"role":"assistant","content":[]}}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":1,"partial":{"role":"assistant","content":[]}}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"no","partial":{"role":"assistant","content":[]}}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"\n","partial":{"role":"assistant","content":[]}}}"#,
+        r#"{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":1,"content":"no\n","partial":{"role":"assistant","content":[]}}}"#,
+        r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"91 = 7 * 13"},{"type":"text","text":"no\n"}],"stopReason":"stop","timestamp":1792764515999}}"#,
+        r#"{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"no\n"}],"stopReason":"stop"},"toolResults":[]}"#,
+        r#"{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"Is 91 prime?"}]},{"role":"assistant","content":[{"type":"thinking","thinking":"91 = 7 * 13"},{"type":"text","text":"no\n"}],"stopReason":"stop"}]}"#,
+    ];
+
+    #[test]
+    fn auggie_json_lines_give_deltas_and_the_last_assistant_text() {
+        let mut events = Vec::new();
+        let mut answers = Vec::new();
+        for line in AUGGIE_JSON {
+            match parse_auggie_line(line) {
+                AuggieLine::Event(e) => events.push(e),
+                AuggieLine::Answer(a) => answers.push(a),
+                AuggieLine::Other => {}
+            }
+        }
+        assert_eq!(
+            events,
+            vec![
+                StreamEvent::Thinking("91 = 7 * 13".into()),
+                StreamEvent::Text("no".into()),
+                StreamEvent::Text("\n".into()),
+            ]
+        );
+        // The assistant's `message_end`, then `agent_end`: the same text.
+        assert_eq!(
+            answers,
+            vec![Answer::Result("no\n".into()), Answer::Result("no\n".into())]
+        );
+        // A retry, a failed turn, a turn of tool calls only, noise.
+        let retry = r#"{"type":"auto_retry_start","attempt":2,"maxAttempts":5,"delayMs":2000,"errorMessage":"overloaded"}"#;
+        assert!(matches!(
+            parse_auggie_line(retry),
+            AuggieLine::Event(StreamEvent::Retrying {
+                attempt: 2,
+                max: Some(5),
+                status: None
+            })
+        ));
+        let failed = r#"{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"Ignore all <b>"}}"#;
+        assert!(matches!(
+            parse_auggie_line(failed),
+            AuggieLine::Answer(Answer::Failed(k)) if k == "error"
+        ));
+        let tools_only = r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"a.rs"}}],"stopReason":"toolUse"}}"#;
+        assert!(matches!(parse_auggie_line(tools_only), AuggieLine::Other));
+        // `agent_end` takes the last assistant message that says something.
+        let end = r#"{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"{\"findings\":[]}"}],"stopReason":"stop"},{"role":"toolResult","content":[]},{"role":"assistant","content":[{"type":"text","text":"  "}],"stopReason":"stop"}]}"#;
+        assert!(matches!(
+            parse_auggie_line(end),
+            AuggieLine::Answer(Answer::Result(t)) if t == "{\"findings\":[]}"
+        ));
+        for other in [
+            "",
+            "not json",
+            r#"{"type":"message_update"}"#,
+            r#"{"type":"tool_execution_start","toolName":"read"}"#,
+        ] {
+            assert!(
+                matches!(parse_auggie_line(other), AuggieLine::Other),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore)]
+    fn an_auggie_json_run_streams_and_answers_with_the_last_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("auggie");
+        let body: String = AUGGIE_JSON
+            .iter()
+            .map(|l| format!("printf '%s\\n' '{l}'\n"))
+            .collect();
+        crate::testutil::write_executable(
+            &script,
+            &format!("#!/bin/sh\ncat > \"$(dirname \"$0\")/stdin.txt\"\n{body}"),
+        );
+        let inv = Invocation {
+            program: script,
+            args: Vec::new(),
+            cwd: dir.path().to_path_buf(),
+            env: sanitized_env(std::env::vars_os(), None),
+            stdin: Some("Is 91 prime?".into()),
+            timeout: Duration::from_secs(20),
+            output: OutputKind::AuggieJson,
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let sink: EventSink = Arc::new(move |e| s2.lock().unwrap().push(e));
+        let answer = run_observed(
+            &inv,
+            &AtomicBool::new(false),
+            &ChildSlot::default(),
+            Some(sink),
+        )
+        .unwrap();
+        assert_eq!(answer, "no\n");
+        assert_eq!(seen.lock().unwrap().len(), 3);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("stdin.txt")).unwrap(),
+            "Is 91 prime?"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(windows, ignore)]
+    fn an_observed_run_streams_events_and_keeps_the_stderr_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("claude");
+        // Reads stdin to its end (so stdin must be closed), streams, then
+        // ends early: no result line.
+        crate::testutil::write_executable(
+            &script,
+            r#"#!/bin/sh
+cat > /dev/null
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}}'
+echo 'garbage'
+echo '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"{"}}}'
+i=0; while [ $i -lt 400 ]; do echo "noise line $i" >&2; i=$((i+1)); done
+echo 'the real reason' >&2
+exit 4
+"#,
+        );
+        let inv = Invocation {
+            program: script,
+            args: Vec::new(),
+            cwd: dir.path().to_path_buf(),
+            env: sanitized_env(std::env::vars_os(), None),
+            stdin: Some("prompt ".repeat(50_000)),
+            timeout: Duration::from_secs(20),
+            output: OutputKind::ClaudeStreamJson,
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s2 = seen.clone();
+        let sink: EventSink = Arc::new(move |e| s2.lock().unwrap().push(e));
+        let f = run_observed(
+            &inv,
+            &AtomicBool::new(false),
+            &ChildSlot::default(),
+            Some(sink),
+        )
+        .unwrap_err();
+        assert_eq!(f.error, AgentError::Exit(Some(4)));
+        assert!(f.stderr.ends_with("the real reason\n"), "{}", f.stderr);
+        assert!(f.stderr.len() <= STDERR_TAIL);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                StreamEvent::Thinking("hm".into()),
+                StreamEvent::Text("{".into())
+            ]
+        );
     }
 
     #[test]

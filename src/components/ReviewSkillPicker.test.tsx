@@ -18,9 +18,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ReviewSkillList, Settings } from "../ipc/types";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useReviewSkillsStore } from "../state/reviewSkillsStore";
-import { useReviewStore } from "../state/reviewStore";
-import { settings, status } from "../test/fixtures";
-import { ReviewSkillsSection } from "./ReviewSkillPicker";
+import { settings, accounts } from "../test/fixtures";
+import { ReviewSkillField } from "./ReviewSkillPicker";
 
 const mockInvoke = vi.mocked(invoke);
 const initialBackend = useBackendSettingsStore.getState();
@@ -56,10 +55,8 @@ function backend(initial: Settings) {
         return Promise.resolve(stored);
       case "list_review_skills":
         return Promise.resolve(skillList);
-      case "provider_status":
-        return Promise.resolve(status());
-      case "gitlab_token_present":
-        return Promise.resolve(false);
+      case "list_accounts":
+        return Promise.resolve(accounts());
       default:
         return Promise.resolve(undefined);
     }
@@ -74,9 +71,14 @@ const saved = () =>
 async function renderSection(initial: Settings) {
   backend(initial);
   await useBackendSettingsStore.getState().load();
-  render(<ReviewSkillsSection />);
+  // The field as a repository card holds it (Settings → Repositories).
+  render(
+    <div role="group" aria-label={WIDGETS}>
+      <ReviewSkillField repo={WIDGETS} />
+    </div>,
+  );
   const card = screen.getByRole("group", { name: WIDGETS });
-  // Listed when the section shows.
+  // Listed when the card shows.
   await waitFor(() =>
     expect(useReviewSkillsStore.getState().lists[WIDGETS]).toBeDefined(),
   );
@@ -94,7 +96,6 @@ beforeEach(() => {
   vi.clearAllMocks();
   useBackendSettingsStore.setState({ ...initialBackend }, true);
   useReviewSkillsStore.setState({ lists: {}, loading: {}, errors: {} });
-  useReviewStore.setState({ reviews: [] });
 });
 
 describe("Review skill picker", () => {
@@ -102,7 +103,7 @@ describe("Review skill picker", () => {
     const card = await renderSection(
       settings({ clonePaths: { [WIDGETS]: "/src/widgets" } }),
     );
-    expect(card).toHaveTextContent("Auto (project's own: code-review)");
+    expect(card).toHaveTextContent("Auto: code-review");
     expect(mockInvoke).toHaveBeenCalledWith("list_review_skills", {
       repo: WIDGETS,
     });
@@ -137,6 +138,35 @@ describe("Review skill picker", () => {
     fireEvent.keyDown(radios[1], { key: "ArrowUp" });
     fireEvent.keyDown(radios[0], { key: "ArrowUp" });
     expect(filter).toHaveFocus();
+  });
+
+  it("shows the choice in full, wrapping", async () => {
+    const card = await renderSection(
+      settings({ clonePaths: { [WIDGETS]: "/src/widgets" } }),
+    );
+    const line = () => card.querySelector('[data-slot="skill-choice"]')!;
+    expect(line()).toHaveTextContent(/^Auto: code-review$/);
+    // The same classes as the clone card's path line, plus the wrapping one.
+    expect(line().className).toMatch(/cardDetail/);
+    expect(line().className).toMatch(/cardDetailWrap/);
+    expect(line()).not.toHaveAttribute("title");
+    open(card);
+    fireEvent.click(screen.getByRole("radio", { name: "None" }));
+    await waitFor(() => expect(line()).toHaveTextContent(/^None$/));
+    open(card);
+    fireEvent.click(
+      screen.getByRole("radio", { name: "fixture-tools:pr-review, plugin" }),
+    );
+    await waitFor(() =>
+      expect(line()).toHaveTextContent(/^fixture-tools:pr-review · plugin$/),
+    );
+    open(card);
+    fireEvent.click(
+      screen.getByRole("radio", { name: "code-review, project" }),
+    );
+    await waitFor(() =>
+      expect(line()).toHaveTextContent(/^code-review · project$/),
+    );
   });
 
   it("filters the skills but keeps Auto and None", async () => {
@@ -186,7 +216,7 @@ describe("Review skill picker", () => {
     );
     // Closed again, the card says what is chosen.
     expect(screen.queryByRole("radiogroup")).toBeNull();
-    expect(card).toHaveTextContent("fixture-tools:pr-review (plugin)");
+    expect(card).toHaveTextContent("fixture-tools:pr-review · plugin");
 
     open(card);
     expect(
@@ -224,29 +254,10 @@ describe("Review skill picker", () => {
         },
       }),
     );
-    expect(card).toHaveTextContent("uninstalled-review (yours)");
+    expect(card).toHaveTextContent("uninstalled-review · yours");
     open(card);
     const gone = screen.getByRole("radio", { name: "uninstalled-review" });
     expect(gone).toHaveAttribute("aria-checked", "true");
     expect(gone).toHaveTextContent("Not found any more (yours): runs use Auto");
-  });
-
-  it("lists the repositories of reviews too, and says when there are none", async () => {
-    backend(settings());
-    await useBackendSettingsStore.getState().load();
-    const { unmount } = render(<ReviewSkillsSection />);
-    expect(screen.getByText(/No repositories yet/)).toBeInTheDocument();
-    unmount();
-    useReviewStore.setState({
-      reviews: [
-        { host: "gitlab.example.test", repo: "acme-fixture/api" },
-      ] as never,
-    });
-    render(<ReviewSkillsSection />);
-    expect(
-      screen.getByRole("group", {
-        name: "gitlab.example.test/acme-fixture/api",
-      }),
-    ).toBeInTheDocument();
   });
 });

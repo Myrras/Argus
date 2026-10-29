@@ -14,6 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::adapter::{self, Adapter, ChildSlot, Invocation, PromptDelivery, RunDirs};
+use super::auggie::{self, AuggieCli};
 use super::context::{self, BaseFiles};
 use super::dedupe;
 use super::model::{Finding, RunContext, UsedSkill};
@@ -161,22 +162,6 @@ pub(crate) fn write_snapshot(
     std::fs::write(dir.join("threads.json"), json)
 }
 
-/// Tokens the agent's answer must not carry into a finding, besides the
-/// shapes [`super::output::redact`] knows: the configured GitLab token.
-/// (`gh`'s token stays inside the provider; GitHub tokens have fixed
-/// prefixes, which the shapes cover.)
-pub(crate) fn known_secrets(settings: &Settings) -> Vec<String> {
-    use crate::provider::gitlab::{KeychainToken, TokenSource};
-    let url = settings.gitlab.base_url.trim();
-    if url.is_empty() {
-        return Vec::new();
-    }
-    KeychainToken::for_base_url(url)
-        .token()
-        .into_iter()
-        .collect()
-}
-
 /// The run-state note of a run reviewed without a worktree.
 pub(crate) fn no_worktree(why: &str) -> String {
     format!("Couldn't create a review worktree: {why}; reviewed without it")
@@ -315,6 +300,22 @@ pub(crate) fn execute(
     let program = adapter
         .resolve(ai.binary.as_deref())
         .ok_or_else(|| adapter::AgentError::NotFound(adapter.binary).message())?;
+    // Which auggie this is decides its flags; one that cannot be held to
+    // reading fails here, before anything is fetched.
+    let auggie = match adapter.id {
+        "auggie" => Some(
+            auggie::probe(
+                Path::new(&program),
+                &std::env::temp_dir(),
+                agent_env(),
+                auggie::HELP_TIMEOUT,
+                cancel,
+                &ctx.child,
+            )
+            .map_err(|e| e.message())?,
+        ),
+        _ => None,
+    };
 
     // Round 1 (or never marked reviewed): the whole diff. Later: since the
     // watermark; with no new commits, the whole diff again for context.
@@ -468,6 +469,8 @@ pub(crate) fn execute(
         .iter()
         .map(|f| (f.path.clone(), f.text.clone()))
         .collect();
+    // The repository's own language, else the global default.
+    let language = ctx.settings.review_language(&record.review);
     let guidance = Guidance {
         skill: skill.as_ref(),
         truncated: rules
@@ -478,6 +481,7 @@ pub(crate) fn execute(
             .collect(),
         left_out: rules.left_out.clone(),
         changed: changed_rules,
+        language: language.clone(),
     };
     let run_context = RunContext {
         rules_files: rules.files.iter().map(|f| f.path.clone()).collect(),
@@ -486,6 +490,7 @@ pub(crate) fn execute(
             source: s.source,
         }),
         worktree: worktree.is_some(),
+        language: Some(language),
         notes,
     };
     let settings_file = match adapter.id {
@@ -500,10 +505,11 @@ pub(crate) fn execute(
         }
         _ => None,
     };
-    // Auggie has no allow-list: what it lists for this user (MCP tools
-    // included) is removed, all but the read tools.
-    let listed_tools = match adapter.id {
-        "auggie" => {
+    // A legacy auggie has no allow-list: what it lists for this user (MCP
+    // tools included) is removed, all but the read tools. A current one
+    // has no `tools list` (it would take the words as a prompt).
+    let listed_tools = match &auggie {
+        Some(cli) if cli.lists_tools() => {
             check(cancel)?;
             let inv = Invocation {
                 program: PathBuf::from(&program),
@@ -518,7 +524,7 @@ pub(crate) fn execute(
             // server of the user's) would stay switched on.
             match adapter::run_tracked(&inv, cancel, &ctx.child) {
                 Ok(listing) => {
-                    let tools = adapter::parse_auggie_tools(&listing);
+                    let tools = auggie::parse_tools_list(&listing);
                     if tools.is_empty() {
                         tracing::debug!("AI run: `auggie tools list` named no tools");
                         return Err(TOOLS_UNLISTED.into());
@@ -538,7 +544,6 @@ pub(crate) fn execute(
         temp: temp.path(),
         clone: read_dir.as_deref(),
         settings: settings_file.as_deref(),
-        listed_tools: &listed_tools,
     };
     let nonce = uuid::Uuid::new_v4().simple().to_string();
     let text = prompt::build(&PromptInput {
@@ -556,7 +561,15 @@ pub(crate) fn execute(
 
     let spawn = |prompt: &str| -> Result<String, String> {
         check(cancel)?;
-        let inv = invocation(&adapter, &program, &dirs, prompt, ctx)?;
+        let inv = invocation(
+            &adapter,
+            auggie.as_ref(),
+            &listed_tools,
+            &program,
+            &dirs,
+            prompt,
+            ctx,
+        )?;
         adapter::run_tracked(&inv, cancel, &ctx.child).map_err(|e| e.message())
     };
     let answer = spawn(&text)?;
@@ -635,14 +648,20 @@ fn agent_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     adapter::sanitized_env(std::env::vars_os(), crate::platform::login_path())
 }
 
+/// One spawn of the review: Claude's argv from the adapter, an auggie's
+/// from what its `--help` said (`auggie`, with what a legacy `tools list`
+/// named in `listed`).
 fn invocation(
     adapter: &Adapter,
+    auggie: Option<&AuggieCli>,
+    listed: &[String],
     program: &str,
     dirs: &RunDirs<'_>,
     prompt: &str,
     ctx: &JobContext,
 ) -> Result<Invocation, String> {
-    let (stdin, prompt_file) = match adapter.prompt {
+    let delivery = auggie.map_or(adapter.prompt, AuggieCli::prompt);
+    let (stdin, prompt_file) = match delivery {
         PromptDelivery::Stdin => (Some(prompt.to_string()), None),
         PromptDelivery::File(_) => {
             let file = dirs.temp.join("prompt.md");
@@ -650,14 +669,19 @@ fn invocation(
             (None, Some(file))
         }
     };
+    let extra = &ctx.settings.ai.args;
+    let args = match auggie {
+        Some(cli) => cli.review_args(dirs.temp, dirs.clone, listed, prompt_file.as_deref(), extra),
+        None => adapter.args(dirs, prompt_file.as_deref(), extra),
+    };
     Ok(Invocation {
         program: PathBuf::from(program),
-        args: adapter.args(dirs, prompt_file.as_deref(), &ctx.settings.ai.args),
+        args,
         cwd: dirs.temp.to_path_buf(),
         env: agent_env(),
         stdin,
         timeout: ctx.timeout,
-        output: adapter.output,
+        output: auggie.map_or(adapter.output, AuggieCli::output),
     })
 }
 

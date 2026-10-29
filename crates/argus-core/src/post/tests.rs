@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use super::anchor::{parse_hunks, validate};
+use super::anchor::{outside_row, parse_hunks, region_of, validate};
 use super::*;
 use crate::error::{CoreError, CoreResult};
 use crate::ids::ThreadId;
@@ -171,6 +171,141 @@ fn places_ranges_inside_one_hunk_only() {
 }
 
 #[test]
+fn maps_unchanged_lines_outside_the_hunks_to_both_sides() {
+    let hunks = parse_hunks(PATCH_H1);
+    // Hunk 1 (-1,4 +1,5) adds one line, hunk 2 (-10,2 +11,3) another.
+    let row = |side, n| outside_row(&hunks, side, n).map(|r| (r.old_pos, r.new_pos));
+    assert_eq!(row(Side::New, 6), Some((5, 6)));
+    assert_eq!(row(Side::New, 8), Some((7, 8)));
+    assert_eq!(row(Side::Old, 7), Some((7, 8)));
+    assert_eq!(row(Side::New, 20), Some((18, 20)));
+    assert_eq!(row(Side::Old, 18), Some((18, 20)));
+    // In a hunk: not outside.
+    assert_eq!(row(Side::New, 12), None);
+    assert_eq!(row(Side::Old, 4), None);
+    // Regions: hunks, and the gaps around them.
+    assert_eq!(region_of(&hunks, Side::New, 3), Region::Hunk(0));
+    assert_eq!(region_of(&hunks, Side::New, 8), Region::Outside(1));
+    assert_eq!(region_of(&hunks, Side::New, 12), Region::Hunk(1));
+    assert_eq!(region_of(&hunks, Side::New, 30), Region::Outside(2));
+    // A pure insertion at the top: old line 1 is below it.
+    let insert = parse_hunks("@@ -0,0 +1,2 @@\n+a\n+b");
+    assert_eq!(
+        outside_row(&insert, Side::Old, 1).map(|r| r.new_pos),
+        Some(3)
+    );
+    assert_eq!(
+        outside_row(&insert, Side::New, 3).map(|r| r.old_pos),
+        Some(1)
+    );
+}
+
+#[test]
+fn places_outside_lines_and_ranges_within_one_region() {
+    let p = place_in(PATCH_H1, Side::New, 9, Some(6), true).unwrap();
+    assert!(!p.in_diff);
+    assert_eq!(p.line.kind, LineKind::Context);
+    assert_eq!((p.line.old_pos, p.line.new_pos), (8, 9));
+    assert_eq!(p.start.map(|s| (s.old_pos, s.new_pos)), Some((5, 6)));
+    // In a hunk it is the hunk's row, as before.
+    assert!(
+        place_in(PATCH_H1, Side::New, 3, None, true)
+            .unwrap()
+            .in_diff
+    );
+    // Without outside lines, nothing changes.
+    assert_eq!(
+        place_in(PATCH_H1, Side::New, 9, None, false),
+        Err(PlaceError::NotOnSide)
+    );
+    // A hunk's edge into unchanged code, or two hunks.
+    assert_eq!(
+        place_in(PATCH_H1, Side::New, 7, Some(4), true),
+        Err(PlaceError::Crosses {
+            start: Region::Hunk(0),
+            end: Region::Outside(1)
+        })
+    );
+    assert!(matches!(
+        place_in(PATCH_H1, Side::New, 12, Some(3), true),
+        Err(PlaceError::Crosses { .. })
+    ));
+    // Unchanged code above and below a hunk is two stretches.
+    assert!(matches!(
+        place_in(PATCH_H1, Side::New, 20, Some(8), true),
+        Err(PlaceError::Crosses { .. })
+    ));
+}
+
+#[test]
+fn resolves_outside_lines_only_where_the_platform_takes_them() {
+    let current = diff("b1", "h1", vec![changed("src/cache.rs", PATCH_H1)]);
+    let c = comment(8, Side::New);
+    // Not taken: the old rule.
+    assert_eq!(
+        kind(resolve(&c, "h1", &current, None)),
+        PostErrorKind::LineNotInDiff
+    );
+    let placed = resolve_in(&c, "h1", &current, None, OutsideDiff::Native).unwrap();
+    assert!(!placed.in_diff);
+    assert_eq!(
+        (placed.line.old_line(), placed.line.new_line()),
+        (Some(7), Some(8))
+    );
+    // Old side too: an unchanged line has both numbers.
+    let placed = resolve_in(
+        &comment(7, Side::Old),
+        "h1",
+        &current,
+        None,
+        OutsideDiff::Fallback,
+    )
+    .unwrap();
+    assert_eq!(placed.line.new_line(), Some(8));
+    // A range across a hunk's edge is refused with words, not "not in
+    // the diff".
+    let across = NewComment {
+        start_line: Some(4),
+        ..comment(8, Side::New)
+    };
+    let e = resolve_in(&across, "h1", &current, None, OutsideDiff::Native).unwrap_err();
+    assert_eq!(e.kind, PostErrorKind::InvalidInput);
+    assert!(e.message.contains("src/cache.rs:4-8"), "{}", e.message);
+    assert!(e.message.contains("outside the diff"), "{}", e.message);
+    // An added file is all hunk: nothing outside it.
+    let mut added = changed("src/cache.rs", "@@ -0,0 +1,2 @@\n+a\n+b");
+    added.status = FileStatus::Added;
+    let current = diff("b1", "h1", vec![added]);
+    assert_eq!(
+        kind(resolve_in(
+            &comment(5, Side::New),
+            "h1",
+            &current,
+            None,
+            OutsideDiff::Native
+        )),
+        PostErrorKind::LineNotInDiff
+    );
+}
+
+#[test]
+fn an_outside_line_follows_a_push() {
+    let current = diff("b1", "h2", vec![changed("src/cache.rs", PATCH_H2)]);
+    let since = diff("h1", "h2", vec![changed("src/cache.rs", SINCE_H1_H2)]);
+    // New line 8 at h1 is line 10 at h2, still outside the hunks.
+    let placed = resolve_in(
+        &comment(8, Side::New),
+        "h1",
+        &current,
+        Some(&since),
+        OutsideDiff::Native,
+    )
+    .unwrap();
+    assert!(!placed.in_diff);
+    assert_eq!(placed.line.new_line(), Some(10));
+}
+
+#[test]
 fn maps_lines_forward_through_a_diff() {
     // Two lines inserted at the top: everything moves down by two.
     assert_eq!(map_forward(SINCE_H1_H2, 1), Some(3));
@@ -217,9 +352,14 @@ fn resolves_at_an_unchanged_head() {
     );
     let mut binary = current.clone();
     binary.files[0].patch = None;
-    assert_eq!(
-        kind(resolve(&comment(3, Side::New), "h1", &binary, None)),
-        PostErrorKind::LineNotInDiff
+    let err = resolve(&comment(3, Side::New), "h1", &binary, None).unwrap_err();
+    assert_eq!(err.kind, PostErrorKind::LineNotInDiff);
+    // The refusal says what to do instead.
+    assert!(
+        err.message.contains("no text diff to comment on")
+            && err.message.contains("on the review itself"),
+        "{}",
+        err.message
     );
 }
 
@@ -429,7 +569,10 @@ fn serializes_results_for_the_wire() {
     .unwrap();
     assert_eq!((c.start_line, c.head_sha), (Some(2), None));
     assert_eq!(PostErrorKind::HeadMoved.as_str(), "headMoved");
-    let from: PostError = CoreError::GitlabAuth.into();
+    let from: PostError = CoreError::GitlabAuth {
+        host: "gitlab.example.test".into(),
+    }
+    .into();
     assert_eq!(from.kind, PostErrorKind::GitlabAuth);
 }
 
@@ -456,6 +599,10 @@ struct Fake {
     /// diff stays the `h1` one): a push between reading the diff and
     /// posting.
     push_after_files: Mutex<bool>,
+    /// What the fake platform does outside the diff.
+    outside: Mutex<OutsideDiff>,
+    /// The file `file_at` returns; `None` fails the read.
+    file_text: Mutex<Option<String>>,
 }
 
 impl Fake {
@@ -487,7 +634,14 @@ impl ReviewProvider for Fake {
         Ok(self.threads.lock().unwrap().clone())
     }
     fn file_at(&self, _: &ReviewRef, _: &str, _: &str) -> CoreResult<String> {
-        Err(CoreError::NotFound)
+        self.file_text
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or(CoreError::NotFound)
+    }
+    fn outside_diff(&self) -> OutsideDiff {
+        *self.outside.lock().unwrap()
     }
     fn fetch_files(&self, _: &ReviewRef, range: &DiffRange) -> CoreResult<FileDiff> {
         *self.file_reads.lock().unwrap() += 1;
@@ -574,6 +728,8 @@ fn setup() -> (Core, Arc<Fake>, ReviewId) {
         fetches: Mutex::new(0),
         file_reads: Mutex::new(0),
         push_after_files: Mutex::new(false),
+        outside: Mutex::new(OutsideDiff::None),
+        file_text: Mutex::new(None),
     });
     let core = Core::with_providers(Store::in_memory().unwrap(), vec![fake.clone()]);
     assert!(core.refresh().errors.is_empty());
@@ -878,6 +1034,56 @@ fn commentable_lines_come_from_the_stored_heads_diff() {
         core.commentable_lines(id, "src/none.rs"),
         Err(CoreError::InvalidInput(_))
     ));
+}
+
+#[test]
+fn commentable_lines_say_what_the_platform_does_outside_the_diff() {
+    let (core, fake, id) = setup();
+    let lines = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(lines.outside, OutsideDiff::None);
+    *fake.outside.lock().unwrap() = OutsideDiff::Fallback;
+    let lines = core.commentable_lines(id, "src/cache.rs").unwrap();
+    assert_eq!(lines.outside, OutsideDiff::Fallback);
+    let json = serde_json::to_value(&lines).unwrap();
+    assert_eq!(json["outside"], "fallback");
+}
+
+#[test]
+fn a_fallback_post_quotes_the_lines_at_the_head() {
+    let (core, fake, id) = setup();
+    *fake.outside.lock().unwrap() = OutsideDiff::Fallback;
+    let file: String = (1..=20).map(|n| format!("line {n}\n")).collect();
+    *fake.file_text.lock().unwrap() = Some(file);
+    let range = NewComment {
+        start_line: Some(7),
+        ..comment(8, Side::New)
+    };
+    let results = core
+        .post_comments(id, vec![range, comment(30, Side::New)])
+        .unwrap();
+    assert!(results[0].is_posted(), "{results:?}");
+    // Past the end of the file at the head.
+    let PostResult::Failed(e) = &results[1] else {
+        panic!("{results:?}")
+    };
+    assert_eq!(e.kind, PostErrorKind::LineNotInDiff);
+    let posted = fake.posted.lock().unwrap().clone();
+    assert_eq!(posted.len(), 1);
+    assert!(!posted[0].in_diff);
+    assert_eq!(
+        posted[0].excerpt.as_deref(),
+        Some(&["line 7".to_string(), "line 8".to_string()][..])
+    );
+    // An unreadable file still posts, without the quote.
+    *fake.file_text.lock().unwrap() = None;
+    let results = core.post_comments(id, vec![comment(9, Side::New)]).unwrap();
+    assert!(results[0].is_posted());
+    assert_eq!(fake.posted.lock().unwrap()[1].excerpt, None);
+    // A native platform gets no excerpt read at all.
+    *fake.outside.lock().unwrap() = OutsideDiff::Native;
+    *fake.file_text.lock().unwrap() = Some("x\n".into());
+    core.post_comments(id, vec![comment(9, Side::New)]).unwrap();
+    assert_eq!(fake.posted.lock().unwrap()[2].excerpt, None);
 }
 
 #[test]

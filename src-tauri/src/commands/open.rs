@@ -2,9 +2,11 @@
 //! review's repository paths; the core resolves them inside the clone and
 //! never takes an absolute path from the webview.
 
+use std::path::PathBuf;
+
 use tauri::State;
 
-use argus_core::{CloneStatus, LocalFile};
+use argus_core::{CloneStatus, CloneSuggestion, LocalFile, Settings};
 
 use super::{blocking, parse_review_id};
 use crate::error::IpcError;
@@ -67,4 +69,40 @@ pub async fn clone_status(
 pub async fn reveal_clone(state: State<'_, AppState>, review_id: String) -> Result<(), IpcError> {
     let id = parse_review_id(&review_id)?;
     blocking(state, move |core| core.reveal_clone(id)).await
+}
+
+/// A clone of the review's repository found on disk, for a repository with
+/// none set that the user did not refuse; `null` otherwise. Reads the disk,
+/// so it runs off the UI thread like the rest.
+#[tauri::command]
+pub async fn suggest_clone(
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<Option<CloneSuggestion>, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    blocking(state, move |core| core.suggest_clone(id)).await
+}
+
+/// Store `path` as the clone of the review's repository ("Use it"); the
+/// settings afterwards. The core checks the folder is that repository's.
+#[tauri::command]
+pub async fn use_clone_suggestion(
+    state: State<'_, AppState>,
+    review_id: String,
+    path: String,
+) -> Result<Settings, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    let path = PathBuf::from(path);
+    blocking(state, move |core| core.use_clone_suggestion(id, &path)).await
+}
+
+/// Never offer a found clone for the review's repository again ("No
+/// thanks"); the settings afterwards.
+#[tauri::command]
+pub async fn ignore_clone_suggestion(
+    state: State<'_, AppState>,
+    review_id: String,
+) -> Result<Settings, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    blocking(state, move |core| core.ignore_clone_suggestion(id)).await
 }

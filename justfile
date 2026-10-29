@@ -22,11 +22,12 @@ build:
     @just sweep
 
 # Build + launch a debug .app signed with a STABLE self-signed cert (macOS).
-# `just dev` ad-hoc-signs the binary with a fresh identity every rebuild, so the
-# keychain (GitLab token) re-prompts each run and "Always Allow" never sticks.
-# This recipe keeps one signing identity across rebuilds, so a single "Always
-# Allow" persists. Tradeoff: runs a bundle, so there's NO hot reload — use
-# `just dev` for fast iteration and this when the keychain prompt is in your way.
+# `just dev` ad-hoc-signs the binary with a fresh identity every rebuild, so
+# macOS forgets what it allowed the app (privacy prompts such as folder access)
+# each run. This recipe keeps one signing identity across rebuilds, so a grant
+# persists, and runs Argus as a real .app. Argus keeps no token of its own (gh
+# and glab hold the logins), so the GitLab keychain prompt is gone. Tradeoff:
+# runs a bundle, so there's NO hot reload — use `just dev` for fast iteration.
 # One-time setup: create a self-signed *Code Signing* certificate named
 # "Argus Dev" (Keychain Access → Certificate Assistant → Create a Certificate);
 # to use a different name, edit src-tauri/tauri.dev-signed.conf.json.

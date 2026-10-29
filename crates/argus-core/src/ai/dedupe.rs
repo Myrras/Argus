@@ -1758,6 +1758,36 @@ mod tests {
         assert_eq!(judge(&st, None, &f, true), None);
     }
 
+    /// What a review language of Dutch brings: Dutch findings on the
+    /// English threads of the merge request. Same as the other way round:
+    /// the net cannot tell, a marked one is kept and names the thread, and
+    /// a Dutch thread still catches a Dutch repeat (above).
+    #[test]
+    fn a_dutch_finding_on_an_english_comment_is_kept_and_names_it_when_marked() {
+        let st = stored(AUTHOR, &[EMPTY_LIST], true);
+        let mut f = finding(
+            "src/cache.rs",
+            10,
+            "Indexeren van een lege items-lijst crasht",
+            "`items[0]` crasht als `items` leeg is; controleer eerst `is_empty()`.",
+        );
+        assert!(!repeats(&st, None, &f));
+        assert_eq!(judge(&st, None, &f, true), None);
+        f.related = vec![st.thread_id.to_string()];
+        let raised = raised_points(&[(&st, None)], &[]);
+        let mut run = RunOutput {
+            findings: vec![f],
+            ..RunOutput::default()
+        };
+        classify(&mut run, &raised, &diff("src/none.rs", ""));
+        assert_eq!(run.findings[0].repeat, None);
+        assert_eq!(
+            run.findings[0].related_to,
+            vec![RaisedRef::Thread(st.thread_id)]
+        );
+        assert_eq!(run.dropped_duplicates, 0);
+    }
+
     #[test]
     fn a_marked_point_repeats_only_with_shared_prose_and_a_new_part_is_kept() {
         let st = stored(

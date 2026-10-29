@@ -205,6 +205,8 @@ const MIGRATIONS: &[&str] = &[
     // 14: what an AI run was given besides the diff (rules files, review
     // skill, worktree, notes; see `ai::store`).
     crate::ai::store::MIGRATION_14,
+    // 15: the disk cache of file contents and file lists (see `cache`).
+    crate::cache::MIGRATION_15,
 ];
 
 /// One review as Argus tracks it: the platform data of the last fetch plus

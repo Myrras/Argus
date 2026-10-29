@@ -1,20 +1,33 @@
-//! GitLab, over its REST API with a personal access token.
+//! GitLab, through the user's `glab` CLI, the way GitHub goes through `gh`:
+//! Argus keeps no GitLab token. glab authenticates every call with its own
+//! login for the host (`glab auth login --hostname <host>`); Argus never
+//! reads, stores or logs that token, and never puts one in glab's
+//! environment (the user's environment passes through, as for `gh`).
 //!
-//! The token lives in the OS keychain (service `com.argus.app.gitlab`, the
-//! account is the instance host, `http://host` for plain http off this
-//! machine), read on demand, never logged and never
-//! written to settings. A [`TokenSource`] seam lets tests inject one.
+//! Every REST call is `glab api --hostname <host> --include --method <M>
+//! <path>` (a body as JSON on stdin through `--input -`); GraphQL is the
+//! same with `graphql` as the path. No shell: the arguments go to glab as
+//! they are. glab prints the status line, the headers, a blank line and the
+//! body for any status (it exits 1 for a non-2xx, a 304 included, and for a
+//! GraphQL answer with `errors`), so the status line decides, as with
+//! `gh api -i`. Without one glab never got a response (not installed,
+//! offline): its stderr then only classifies the failure.
 //!
-//! The HTTP client is blocking and never follows redirects, as in Podium: a
-//! redirect would carry the `PRIVATE-TOKEN` header to whatever host it names.
-//! Errors are Argus-owned text, never reqwest's (which holds the URL).
+//! What glab prints is GitLab's and glab's text. Only GitLab's own error
+//! message is ever forwarded, and only after [`redact_tokens`]: Argus does
+//! not know glab's token, so it removes anything shaped like one.
 //!
-//! Every GET is conditional: the last `ETag` (or `Last-Modified`) of the URL
-//! goes out as `If-None-Match` (`If-Modified-Since`) and a 304 replays the
-//! cached body and `X-Next-Page`. A 429 stops all calls until GitLab's
-//! `Retry-After` / `RateLimit-Reset`. Requests time out (connect and total).
+//! Every GET is conditional: the last `ETag` (or `Last-Modified`) of the
+//! path goes out as `If-None-Match` (`If-Modified-Since`) through
+//! `--header`, and a 304 replays the cached body and `X-Next-Page`. A 429
+//! stops all calls until GitLab's `Retry-After` / `RateLimit-Reset`. Every
+//! glab call is killed after a timeout. Redirects are glab's to follow.
+//!
+//! glab's logins (`glab auth status`) are the accounts module's to ask
+//! ([`crate::accounts`]); one provider talks to one host.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -24,6 +37,7 @@ use serde::Deserialize;
 
 use super::conditional::{Cached, ConditionalCache};
 use super::github::check_sha;
+use super::http::HttpReply;
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, MyReviewState,
     Note, ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, ReviewVerdict, Reviewer,
@@ -35,12 +49,11 @@ use super::{
 };
 use crate::error::{CoreError, CoreResult};
 use crate::history::ThreadResolution;
+use crate::platform::{run_with_timeout, ExecError};
 use crate::post::{
-    sanitize, DiffLine, LineKind, PlacedComment, PostError, PostErrorKind, PostedComment,
-    PostedNote,
+    sanitize, DiffLine, LineKind, OutsideDiff, PlacedComment, PostError, PostErrorKind,
+    PostedComment, PostedNote,
 };
-
-const KEYCHAIN_SERVICE: &str = "com.argus.app.gitlab";
 
 /// Page size for every list call, and how many pages are followed at most.
 const PER_PAGE: u32 = 100;
@@ -67,236 +80,16 @@ const COMMENTED_FAILURES_KEPT: u32 = 3;
 /// commented on.
 const COMMENTED_DAYS: i64 = 30;
 
-/// Where the GitLab token comes from.
-pub trait TokenSource: Send + Sync {
-    /// The token, or `None` when none is set.
-    fn token(&self) -> Option<String>;
-}
-
-/// A fixed token (tests, or a caller that already holds one).
-pub struct StaticToken(pub String);
-
-impl TokenSource for StaticToken {
-    fn token(&self) -> Option<String> {
-        Some(self.0.clone()).filter(|t| !t.is_empty())
-    }
-}
-
-/// The token in the OS keychain for one GitLab instance.
-pub struct KeychainToken {
-    base_url: String,
-}
-
-impl KeychainToken {
-    /// The keychain entry for the instance at `base_url`. Keyed by host, so a
-    /// token never goes to a different instance after the URL changes; the
-    /// host as the provider talks to it, and apart for plain http (see
-    /// [`TokenKeys`]).
-    pub fn for_base_url(base_url: &str) -> Self {
-        Self {
-            base_url: base_url.to_string(),
-        }
-    }
-}
-
-impl TokenSource for KeychainToken {
-    fn token(&self) -> Option<String> {
-        read_token(&Keychain, &self.base_url)
-    }
-}
-
-/// Where tokens are kept, by account (the instance host): the OS keychain,
-/// or memory in tests.
-trait SecretStore {
-    /// `Ok(None)` when there is no such entry; `Err` when the store could
-    /// not be read (a locked keychain, a denied prompt).
-    fn get(&self, account: &str) -> CoreResult<Option<String>>;
-    fn set(&self, account: &str, secret: &str) -> CoreResult<()>;
-    fn delete(&self, account: &str) -> CoreResult<()>;
-}
-
-/// The OS keychain, service [`KEYCHAIN_SERVICE`].
-struct Keychain;
-
-impl SecretStore for Keychain {
-    fn get(&self, account: &str) -> CoreResult<Option<String>> {
-        match keychain_entry(account)?.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(CoreError::Provider("could not read the keychain".into())),
-        }
-    }
-    fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
-        keychain_entry(account)?
-            .set_password(secret)
-            .map_err(|_| CoreError::Provider("could not update the keychain".into()))
-    }
-    fn delete(&self, account: &str) -> CoreResult<()> {
-        match keychain_entry(account)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(CoreError::Provider("could not update the keychain".into())),
-        }
-    }
-}
-
-fn keychain_entry(host: &str) -> CoreResult<keyring::Entry> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, host)
-        .map_err(|_| CoreError::Provider("could not open the keychain".into()))
-}
-
-/// The keychain accounts of the instance at `base_url`.
-struct TokenKeys {
-    /// Where its token is: the host of its normalized URL
-    /// ([`normalize_base_url`]: lowercased, default port dropped), as the
-    /// provider talks to it, so every spelling of one instance finds one
-    /// entry; `http://host` for plain http off this machine
-    /// ([`is_insecure`]), so a token stored for https never goes out
-    /// unencrypted because the URL changed to http.
-    key: String,
-    /// Where a token for it may still be, read once and moved to `key`
-    /// (see [`read_token`]): the raw URL's host Argus used before, and for
-    /// https the same instance's plain-http token (going to https is
-    /// safe). Never any for plain http (see [`migrate_plain_http_token`]).
-    fallbacks: Vec<String>,
-}
-
-fn token_keys(base_url: &str) -> TokenKeys {
-    let raw = url_host(base_url.trim()).to_string();
-    let Some(base) = normalize_base_url(base_url) else {
-        return TokenKeys {
-            key: raw,
-            fallbacks: Vec::new(),
-        };
-    };
-    let host = url_host(&base).to_string();
-    if is_insecure(&base) {
-        return TokenKeys {
-            key: format!("http://{host}"),
-            fallbacks: Vec::new(),
-        };
-    }
-    let mut fallbacks = Vec::new();
-    if raw != host && !raw.is_empty() {
-        fallbacks.push(raw);
-    }
-    fallbacks.push(format!("http://{host}"));
-    TokenKeys {
-        key: host,
-        fallbacks,
-    }
-}
-
-fn nonblank(token: Option<String>) -> Option<String> {
-    token.filter(|t| !t.is_empty())
-}
-
-/// What a read of `account` finds, a keychain that cannot be read taken as
-/// nothing there: right for using a token (no token is what the user then
-/// sees), never for deciding a move happened.
-fn found(store: &dyn SecretStore, account: &str) -> Option<String> {
-    nonblank(store.get(account).ok().flatten())
-}
-
-/// Delete an entry a token was moved from or that a save replaces. A
-/// failure is logged, not returned: the token itself is where it belongs,
-/// and the leftover only matters as a fallback.
-fn delete_leftover(store: &dyn SecretStore, account: &str) {
-    if store.delete(account).is_err() {
-        tracing::warn!("could not remove an old GitLab token entry from the keychain");
-    }
-}
-
-/// The token for `base_url`; one still under a fallback account is moved to
-/// the current one on the way.
-fn read_token(store: &dyn SecretStore, base_url: &str) -> Option<String> {
-    let TokenKeys { key, fallbacks } = token_keys(base_url);
-    if let Some(token) = found(store, &key) {
-        return Some(token);
-    }
-    for old in fallbacks {
-        let Some(token) = found(store, &old) else {
-            continue;
-        };
-        // The old entry goes only once the new one holds the token.
-        if store.set(&key, &token).is_ok() {
-            delete_leftover(store, &old);
-        }
-        return Some(token);
-    }
-    None
-}
-
-/// Store `token` for `base_url`; a blank one deletes it. The fallback
-/// entries go either way: they would otherwise come back as the fallback.
-/// Only storing (or deleting) the token itself can fail the save.
-fn write_token(store: &dyn SecretStore, base_url: &str, token: &str) -> CoreResult<()> {
-    let TokenKeys { key, fallbacks } = token_keys(base_url);
-    let token = token.trim();
-    if token.is_empty() {
-        store.delete(&key)?;
-    } else {
-        store.set(&key, token)?;
-    }
-    for old in fallbacks {
-        delete_leftover(store, &old);
-    }
-    Ok(())
-}
-
-/// Once, on the first start of a version that keys plain-http tokens apart
-/// (see [`TokenKeys::key`]): a plain-http instance configured before kept
-/// its token under its host. The user set it up that way on purpose and it
-/// works, so the token moves to the instance's http account instead of
-/// being asked for again. Anything else is left alone: an https instance,
-/// or one that already has an http token (moved before).
-///
-/// `Ok` when there is nothing (left) to move, so the caller records it done
-/// and never runs it again: a later switch from https to http must find no
-/// token. `Err` when the keychain could not be read or written (anything
-/// but "no such entry"): nothing is recorded and the next start tries
-/// again. The host entry goes only once the http one holds the token.
-fn migrate_plain_http_token(store: &dyn SecretStore, base_url: &str) -> CoreResult<()> {
-    if !is_insecure(base_url) {
-        return Ok(());
-    }
-    let Some(base) = normalize_base_url(base_url) else {
-        return Ok(());
-    };
-    let key = token_keys(&base).key;
-    if nonblank(store.get(&key)?).is_some() {
-        return Ok(());
-    }
-    let host = url_host(&base).to_string();
-    let raw = url_host(base_url.trim()).to_string();
-    let mut old = vec![host];
-    if !raw.is_empty() && !old.contains(&raw) {
-        old.push(raw);
-    }
-    for account in &old {
-        if let Some(token) = nonblank(store.get(account)?) {
-            store.set(&key, &token)?;
-            delete_leftover(store, account);
-            return Ok(());
-        }
-    }
-    Ok(())
-}
-
-/// [`migrate_plain_http_token`] on the OS keychain. Touches the keychain
-/// only for a plain-http instance URL.
-pub fn gitlab_migrate_plain_http_token(base_url: &str) -> CoreResult<()> {
-    migrate_plain_http_token(&Keychain, base_url)
-}
-
-/// Store the token for the instance at `base_url`; a blank token deletes it.
-pub fn gitlab_token_set(base_url: &str, token: &str) -> CoreResult<()> {
-    write_token(&Keychain, base_url, token)
-}
-
-/// Whether a token is stored for `base_url` (the token never leaves here).
-pub fn gitlab_token_present(base_url: &str) -> bool {
-    KeychainToken::for_base_url(base_url).token().is_some()
-}
+/// How long one glab call may run before it is killed: one request, start
+/// to end of body (glab itself has no overall timeout).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// The waits before each try of a request whose connection could not be
+/// made (VPN or Wi-Fi coming back after sleep), as Podium retries.
+const CONNECT_RETRIES: [Duration; 3] = [
+    Duration::ZERO,
+    Duration::from_millis(500),
+    Duration::from_millis(1500),
+];
 
 /// `https://host[:port]/path` → `host[:port]`.
 pub fn url_host(url: &str) -> &str {
@@ -305,17 +98,27 @@ pub fn url_host(url: &str) -> &str {
 }
 
 /// Trim, parse and drop a trailing slash; `None` when not an http(s) URL
-/// of an instance. Plain http is allowed for any host (a self-hosted GitLab
-/// behind a VPN has no TLS): the token then travels unencrypted, which
-/// [`is_insecure`] reports so the UI can say so.
+/// of an instance. A bare host (`gitlab.example.com`, as glab names hosts)
+/// is taken as `https://` that host. The URL only names the instance: its
+/// host is what glab is asked for (`--hostname`), its scheme and path are
+/// for web links. How glab talks to the host (https or http, its API host)
+/// is glab's own login setting.
 ///
-/// The host is the parsed one, what a request really connects to: in
-/// `http://127.0.0.1:80@gitlab.example.test` the part before `@` is
-/// userinfo, not the host. Userinfo, a query or a fragment have no place in
-/// an instance URL and are refused; the URL comes back in its parsed form,
-/// so [`url_host`] reads the same host.
+/// The host is the parsed one: in `http://127.0.0.1:80@gitlab.example.test`
+/// the part before `@` is userinfo, not the host. Userinfo, a query or a
+/// fragment have no place in an instance URL and are refused; the URL comes
+/// back in its parsed form, so [`url_host`] reads the same host.
 pub fn normalize_base_url(url: &str) -> Option<String> {
-    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let with_scheme = if url.contains("://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    };
+    let parsed = url::Url::parse(&with_scheme).ok()?;
     if !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()
@@ -328,47 +131,194 @@ pub fn normalize_base_url(url: &str) -> Option<String> {
         .then(|| parsed.as_str().trim_end_matches('/').to_string())
 }
 
-/// Whether requests to `url` send the token unencrypted: plain http to a
-/// host that is not this machine. Loopback http (`localhost`, `127.0.0.1`,
-/// `[::1]`) never leaves the machine. `false` for an unusable URL.
-pub fn is_insecure(url: &str) -> bool {
-    let Some(base) = normalize_base_url(url) else {
-        return false;
+/// Token prefixes GitLab gives its tokens (personal, OAuth app, deploy,
+/// runner, CI build, project/group, feed, incoming mail, agent, SCIM,
+/// feature flag, workspace, test). glab's OAuth login holds a plain
+/// 64-hex token instead, which [`redact_tokens`] catches by its shape.
+const TOKEN_PREFIXES: &[&str] = &[
+    "glpat-",
+    "gloas-",
+    "gldt-",
+    "glrt-",
+    "glrtr-",
+    "glcbt-",
+    "glptt-",
+    "glft-",
+    "glimt-",
+    "glagent-",
+    "glsoat-",
+    "glffct-",
+    "glwt-",
+    "gltst-",
+    "glsa-",
+    "GR1348941",
+];
+
+/// Words after which the next run of token characters (past any spaces) is
+/// a credential.
+const TOKEN_CONTEXTS: &[&str] = &[
+    "bearer ",
+    "private-token:",
+    "job-token:",
+    "private_token=",
+    "access_token=",
+    "token=",
+];
+
+/// A character a token is made of (GitLab's tokens are URL-safe base64 or
+/// hex, the routable ones with dots).
+fn token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')
+}
+
+/// `text` with everything that looks like a GitLab credential replaced by
+/// `[redacted]`: a run of token characters that starts with one of
+/// [`TOKEN_PREFIXES`], follows one of [`TOKEN_CONTEXTS`] (any case), or is
+/// 64 or more hex digits (an OAuth token; a commit sha is 40). Argus never
+/// knows glab's token, so it cannot redact it by value as it does gh's: any
+/// text of GitLab's or glab's goes through this before it can become a
+/// message.
+pub(crate) fn redact_tokens(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let starts_with = |i: usize, word: &str, folded: bool| {
+        let src = if folded { &lower } else { &chars };
+        let w: Vec<char> = word.chars().collect();
+        i + w.len() <= src.len() && src[i..i + w.len()] == w[..]
     };
-    let Ok(parsed) = reqwest::Url::parse(&base) else {
-        return false;
-    };
-    parsed.scheme() == "http" && !parsed.host_str().is_some_and(is_local)
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // A credential after a context word: keep the word, drop the run.
+        if let Some(word) = TOKEN_CONTEXTS.iter().find(|w| starts_with(i, w, true)) {
+            let n = word.chars().count();
+            out.extend(&chars[i..i + n]);
+            i += n;
+            while i < chars.len() && chars[i] == ' ' {
+                out.push(' ');
+                i += 1;
+            }
+            let end = (i..chars.len())
+                .find(|&j| !token_char(chars[j]))
+                .unwrap_or(chars.len());
+            if end > i {
+                out.push_str("[redacted]");
+                i = end;
+            }
+            continue;
+        }
+        if !token_char(chars[i]) {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let end = (i..chars.len())
+            .find(|&j| !token_char(chars[j]))
+            .unwrap_or(chars.len());
+        let run: String = chars[i..end].iter().collect();
+        let hex = run.len() >= 64 && run.chars().all(|c| c.is_ascii_hexdigit());
+        // A prefix anywhere in the run (`x=glpat-…` splits at `=`, but
+        // `ab-glpat-…` does not): from there on it is the token.
+        let at = (i..end).find(|&j| TOKEN_PREFIXES.iter().any(|p| starts_with(j, p, false)));
+        match at {
+            _ if hex => out.push_str("[redacted]"),
+            Some(j) => {
+                out.extend(&chars[i..j]);
+                out.push_str("[redacted]");
+            }
+            None => out.push_str(&run),
+        }
+        i = end;
+    }
+    out
 }
 
-/// A parsed host (no port; IPv6 in brackets) names this machine.
-fn is_local(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "[::1]"
+/// GitLab's or glab's text made fit for a message: tokens redacted, then
+/// one line, capped ([`sanitize`]).
+fn clean(text: &str) -> String {
+    sanitize(&redact_tokens(text), &[])
 }
 
-/// The longest one request may take, start to end of body.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// The longest a connection may take to open (a VPN that is down).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn build_client(timeout: Duration) -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .connect_timeout(CONNECT_TIMEOUT.min(timeout))
-        .build()
-        // Same failure mode as `Client::new()`: no TLS backend at all.
-        .expect("GitLab HTTP client")
+/// Why a glab call printed no response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Failure {
+    /// glab is not installed (or not where Argus looked).
+    Missing,
+    /// glab could not be started.
+    Spawn,
+    /// Killed after the timeout: it may have reached GitLab.
+    TimedOut,
+    /// No connection could be made (`dial tcp …`): nothing was sent.
+    NotConnected,
+    /// The connection broke after it was made (TLS, a reset): a write may
+    /// have gone through.
+    Broken,
+    /// glab has no usable login for the host.
+    Auth,
+    /// Anything else glab said.
+    Other,
 }
 
-/// GitLab for the token's owner on one instance.
+impl Failure {
+    /// Classify glab's stderr (never forwarded).
+    fn from_stderr(stderr: &[u8]) -> Self {
+        let text = String::from_utf8_lossy(stderr).to_lowercase();
+        if text.contains("has not been authenticated")
+            || text.contains("auth login")
+            || text.contains("http 401")
+            || text.contains("401 unauthorized")
+        {
+            Failure::Auth
+        } else if text.contains("dial tcp") || text.contains("no such host") {
+            // Go's dialer: the request never left this machine.
+            Failure::NotConnected
+        } else if text.contains("connection reset")
+            || text.contains("eof")
+            || text.contains("tls")
+            || text.contains("timeout")
+            || text.contains("x509")
+        {
+            Failure::Broken
+        } else {
+            Failure::Other
+        }
+    }
+
+    fn into_error(self, host: &str) -> CoreError {
+        match self {
+            Failure::Missing => CoreError::GlabMissing,
+            Failure::Spawn => CoreError::Provider("could not run glab".into()),
+            Failure::TimedOut => CoreError::Provider("could not reach GitLab (timed out)".into()),
+            Failure::NotConnected | Failure::Broken => {
+                CoreError::Provider("could not reach GitLab (connection failed)".into())
+            }
+            Failure::Auth => CoreError::GitlabAuth {
+                host: host.to_string(),
+            },
+            Failure::Other => CoreError::Provider("glab could not reach GitLab".into()),
+        }
+    }
+}
+
+impl From<ExecError> for Failure {
+    fn from(e: ExecError) -> Self {
+        match e {
+            ExecError::Missing => Failure::Missing,
+            ExecError::Failed => Failure::Spawn,
+            ExecError::TimedOut => Failure::TimedOut,
+        }
+    }
+}
+
+/// GitLab for glab's login on one instance.
 pub struct GitlabProvider {
+    /// Program to run; `glab` normally, a fake script in tests.
+    glab: String,
     base: String,
+    /// What glab is asked for (`--hostname`).
     host: String,
-    tokens: Box<dyn TokenSource>,
+    timeout: Duration,
     me: Mutex<Option<GlUser>>,
-    /// Per provider (it keeps its connections alive between polls).
-    client: reqwest::blocking::Client,
     /// Conditional-request cache of GETs, keyed by path under `/api/v4`.
     cache: ConditionalCache,
     limit: Backoff,
@@ -384,25 +334,40 @@ pub struct GitlabProvider {
     /// The waits before each `/reviewers` read after adding the user as a
     /// reviewer ([`REVIEWER_RECHECK`]).
     reviewer_recheck: Vec<Duration>,
+    /// The waits before each try of a request that could not connect
+    /// ([`CONNECT_RETRIES`]).
+    connect_retries: Vec<Duration>,
 }
 
 impl GitlabProvider {
-    /// `base_url` is the instance root (`https://gitlab.example.com`). An
-    /// empty or non-http(s) URL is [`CoreError::GitlabNotConfigured`].
-    pub fn new(base_url: &str, tokens: impl TokenSource + 'static) -> CoreResult<Self> {
+    /// `base_url` names the instance (`https://gitlab.example.com`, or just
+    /// its host). An empty or unusable URL is
+    /// [`CoreError::GitlabNotConfigured`].
+    pub fn new(base_url: &str) -> CoreResult<Self> {
+        // Checked first: an unusable URL needs no login shell to find glab.
+        normalize_base_url(base_url).ok_or(CoreError::GitlabNotConfigured)?;
+        // Not a bare "glab": an app started from Finder has no Homebrew on
+        // its PATH. Not installed, the bare name fails to spawn, which
+        // reports as "glab not found".
+        Self::with_binary(crate::platform::glab_binary().unwrap_or("glab"), base_url)
+    }
+
+    /// Like [`new`](Self::new) with an explicit `glab` program (tests).
+    pub fn with_binary(glab: impl Into<String>, base_url: &str) -> CoreResult<Self> {
         let base = normalize_base_url(base_url).ok_or(CoreError::GitlabNotConfigured)?;
         Ok(Self {
+            glab: glab.into(),
             host: url_host(&base).to_string(),
             base,
-            tokens: Box::new(tokens),
+            timeout: REQUEST_TIMEOUT,
             me: Mutex::new(None),
-            client: build_client(REQUEST_TIMEOUT),
             cache: ConditionalCache::default(),
             limit: Backoff::default(),
             done: Mutex::new(HashMap::new()),
             final_recheck: FINAL_RECHECK,
             commented: Mutex::new(HashMap::new()),
             reviewer_recheck: REVIEWER_RECHECK.to_vec(),
+            connect_retries: CONNECT_RETRIES.to_vec(),
         })
     }
 
@@ -420,9 +385,16 @@ impl GitlabProvider {
         self
     }
 
-    /// Give up on a request after `timeout` instead of the default 30 s.
+    /// Wait `delays` before each try of a request that could not connect
+    /// instead of [`CONNECT_RETRIES`] (tests: no sleeps).
+    pub fn with_connect_retries(mut self, delays: &[Duration]) -> Self {
+        self.connect_retries = delays.to_vec();
+        self
+    }
+
+    /// Kill a glab call after `timeout` instead of the default 30 s.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.client = build_client(timeout);
+        self.timeout = timeout;
         self
     }
 
@@ -430,39 +402,87 @@ impl GitlabProvider {
         &self.base
     }
 
-    /// Send a GET (with `validator` as a conditional header), retrying
-    /// connection-level failures (VPN or Wi-Fi coming back after sleep)
-    /// twice with a short backoff, as Podium does. A response with any
-    /// status is never retried, and neither is a timeout: a server that hung
-    /// for the whole timeout would only hang again.
-    fn send(
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.glab);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Not a repository: glab would otherwise read the git remotes
+            // of wherever Argus runs (`--hostname` decides the host anyway).
+            .current_dir(std::env::temp_dir())
+            .env("NO_COLOR", "1")
+            .env("GLAB_NO_PROMPT", "true")
+            .env("GLAB_CHECK_UPDATE", "false")
+            // A usage event per poll call is noise on the user's instance.
+            .env("GLAB_SEND_TELEMETRY", "false")
+            // glab's HTTP debugging prints the request headers, its
+            // `PRIVATE-TOKEN` among them, on stderr.
+            .env_remove("GLAB_DEBUG_HTTP")
+            .env_remove("DEBUG");
+        #[cfg(windows)]
+        {
+            // No console window flashing up for every poll.
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        cmd
+    }
+
+    /// One `glab api` call: `method` on `endpoint` (a path under `/api/v4`,
+    /// or `graphql`), with `header` and `body` (JSON, on stdin), killed after
+    /// the timeout. The response, whatever its status, or why there is none.
+    fn call(
         &self,
-        url: &str,
-        token: &str,
-        validator: Option<(&str, &str)>,
-    ) -> CoreResult<reqwest::blocking::Response> {
-        let mut last = "connection failed";
-        for delay_ms in [0, 500, 1500] {
-            std::thread::sleep(Duration::from_millis(delay_ms));
-            let mut req = self.client.get(url).header("PRIVATE-TOKEN", token);
-            if let Some((name, value)) = validator {
-                req = req.header(name, value);
-            }
-            match req.send() {
-                Ok(r) => return Ok(r),
-                Err(e) => {
-                    tracing::debug!("GitLab request failed: {e}");
-                    if e.is_timeout() {
-                        last = "timed out";
-                        break;
-                    }
-                    last = "connection failed";
+        method: &str,
+        endpoint: &str,
+        header: Option<&str>,
+        body: Option<&serde_json::Value>,
+    ) -> Result<HttpReply, Failure> {
+        let mut args = vec![
+            "api",
+            "--hostname",
+            &self.host,
+            "--include",
+            "--method",
+            method,
+        ];
+        if let Some(h) = header {
+            args.extend(["--header", h]);
+        }
+        args.push(endpoint);
+        if body.is_some() {
+            args.extend(["--input", "-"]);
+        }
+        let mut cmd = self.command();
+        cmd.args(&args);
+        let input = body.map(|b| b.to_string().into_bytes());
+        match run_with_timeout(&mut cmd, input, self.timeout) {
+            Err(e) => Err(Failure::from(e)),
+            Ok(output) => match HttpReply::parse(&String::from_utf8_lossy(&output.stdout)) {
+                Some(reply) => Ok(reply),
+                None => {
+                    tracing::debug!("glab api {method} printed no response");
+                    Err(Failure::from_stderr(&output.stderr))
                 }
+            },
+        }
+    }
+
+    /// A GET, tried again (after a short wait) while the connection could
+    /// not be made. A response with any status is never retried, and
+    /// neither is a timeout: a server that hung for the whole timeout would
+    /// only hang again.
+    fn send(&self, path: &str, validator: Option<&str>) -> CoreResult<HttpReply> {
+        let mut last = Failure::NotConnected;
+        for delay in &self.connect_retries {
+            std::thread::sleep(*delay);
+            match self.call("GET", path, validator, None) {
+                Ok(reply) => return Ok(reply),
+                Err(f @ (Failure::NotConnected | Failure::Broken)) => last = f,
+                Err(f) => return Err(f.into_error(&self.host)),
             }
         }
-        Err(CoreError::Provider(format!(
-            "could not reach GitLab ({last})"
-        )))
+        Err(last.into_error(&self.host))
     }
 
     /// One conditional GET of `path` (under `/api/v4`): the body (from the
@@ -470,58 +490,51 @@ impl GitlabProvider {
     /// one.
     fn get(&self, path: &str) -> CoreResult<(String, Option<u32>)> {
         self.limit.check(ProviderId::Gitlab)?;
-        let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
         let cached = self.cache.get(path);
-        let response = self.send(
-            &format!("{}/api/v4{path}", self.base),
-            &token,
-            cached.as_deref().and_then(Cached::validator),
-        )?;
-        let header = |name: &str| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.trim().to_string())
-        };
+        let validator = cached
+            .as_deref()
+            .and_then(Cached::validator)
+            .map(|(name, value)| format!("{name}: {value}"));
+        let reply = self.send(path, validator.as_deref())?;
         let parse_next = |v: Option<&str>| v.and_then(|v| v.trim().parse().ok());
-        match response.status().as_u16() {
-            200 => {
-                let next_raw = header("x-next-page").filter(|v| !v.is_empty());
-                let etag = header("etag");
-                let last_modified = header("last-modified");
-                let body = response
-                    .text()
-                    .map_err(|_| CoreError::Provider("could not read GitLab's response".into()))?;
+        match reply.status {
+            200..=299 => {
+                let next_raw = reply.header("x-next-page").filter(|v| !v.is_empty());
                 let next = parse_next(next_raw.as_deref());
                 self.cache.put(
                     path,
                     Cached {
-                        etag,
-                        last_modified,
-                        body: body.clone(),
+                        etag: reply.header("etag"),
+                        last_modified: reply.header("last-modified"),
+                        body: reply.body.clone(),
                         next: next_raw,
                     },
                 );
-                Ok((body, next))
+                Ok((reply.body, next))
             }
             // Unchanged: the cached response stands.
             304 => cached
                 .map(|c| (c.body.clone(), parse_next(c.next.as_deref())))
                 .ok_or_else(unexpected),
-            429 => Err(self
-                .limit
-                .hit(ProviderId::Gitlab, reset_at(header, Utc::now()))),
-            300..=399 => Err(CoreError::Provider(
-                "GitLab redirected the request; check the URL in Settings (https, host and path)"
-                    .into(),
+            429 => Err(self.limit.hit(
+                ProviderId::Gitlab,
+                reset_at(|h| reply.header(h), Utc::now()),
             )),
-            401 | 403 => Err(CoreError::GitlabAuth),
+            // glab follows redirects; one it hands back went nowhere.
+            300..=399 => Err(CoreError::Provider(
+                "GitLab redirected the request; check the GitLab URL in Settings".into(),
+            )),
+            401 | 403 => Err(CoreError::GitlabAuth {
+                host: self.host.clone(),
+            }),
             404 => Err(CoreError::NotFound),
             422 => Err(super::unprocessable("GitLab")),
-            _ => Err(CoreError::Provider(
-                "GitLab could not fetch the merge request".into(),
-            )),
+            status => {
+                tracing::debug!("glab api answered HTTP {status}");
+                Err(CoreError::Provider(
+                    "GitLab could not fetch the merge request".into(),
+                ))
+            }
         }
     }
 
@@ -638,7 +651,7 @@ impl GitlabProvider {
             // `/diffs` (15.7+) pages; an older instance only has the
             // single-shot `/changes`, whose `overflow` flags a cut list and
             // whose `diff_refs` name the version it is of.
-            let (diffs, truncated, refs) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
+            let (mut diffs, truncated, refs) = match self.get_all::<GlDiff>(&format!("{p}/diffs")) {
                 Ok(d) => {
                     let full = d.len() >= (PER_PAGE * MAX_PAGES) as usize;
                     (d, full, None)
@@ -649,6 +662,7 @@ impl GitlabProvider {
                 }
                 Err(e) => return Err(e),
             };
+            self.fill_collapsed(&p, &mut diffs);
             let after = latest()?;
             if before != after {
                 continue;
@@ -682,6 +696,53 @@ impl GitlabProvider {
             "the merge request got new commits while loading its diff; try again".into(),
         ))
     }
+
+    /// Fill in the diffs GitLab collapsed, reading them straight from
+    /// Gitaly (`access_raw_diffs`).
+    ///
+    /// Past its size limits GitLab sends a file's entry without its diff;
+    /// only since 18.4 does it say so (`collapsed`), and the web UI fetches
+    /// such a file on demand. Argus cannot leave it at that: the code view
+    /// still shows the file (it reads both sides whole), but a comment can
+    /// only be placed on a patch, so every comment on that file would be
+    /// refused as "no text diff". The raw read has no collapse limit.
+    ///
+    /// One extra read, and only when an entry came back without a diff; a
+    /// failure leaves the entries as they were (the file then reads as too
+    /// large, as before).
+    fn fill_collapsed(&self, mr_path: &str, diffs: &mut [GlDiff]) {
+        if !diffs.iter().any(needs_raw_diff) {
+            return;
+        }
+        let raw: GlChanges =
+            match self.get_json(&format!("{mr_path}/changes?access_raw_diffs=true")) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!("reading the raw GitLab diffs failed: {e}");
+                    return;
+                }
+            };
+        let mut by_path: HashMap<(String, String), String> = raw
+            .changes
+            .into_iter()
+            .map(|d| ((d.old_path, d.new_path), d.diff))
+            .collect();
+        for d in diffs.iter_mut().filter(|d| needs_raw_diff(d)) {
+            let key = (d.old_path.clone(), d.new_path.clone());
+            if let Some(diff) = by_path.remove(&key).filter(|s| !s.is_empty()) {
+                d.diff = diff;
+            }
+        }
+    }
+}
+
+/// An entry GitLab sent without its diff, which a raw read may still have.
+/// A file it flagged as too large to send at all, and a binary one, have no
+/// text diff anywhere; a rename or mode change without content changes has
+/// none either, but nothing in the entry tells it apart from a collapsed
+/// one, so it costs the one raw read as well.
+fn needs_raw_diff(d: &GlDiff) -> bool {
+    d.diff.is_empty() && !d.too_large && !looks_binary(&d.new_path)
 }
 
 fn unexpected() -> CoreError {
@@ -844,7 +905,7 @@ impl ReviewProvider for GitlabProvider {
         let approved_by: Option<Vec<String>> = match approvals {
             Ok(a) => Some(a.approved_by.into_iter().map(|u| u.user.username).collect()),
             // 403: approvals are not in this tier (the MR itself was read).
-            Err(CoreError::NotFound | CoreError::GitlabAuth) => None,
+            Err(CoreError::NotFound | CoreError::GitlabAuth { .. }) => None,
             Err(e) => return Err(e),
         };
         let mut detail = assemble_detail(
@@ -938,6 +999,15 @@ impl ReviewProvider for GitlabProvider {
     }
     // --- M4 writes (helpers in the "M4: writes" section at the end) ---
 
+    /// GitLab takes a text position on any unchanged line, also outside
+    /// the diff's hunks: given both `old_line` and `new_line`, it unfolds
+    /// the diff around the position to find its line code
+    /// (`Gitlab::Diff::Position#diff_file` → `unfold_diff_lines`), as its
+    /// own UI does for a comment on expanded lines.
+    fn outside_diff(&self) -> OutsideDiff {
+        OutsideDiff::Native
+    }
+
     /// The position comes from the latest diff version, read right before
     /// posting: GitLab anchors a comment to a version's three shas.
     fn post_comment(&self, r: &ReviewRef, c: &PlacedComment) -> PostResultOf<PostedComment> {
@@ -1016,7 +1086,7 @@ impl ReviewProvider for GitlabProvider {
             ));
         }
         let _: serde_json::Value = self.write_json(
-            reqwest::Method::PUT,
+            "PUT",
             &format!(
                 "{}/discussions/{}",
                 Self::mr_path(r),
@@ -1381,6 +1451,7 @@ fn position_anchor(p: &GlPosition) -> Anchor {
         head_sha: p.head_sha.clone().unwrap_or_default(),
         diff_hunk: None,
         current_line: None,
+        outside_diff: false,
     }
 }
 
@@ -1614,14 +1685,6 @@ enum GlWrite {
     Reviewer,
 }
 
-/// Which API a write goes to: REST takes the token as `PRIVATE-TOKEN`,
-/// GraphQL as a bearer token (the header GitLab's GraphQL docs give).
-#[derive(Clone, Copy)]
-enum GlApi {
-    Rest,
-    Graphql,
-}
-
 impl GitlabProvider {
     /// POST `body` (JSON) to `path` under `/api/v4`; the response parsed as
     /// `T`. Retried only when the connection could not be made: a request
@@ -1632,95 +1695,74 @@ impl GitlabProvider {
         body: Option<&serde_json::Value>,
         what: GlWrite,
     ) -> PostResultOf<T> {
-        self.write_json(reqwest::Method::POST, path, body, what)
+        self.write_json("POST", path, body, what)
     }
 
     /// [`post_json`](Self::post_json) with any method (`PUT` to resolve).
     fn write_json<T: DeserializeOwned>(
         &self,
-        method: reqwest::Method,
+        method: &str,
         path: &str,
         body: Option<&serde_json::Value>,
         what: GlWrite,
     ) -> PostResultOf<T> {
-        let url = format!("{}/api/v4{path}", self.base);
-        self.write_to(method, &url, GlApi::Rest, body, what)
+        self.write_to(method, path, body, what)
     }
 
-    /// One GraphQL mutation (`query` with `variables`) at `/api/graphql`:
-    /// sent like any other write, GitLab's answer parsed as `T` (its
-    /// `errors` are the caller's to read: GraphQL fails with a 200).
+    /// One GraphQL mutation (`query` with `variables`) through `glab api
+    /// graphql`: sent like any other write, GitLab's answer parsed as `T`
+    /// (its `errors` are the caller's to read: GraphQL fails with a 200,
+    /// which glab prints and exits 1 on).
     fn graphql<T: DeserializeOwned>(
         &self,
         query: &str,
         variables: serde_json::Value,
         what: GlWrite,
     ) -> PostResultOf<GqlReply<T>> {
-        let url = format!("{}/api/graphql", self.base);
         let body = serde_json::json!({ "query": query, "variables": variables });
-        self.write_to(
-            reqwest::Method::POST,
-            &url,
-            GlApi::Graphql,
-            Some(&body),
-            what,
-        )
+        self.write_to("POST", "graphql", Some(&body), what)
     }
 
-    /// The write itself: `body` (JSON) sent to `url`, retried only when the
-    /// connection could not be made.
+    /// The write itself: `body` (JSON) sent with `method` to `endpoint`,
+    /// tried again only when the connection could not be made (glab's
+    /// `dial tcp` failure: nothing left this machine).
     fn write_to<T: DeserializeOwned>(
         &self,
-        method: reqwest::Method,
-        url: &str,
-        api: GlApi,
+        method: &str,
+        endpoint: &str,
         body: Option<&serde_json::Value>,
         what: GlWrite,
     ) -> PostResultOf<T> {
-        let token = self.tokens.token().ok_or(CoreError::GitlabNotConfigured)?;
-        let payload = body.map(|b| b.to_string()).unwrap_or_default();
-        let mut response = None;
-        for delay_ms in [0, 500, 1500] {
-            std::thread::sleep(Duration::from_millis(delay_ms));
-            let req = self.client.request(method.clone(), url);
-            let mut req = match api {
-                GlApi::Rest => req.header("PRIVATE-TOKEN", &token),
-                GlApi::Graphql => req.bearer_auth(&token),
-            };
-            if body.is_some() {
-                req = req
-                    .header("Content-Type", "application/json")
-                    .body(payload.clone());
-            }
-            match req.send() {
+        let mut reply = None;
+        for delay in &self.connect_retries {
+            std::thread::sleep(*delay);
+            match self.call(method, endpoint, None, body) {
                 Ok(r) => {
-                    response = Some(r);
+                    reply = Some(r);
                     break;
                 }
-                Err(e) if e.is_connect() => {
-                    tracing::debug!("GitLab write could not connect: {e}");
+                Err(Failure::NotConnected) => {
+                    tracing::debug!("a GitLab write could not connect");
                 }
-                Err(e) => {
-                    tracing::debug!("GitLab write failed: {e}");
+                // It may have reached GitLab before it hung or broke.
+                Err(Failure::TimedOut | Failure::Broken) => {
                     return Err(PostError::new(
                         PostErrorKind::Provider,
                         "GitLab did not answer; refresh to see whether it went through",
                     ));
                 }
+                Err(f) => return Err(f.into_error(&self.host).into()),
             }
         }
-        let Some(response) = response else {
-            return Err(
-                CoreError::Provider("could not reach GitLab (connection failed)".into()).into(),
-            );
+        let Some(reply) = reply else {
+            return Err(Failure::NotConnected.into_error(&self.host).into());
         };
-        let status = response.status().as_u16();
-        let text = response.text().unwrap_or_default();
-        if (200..300).contains(&status) {
-            return serde_json::from_str(&text).map_err(|_| unexpected().into());
+        if (200..300).contains(&reply.status) {
+            return serde_json::from_str(&reply.body).map_err(|_| unexpected().into());
         }
-        let reason = gitlab_error_message(&text).map(|m| sanitize(&m, &[&token]));
-        Err(write_error(status, reason, what))
+        tracing::debug!("glab api {method} answered HTTP {}", reply.status);
+        let reason = gitlab_error_message(&reply.body).map(|m| clean(&m));
+        Err(write_error(reply.status, reason, what, &self.host))
     }
 
     /// The web URL of note `id` of the MR.
@@ -1735,8 +1777,8 @@ impl GitlabProvider {
 }
 
 /// A failed write as a [`PostError`]; `reason` is GitLab's own message
-/// (sanitized), forwarded so the user sees why.
-fn write_error(status: u16, reason: Option<String>, what: GlWrite) -> PostError {
+/// (tokens redacted, see [`clean`]), forwarded so the user sees why.
+fn write_error(status: u16, reason: Option<String>, what: GlWrite, host: &str) -> PostError {
     let with = |fallback: &str| {
         format!(
             "GitLab: {}",
@@ -1744,9 +1786,9 @@ fn write_error(status: u16, reason: Option<String>, what: GlWrite) -> PostError 
         )
     };
     match status {
+        // glab follows redirects; one it hands back went nowhere.
         300..=399 => CoreError::Provider(
-            "GitLab redirected the request; check the URL in Settings (https, host and path)"
-                .into(),
+            "GitLab redirected the request; check the GitLab URL in Settings".into(),
         )
         .into(),
         // Approving answers 401 when the user may not approve (already
@@ -1756,7 +1798,10 @@ fn write_error(status: u16, reason: Option<String>, what: GlWrite) -> PostError 
             with("401 Unauthorized")
                 + " (already approved, or you may not approve this merge request)",
         ),
-        401 => CoreError::GitlabAuth.into(),
+        401 => CoreError::GitlabAuth {
+            host: host.to_string(),
+        }
+        .into(),
         // Approving with a `sha` that is not the source branch's head.
         409 if what == GlWrite::Approve => PostError::new(
             PostErrorKind::HeadMoved,
@@ -2073,8 +2118,7 @@ impl GitlabProvider {
         }
         let after: Vec<GlReviewer> = self.get_all(&format!("{p}/reviewers"))?;
         if mine(&after).as_deref() != Some("requested_changes") {
-            let token = self.tokens.token().unwrap_or_default();
-            let said = sanitize(&answer.summary.join(" "), &[&token]);
+            let said = clean(&answer.summary.join(" "));
             return Err(PostError::new(
                 PostErrorKind::PostRejected,
                 if said.trim().is_empty() {
@@ -2097,8 +2141,7 @@ impl GitlabProvider {
     /// why. On Free (one reviewer per MR) GitLab keeps the existing one and
     /// does not add the user; that is reported, never forced.
     fn add_me_as_reviewer(&self, r: &ReviewRef, me: &str) -> PostResultOf<()> {
-        let token = self.tokens.token().unwrap_or_default();
-        let said = |messages: &[String]| sanitize(&messages.join("; "), &[&token]);
+        let said = |messages: &[String]| clean(&messages.join("; "));
         let reply: GqlReply<GlSetReviewersData> = self
             .graphql(
                 SET_REVIEWERS_APPEND,
@@ -2270,84 +2313,27 @@ mod tests {
             Some("https://gitlab.example.test")
         );
         assert_eq!(normalize_base_url(""), None);
-        assert_eq!(normalize_base_url("gitlab.example.test"), None);
+        // A bare host, as glab names it, is an https instance.
+        assert_eq!(
+            normalize_base_url(" gitlab.example.test ").as_deref(),
+            Some("https://gitlab.example.test")
+        );
+        assert_eq!(
+            normalize_base_url("gitlab.example.test:8443").as_deref(),
+            Some("https://gitlab.example.test:8443")
+        );
+        assert_eq!(normalize_base_url("someone@gitlab.example.test"), None);
         assert_eq!(url_host("http://127.0.0.1:8080/x"), "127.0.0.1:8080");
         assert!(matches!(
-            GitlabProvider::new("", StaticToken("t".into())),
+            GitlabProvider::with_binary("glab", ""),
             Err(CoreError::GitlabNotConfigured)
         ));
-        // Plain http is fine on any host (a VPN); other schemes are not.
-        assert!(GitlabProvider::new("http://gitlab.example.test", StaticToken("t".into())).is_ok());
-        assert!(GitlabProvider::new("http://127.0.0.1:9", StaticToken("t".into())).is_ok());
-        assert!(GitlabProvider::new("ftp://gitlab.example.test", StaticToken("t".into())).is_err());
-    }
-
-    /// An in-memory keychain: account → secret.
-    #[derive(Default)]
-    struct MemStore(Mutex<HashMap<String, String>>);
-
-    impl SecretStore for MemStore {
-        fn get(&self, account: &str) -> CoreResult<Option<String>> {
-            Ok(self.0.lock().unwrap().get(account).cloned())
-        }
-        fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
-            self.0.lock().unwrap().insert(account.into(), secret.into());
-            Ok(())
-        }
-        fn delete(&self, account: &str) -> CoreResult<()> {
-            self.0.lock().unwrap().remove(account);
-            Ok(())
-        }
-    }
-
-    const FIXTURE_TOKEN: &str = "glpat-fixture-not-a-real-token";
-
-    #[test]
-    fn the_token_is_keyed_by_the_host_the_provider_talks_to() {
-        // Any spelling of one instance finds the same entry.
-        let store = MemStore::default();
-        write_token(&store, "https://GitLab.example.test:443/", FIXTURE_TOKEN).unwrap();
-        for url in [
-            "https://gitlab.example.test",
-            "https://GitLab.example.test",
-            "https://gitlab.example.test:443",
-        ] {
-            assert_eq!(
-                read_token(&store, url).as_deref(),
-                Some(FIXTURE_TOKEN),
-                "{url}"
-            );
-        }
-        assert_eq!(
-            store.0.lock().unwrap().keys().collect::<Vec<_>>(),
-            ["gitlab.example.test"]
-        );
-        // Another instance does not.
-        assert_eq!(read_token(&store, "https://gitlab.other.test"), None);
-    }
-
-    #[test]
-    fn a_token_under_the_old_raw_host_key_is_read_once_and_moved() {
-        let store = MemStore::default();
-        store.set("GitLab.example.test:443", FIXTURE_TOKEN).unwrap();
-        let url = "https://GitLab.example.test:443";
-        assert_eq!(read_token(&store, url).as_deref(), Some(FIXTURE_TOKEN));
-        let keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
-        assert_eq!(keys, ["gitlab.example.test"]);
-        // Saved settings hold the normalized URL from then on.
-        assert_eq!(
-            read_token(&store, "https://gitlab.example.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-    }
-
-    #[test]
-    fn clearing_the_token_also_clears_the_old_entry() {
-        let store = MemStore::default();
-        store.set("GitLab.example.test:443", FIXTURE_TOKEN).unwrap();
-        write_token(&store, "https://GitLab.example.test:443", " ").unwrap();
-        assert!(store.0.lock().unwrap().is_empty());
-        assert_eq!(read_token(&store, "https://GitLab.example.test:443"), None);
+        // Plain http names an instance too; other schemes do not.
+        assert!(GitlabProvider::with_binary("glab", "http://gitlab.example.test").is_ok());
+        assert!(GitlabProvider::with_binary("glab", "http://127.0.0.1:9").is_ok());
+        assert!(GitlabProvider::with_binary("glab", "ftp://gitlab.example.test").is_err());
+        let p = GitlabProvider::with_binary("glab", "https://GitLab.example.test:8443/").unwrap();
+        assert_eq!(p.host(), "gitlab.example.test:8443");
     }
 
     #[test]
@@ -2380,8 +2366,8 @@ mod tests {
             ("http://127.0.0.1:3000", "127.0.0.1:3000"),
             ("http://[::1]:8080", "[::1]:8080"),
             ("https://gitlab.example.test/sub", "gitlab.example.test"),
-            // Plain http on a VPN / LAN host: accepted, host kept for the
-            // keychain key.
+            // Plain http on a VPN / LAN host: accepted (the scheme is only
+            // for web links; how glab connects is its own login's).
             ("http://GitLab.vpn.test:8080/", "gitlab.vpn.test:8080"),
             ("http://10.0.0.5", "10.0.0.5"),
             ("http://gitlab.example.test:80", "gitlab.example.test"),
@@ -2392,221 +2378,85 @@ mod tests {
     }
 
     #[test]
-    fn only_plain_http_off_this_machine_is_insecure() {
-        for url in [
-            "http://gitlab.example.test",
-            "http://10.0.0.5:8080/",
-            "http://localhost.example.test",
-            "http://[fd00::1]",
+    fn redacts_anything_shaped_like_a_gitlab_token() {
+        let pat = "glpat-fixtureTOKENnotreal.01.abcdef";
+        let oauth = "f".repeat(64);
+        for (text, kept) in [
+            (
+                format!("401 Unauthorized {pat}"),
+                "401 Unauthorized [redacted]",
+            ),
+            (format!("({pat}) bad"), "([redacted]) bad"),
+            (format!("{pat}{pat} twice"), "[redacted] twice"),
+            (
+                format!("see https://x.test/?access_token={pat}&x=1"),
+                "see https://x.test/?access_token=[redacted]&x=1",
+            ),
+            (
+                format!("Authorization: Bearer {oauth}"),
+                "Authorization: Bearer [redacted]",
+            ),
+            (
+                "PRIVATE-TOKEN: s3cr3t-value".to_string(),
+                "PRIVATE-TOKEN: [redacted]",
+            ),
+            (
+                "private_token=abc123".to_string(),
+                "private_token=[redacted]",
+            ),
+            (format!("token {oauth}"), "token [redacted]"),
+            (
+                "deploy gldt-AbC_123 and glrt-x".to_string(),
+                "deploy [redacted] and [redacted]",
+            ),
+            (format!("x-{pat}"), "x-[redacted]"),
         ] {
-            assert!(is_insecure(url), "{url}");
+            assert_eq!(redact_tokens(&text), kept, "{text}");
         }
-        for url in [
-            "https://gitlab.example.test",
-            "https://10.0.0.5",
-            "http://localhost:8080",
-            "http://127.0.0.1:3000/",
-            "http://[::1]:8080",
-            // Unusable URLs are a problem, not an insecure connection.
-            "",
-            "gitlab.example.test",
-            "http://someone@10.0.0.5",
+        // What is not a token stays: a commit sha (40 hex), plain words,
+        // GitLab's messages.
+        let sha = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
+        let msg = format!("SHA does not match HEAD of source branch: {sha}");
+        assert_eq!(redact_tokens(&msg), msg);
+        assert_eq!(
+            redact_tokens("global glob-pattern ok"),
+            "global glob-pattern ok"
+        );
+        assert_eq!(redact_tokens("ünïcode — fine"), "ünïcode — fine");
+        assert_eq!(clean("line\n two"), "line two");
+        assert_eq!(clean("a\r\nb {glpat-x1}"), "a b {[redacted]}");
+    }
+
+    #[test]
+    fn classifies_what_glab_says_without_a_response() {
+        for (stderr, failure) in [
+            (
+                "x gitlab.example.test has not been authenticated with glab; run `glab auth login --hostname gitlab.example.test`",
+                Failure::Auth,
+            ),
+            ("glab: 401 Unauthorized (HTTP 401)", Failure::Auth),
+            (
+                "Get \"https://gitlab.example.test/api/v4/user\": dial tcp: lookup gitlab.example.test: no such host",
+                Failure::NotConnected,
+            ),
+            (
+                "Post \"http://127.0.0.1:9/api/v4/x\": dial tcp 127.0.0.1:9: connect: connection refused",
+                Failure::NotConnected,
+            ),
+            ("read: connection reset by peer", Failure::Broken),
+            ("tls: handshake failure", Failure::Broken),
+            ("something else entirely", Failure::Other),
         ] {
-            assert!(!is_insecure(url), "{url}");
+            assert_eq!(Failure::from_stderr(stderr.as_bytes()), failure, "{stderr}");
         }
-    }
-
-    #[test]
-    fn a_plain_http_instance_has_a_token_of_its_own() {
-        let store = MemStore::default();
-        write_token(&store, "http://GitLab.vpn.test:80/", FIXTURE_TOKEN).unwrap();
-        assert_eq!(
-            read_token(&store, "http://gitlab.vpn.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
-        // Loopback http never leaves the machine: keyed as https is.
-        write_token(&store, "http://localhost:8080", FIXTURE_TOKEN).unwrap();
-        assert!(keys(&store).contains(&"localhost:8080".to_string()));
-    }
-
-    #[test]
-    fn switching_an_https_instance_to_http_finds_no_token() {
-        // The token was stored for https: it must not go out unencrypted
-        // because the URL changed.
-        let store = MemStore::default();
-        write_token(&store, "https://gitlab.example.test", FIXTURE_TOKEN).unwrap();
-        assert_eq!(read_token(&store, "http://gitlab.example.test"), None);
-        assert_eq!(read_token(&store, "http://GitLab.example.test:80/"), None);
-        assert_eq!(keys(&store), ["gitlab.example.test"]);
-        // A token entered for http is its own, and the https one stays.
-        write_token(&store, "http://gitlab.example.test", "glpat-fixture-http").unwrap();
-        assert_eq!(
-            read_token(&store, "https://gitlab.example.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-    }
-
-    #[test]
-    fn going_from_http_to_https_keeps_the_token() {
-        let store = MemStore::default();
-        write_token(&store, "http://gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        assert_eq!(
-            read_token(&store, "https://gitlab.vpn.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-        // Moved to the https account on the way.
-        assert_eq!(keys(&store), ["gitlab.vpn.test"]);
-    }
-
-    #[test]
-    fn the_one_time_move_keeps_a_working_plain_http_setup() {
-        // Before tokens had a key of their own for plain http, the token of
-        // a deliberately configured http instance was under its host.
-        let store = MemStore::default();
-        store.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "http://gitlab.vpn.test").unwrap();
-        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
-        assert_eq!(
-            read_token(&store, "http://gitlab.vpn.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-        // An old raw-host spelling moves too.
-        let store = MemStore::default();
-        store.set("GitLab.vpn.test:80", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "http://GitLab.vpn.test:80").unwrap();
-        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
-        // An https instance, or one with an http token already, is left as is.
-        let store = MemStore::default();
-        store.set("gitlab.example.test", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "https://gitlab.example.test").unwrap();
-        migrate_plain_http_token(&store, "http://localhost").unwrap();
-        assert_eq!(keys(&store), ["gitlab.example.test"]);
-        store
-            .set("http://gitlab.example.test", "glpat-fixture-http")
-            .unwrap();
-        migrate_plain_http_token(&store, "http://gitlab.example.test").unwrap();
-        assert_eq!(
-            store.get("http://gitlab.example.test").unwrap().as_deref(),
-            Some("glpat-fixture-http")
-        );
-        assert_eq!(keys(&store).len(), 2);
-    }
-
-    /// A keychain whose reads or writes fail (a locked keychain, a denied
-    /// prompt): not the same as an entry that is not there.
-    #[derive(Default)]
-    struct Failing {
-        inner: MemStore,
-        get: bool,
-        set: bool,
-    }
-
-    impl SecretStore for Failing {
-        fn get(&self, account: &str) -> CoreResult<Option<String>> {
-            if self.get {
-                return Err(CoreError::Provider("could not read the keychain".into()));
-            }
-            self.inner.get(account)
-        }
-        fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
-            if self.set {
-                return Err(CoreError::Provider("could not update the keychain".into()));
-            }
-            self.inner.set(account, secret)
-        }
-        fn delete(&self, account: &str) -> CoreResult<()> {
-            self.inner.delete(account)
-        }
-    }
-
-    #[test]
-    fn a_failed_one_time_move_fails_and_keeps_the_token_where_it_was() {
-        // A keychain that cannot be read: the move did not happen, so it
-        // must not be recorded as done (the caller retries next start).
-        let store = Failing {
-            get: true,
-            ..Failing::default()
-        };
-        store.inner.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        assert!(migrate_plain_http_token(&store, "http://gitlab.vpn.test").is_err());
-        assert_eq!(keys(&store.inner), ["gitlab.vpn.test"]);
-        // The http entry cannot be written: the old one is never deleted.
-        let store = Failing {
-            set: true,
-            ..Failing::default()
-        };
-        store.inner.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        assert!(migrate_plain_http_token(&store, "http://gitlab.vpn.test").is_err());
-        assert_eq!(keys(&store.inner), ["gitlab.vpn.test"]);
-        // Retried once the keychain answers: moved.
-        migrate_plain_http_token(&store.inner, "http://gitlab.vpn.test").unwrap();
-        assert_eq!(keys(&store.inner), ["http://gitlab.vpn.test"]);
-        // An https instance never touches the keychain, failing or not.
-        let store = Failing {
-            get: true,
-            set: true,
-            ..Failing::default()
-        };
-        migrate_plain_http_token(&store, "https://gitlab.example.test").unwrap();
-    }
-
-    #[test]
-    fn the_one_time_move_heals_whatever_an_earlier_build_left() {
-        // Moved already: the http entry has it, nothing changes.
-        let store = MemStore::default();
-        store.set("http://gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "http://gitlab.vpn.test").unwrap();
-        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
-        // Marked done after a failed move: still under the host, moved now.
-        let store = MemStore::default();
-        store.set("gitlab.vpn.test", FIXTURE_TOKEN).unwrap();
-        migrate_plain_http_token(&store, "http://gitlab.vpn.test").unwrap();
-        assert_eq!(
-            read_token(&store, "http://gitlab.vpn.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-        assert_eq!(keys(&store), ["http://gitlab.vpn.test"]);
-        // No token anywhere: nothing to do, and that is done too.
-        migrate_plain_http_token(&MemStore::default(), "http://gitlab.vpn.test").unwrap();
-    }
-
-    /// A keychain whose deletes fail (a locked or denied item).
-    #[derive(Default)]
-    struct NoDelete(MemStore);
-
-    impl SecretStore for NoDelete {
-        fn get(&self, account: &str) -> CoreResult<Option<String>> {
-            self.0.get(account)
-        }
-        fn set(&self, account: &str, secret: &str) -> CoreResult<()> {
-            self.0.set(account, secret)
-        }
-        fn delete(&self, _: &str) -> CoreResult<()> {
-            Err(CoreError::Provider("could not update the keychain".into()))
-        }
-    }
-
-    #[test]
-    fn a_failed_cleanup_of_an_old_entry_does_not_fail_the_save() {
-        let store = NoDelete::default();
-        store
-            .set("GitLab.example.test:443", "glpat-fixture-old")
-            .unwrap();
-        // The token is stored: that is what the save is about.
-        write_token(&store, "https://GitLab.example.test:443", FIXTURE_TOKEN).unwrap();
-        assert_eq!(
-            read_token(&store, "https://gitlab.example.test").as_deref(),
-            Some(FIXTURE_TOKEN)
-        );
-        // Removing still fails when the token itself cannot go.
-        assert!(write_token(&store, "https://gitlab.example.test", "").is_err());
-    }
-
-    fn keys(store: &MemStore) -> Vec<String> {
-        let mut keys: Vec<String> = store.0.lock().unwrap().keys().cloned().collect();
-        keys.sort();
-        keys
+        let e = Failure::Auth.into_error("gitlab.example.test");
+        assert!(e
+            .to_string()
+            .contains("glab auth login --hostname gitlab.example.test"));
+        assert!(matches!(
+            Failure::Missing.into_error("h"),
+            CoreError::GlabMissing
+        ));
     }
 
     #[test]

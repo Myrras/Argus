@@ -4,7 +4,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
 
-import type { LocalFile } from "../ipc/types";
+import type { LocalFile, Settings } from "../ipc/types";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useFocusStore } from "../state/focusStore";
 import { useLocalFileStore } from "../state/localFileStore";
@@ -14,6 +14,7 @@ import {
   headHint,
   localFileMenuItems,
   openTitle,
+  opensRepository,
   runLocalFileAction,
 } from "./localFiles";
 import {
@@ -70,6 +71,27 @@ describe("open in editor rules", () => {
     expect(openTitle(local("a", { exists: false }), "Open in editor (O)")).toBe(
       "Not in your working tree",
     );
+  });
+
+  it("says when the repository opens with the file", () => {
+    const f = local("a");
+    expect(openTitle(f, "Open in editor (O)", true)).toBe(
+      "Open in editor (O)\nOpens the repository with the file",
+    );
+    expect(openTitle(f, "Open in editor (O)")).toBe("Open in editor (O)");
+    const settings = (part: Partial<Settings>) => part as Settings;
+    const base = settings({ editorOverrides: { md: "/A/Typora.app" } });
+    expect(opensRepository(base, "docs/a.md")).toBe(true);
+    expect(opensRepository(base, "src/a.rs")).toBe(false);
+    expect(
+      opensRepository({ ...base, defaultEditor: "/A/Zed.app" }, "src/a.rs"),
+    ).toBe(true);
+    expect(
+      opensRepository(
+        settings({ defaultEditor: "/A/Zed.app", openWithRepository: false }),
+        "a.md",
+      ),
+    ).toBe(false);
   });
 
   it("offers the file menu only for a file of a clone", () => {

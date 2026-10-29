@@ -89,13 +89,14 @@ describe("AiStatus", () => {
     );
   });
 
-  it("says in the chip's tooltip which rules, skill and worktree the last run used", async () => {
+  it("says in the chip's tooltip which rules, skill, language and worktree the last run used", async () => {
     run = aiRun({
       reviewId: r.id,
       context: {
         rulesFiles: ["CLAUDE.md", "src/api/CLAUDE.md"],
         skill: { name: "code-review", source: "project" },
         worktree: true,
+        language: { kind: "other", name: "Deutsch" },
         notes: [
           "The review skill strict-review (user) was not found; Auto used the project's own (code-review)",
         ],
@@ -109,6 +110,7 @@ describe("AiStatus", () => {
           "AI: done · 1 finding — claude, round 1",
           "Rules: CLAUDE.md, src/api/CLAUDE.md",
           "Review skill: code-review (project)",
+          "Language: Deutsch",
           "Read a worktree at the review's head",
           "The review skill strict-review (user) was not found; Auto used the project's own (code-review)",
         ].join("\n"),
@@ -121,6 +123,7 @@ describe("AiStatus", () => {
         rulesFiles: [],
         skill: null,
         worktree: false,
+        language: { kind: "auto" },
         notes: [
           "Couldn't create a review worktree: git worktree add failed; reviewed without it",
         ],
@@ -129,7 +132,7 @@ describe("AiStatus", () => {
     useAiStore.setState({ runs: { [r.id]: run } });
     await waitFor(() =>
       expect(chip().getAttribute("title")).toContain(
-        "Rules: none found\nReview skill: none\nCouldn't create a review worktree: git worktree add failed; reviewed without it",
+        "Rules: none found\nReview skill: none\nLanguage: Auto (the merge request's)\nCouldn't create a review worktree: git worktree add failed; reviewed without it",
       ),
     );
   });

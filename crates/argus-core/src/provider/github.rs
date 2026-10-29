@@ -34,6 +34,8 @@ use serde::Deserialize;
 
 use super::conditional::{Cached, ConditionalCache};
 use super::github_conversation::{self as conversation, ConversationId};
+use super::github_outside as outside;
+use super::http::HttpReply;
 use super::model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, FileDiff, FileStatus, MyReviewState, Note,
     ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, ReviewVerdict, Reviewer,
@@ -43,7 +45,9 @@ use super::rate_limit::{default_reset, reset_at, Backoff};
 use super::{encode_path, first_line, looks_binary, PostResultOf, ReviewProvider};
 use crate::error::{CoreError, CoreResult};
 use crate::platform::{run_with_timeout, ExecError};
-use crate::post::{sanitize, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
+use crate::post::{
+    sanitize, OutsideDiff, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote,
+};
 
 /// Upper bound per search; a reviewer with more than this many open PRs in
 /// one bucket is not the user Argus is built for.
@@ -83,15 +87,6 @@ const RESOLVE_MUTATION: &str = "mutation($id: ID!) { \
 resolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }";
 const UNRESOLVE_MUTATION: &str = "mutation($id: ID!) { \
 unresolveReviewThread(input: {threadId: $id}) { thread { id isResolved } } }";
-
-/// What [`GithubProvider::auth_status`] found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GhAuth {
-    /// The `gh` program could be started.
-    pub installed: bool,
-    /// `gh` has a token for the host (and account).
-    pub logged_in: bool,
-}
 
 /// GitHub through the `gh` binary.
 pub struct GithubProvider {
@@ -202,34 +197,6 @@ impl GithubProvider {
         }
         *cached = Some(token.clone());
         Ok(Some(token))
-    }
-
-    /// Whether `gh` runs at all, and whether it holds a token for the host
-    /// (and the configured account). `gh auth token` is a local lookup, so
-    /// this never touches the network; its output (the token) is discarded
-    /// unread.
-    pub fn auth_status(&self) -> GhAuth {
-        let mut cmd = self.command();
-        cmd.args(["auth", "token", "--hostname", &self.host]);
-        if let Some(account) = &self.account {
-            cmd.args(["--user", account]);
-        }
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        match run_with_timeout(&mut cmd, None, self.timeout.min(AUTH_TIMEOUT)) {
-            Ok(output) => GhAuth {
-                installed: true,
-                logged_in: output.status.success(),
-            },
-            // It ran but never answered: there, but not usable.
-            Err(ExecError::TimedOut) => GhAuth {
-                installed: true,
-                logged_in: false,
-            },
-            Err(_) => GhAuth {
-                installed: false,
-                logged_in: false,
-            },
-        }
     }
 
     /// Run `gh` with `args` (and `input` on stdin), the account's token in
@@ -631,49 +598,7 @@ struct Page {
     next: Option<String>,
 }
 
-/// A response as `gh api -i` prints it: `HTTP/2.0 200 OK`, the headers,
-/// a blank line, the body.
-struct HttpReply {
-    status: u16,
-    /// Lowercased names.
-    headers: Vec<(String, String)>,
-    body: String,
-}
-
 impl HttpReply {
-    fn parse(out: &str) -> Option<Self> {
-        let (first, mut rest) = out.split_once('\n')?;
-        let first = first.trim_end_matches('\r');
-        if !first.starts_with("HTTP/") {
-            return None;
-        }
-        let status = first.split_whitespace().nth(1)?.parse().ok()?;
-        let mut headers = Vec::new();
-        while !rest.is_empty() {
-            let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
-            rest = after;
-            let line = line.trim_end_matches('\r');
-            if line.is_empty() {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':') {
-                headers.push((name.trim().to_ascii_lowercase(), value.trim().to_string()));
-            }
-        }
-        Some(Self {
-            status,
-            headers,
-            body: rest.to_string(),
-        })
-    }
-
-    fn header(&self, name: &str) -> Option<String> {
-        self.headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.clone())
-    }
-
     /// GitHub's primary limit (403/429 with no requests left), or a
     /// secondary one (a `Retry-After`, or the message says so).
     fn is_rate_limited(&self) -> bool {
@@ -851,6 +776,15 @@ impl ReviewProvider for GithubProvider {
         if let Some(states) = states {
             apply_thread_states(&mut threads, &states);
         }
+        // The user's file comments on lines outside the diff go back to
+        // those lines; the PR's head (a conditional GET, a 304 after the
+        // poll's own read) decides whether they still fit.
+        outside::apply(&mut threads, &me, || {
+            self.api::<GhPull>(&base)
+                .map(|p| p.head.sha)
+                .map_err(|e| tracing::debug!("reading the head for marked comments failed: {e}"))
+                .ok()
+        });
         threads.extend(conversation::threads(
             conversation_entries(issue_comments?, reviews?),
             &me,
@@ -896,19 +830,32 @@ impl ReviewProvider for GithubProvider {
     }
     // --- M4 writes (helpers in the "M4: writes" section at the end) ---
 
+    fn outside_diff(&self) -> OutsideDiff {
+        OutsideDiff::Fallback
+    }
+
+    /// Outside the diff, a file comment quoting the lines (see
+    /// [`outside`]); it reports where it landed on the new side.
     fn post_comment(&self, r: &ReviewRef, c: &PlacedComment) -> PostResultOf<PostedComment> {
+        let (body, side, line, start_line) = if c.in_diff {
+            (comment_body(c), c.side, c.line_number(), c.start_number())
+        } else {
+            let (start, end) = outside_lines(c)?;
+            let body = file_comment_body(&self.host, &r.repo, c, start, end);
+            (body, Side::New, end, (start < end).then_some(start))
+        };
         let posted: GhPosted = self.post_json(
             &format!("repos/{}/pulls/{}/comments", r.repo, r.number),
-            &comment_body(c),
+            &body,
         )?;
         Ok(PostedComment {
             url: posted.html_url.unwrap_or_else(|| r.url.clone()),
             provider_thread_id: posted.id.to_string(),
             provider_note_id: posted.id.to_string(),
             path: c.path.clone(),
-            side: c.side,
-            line: c.line_number(),
-            start_line: c.start_number(),
+            side,
+            line,
+            start_line,
             head_sha: c.head_sha.clone(),
         })
     }
@@ -1306,7 +1253,12 @@ fn root_thread(c: GhComment) -> Thread {
         Some("LEFT") => Side::Old,
         _ => Side::New,
     };
-    let line = c.original_line.or(c.line);
+    let file_level = c.subject_type.as_deref() == Some("file");
+    let line = if file_level {
+        None
+    } else {
+        c.original_line.or(c.line)
+    };
     let (line_old, line_new) = match side {
         Side::Old => (line, None),
         Side::New => (None, line),
@@ -1328,6 +1280,7 @@ fn root_thread(c: GhComment) -> Thread {
         diff_hunk: c.diff_hunk.clone(),
         // Outdated comments have no current line.
         current_line: c.position.and(c.line),
+        outside_diff: false,
     };
     Thread {
         id: c.id.to_string(),
@@ -1335,7 +1288,9 @@ fn root_thread(c: GhComment) -> Thread {
         created_at: c.created_at,
         resolved: false,
         resolvable: true,
-        outdated: c.position.is_none(),
+        // A file comment has no position in the diff to lose: it is not
+        // outdated by that (GraphQL's `isOutdated` still applies).
+        outdated: !file_level && c.position.is_none(),
         anchor: Some(anchor),
         notes: vec![note(&c)],
     }
@@ -1482,6 +1437,9 @@ struct GhComment {
     commit_id: Option<String>,
     original_commit_id: Option<String>,
     diff_hunk: Option<String>,
+    /// `line` or `file` (a comment on the file as a whole: no line).
+    #[serde(default)]
+    subject_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1698,6 +1656,46 @@ fn comment_body(c: &PlacedComment) -> serde_json::Value {
         body["start_side"] = side.into();
     }
     body
+}
+
+/// The new-side lines of a comment outside the diff (its rows are
+/// unchanged lines, so they have one, whichever side it was written on).
+fn outside_lines(c: &PlacedComment) -> PostResultOf<(u32, u32)> {
+    let end = c.line.new_line().ok_or_else(|| {
+        PostError::new(
+            PostErrorKind::LineNotInDiff,
+            format!("{}: this line is not in the file at the head", c.path),
+        )
+    })?;
+    let start = c.start.and_then(|s| s.new_line()).unwrap_or(end);
+    Ok((start, end))
+}
+
+/// The JSON body of a file comment standing in for a line comment outside
+/// the diff: GitHub takes `subject_type: "file"` without a line.
+fn file_comment_body(
+    host: &str,
+    repo: &str,
+    c: &PlacedComment,
+    start: u32,
+    end: u32,
+) -> serde_json::Value {
+    let text = outside::comment_text(
+        host,
+        repo,
+        &c.path,
+        &c.head_sha,
+        start,
+        end,
+        c.excerpt.as_deref(),
+        &c.body,
+    );
+    serde_json::json!({
+        "body": text,
+        "commit_id": c.head_sha,
+        "path": c.path,
+        "subject_type": "file",
+    })
 }
 
 /// GitHub's error text: `message`, plus each of `errors` (an object's
@@ -1931,5 +1929,60 @@ mod tests {
         assert!(check_sha("abc123").is_ok());
         assert!(check_sha("--help").is_err());
         assert!(check_sha("").is_err());
+    }
+
+    /// A file comment of the user's with Argus' lines marker comes back at
+    /// its lines, showing only their text; someone else's marker, or a
+    /// marker on a line comment, changes nothing.
+    #[test]
+    fn marked_file_comments_go_back_to_their_lines() {
+        let head = "c3".repeat(20);
+        let older = "c2".repeat(20);
+        let marked = |id: u64, who: &str, sha: &str| {
+            serde_json::json!({
+                "id": id,
+                "user": { "login": who },
+                "body": outside::comment_text(
+                    "github.com", "acme-fixture/widgets", "src/cache.rs", sha, 12, 18,
+                    Some(&["fn keep() {".to_string()]), "Leaks here.",
+                ),
+                "created_at": format!("2026-10-0{id}T10:00:00Z"),
+                "path": "src/cache.rs",
+                "position": null,
+                "line": null,
+                "original_line": null,
+                "subject_type": "file",
+                "commit_id": head,
+            })
+        };
+        let comments: Vec<GhComment> = serde_json::from_value(serde_json::json!([
+            marked(1, "rev-fixture", &head),
+            marked(2, "rev-fixture", &older),
+            marked(3, "alice-fixture", &head),
+        ]))
+        .unwrap();
+        let mut threads = group_threads(comments);
+        // A file comment is not outdated for lacking a diff position.
+        assert!(threads.iter().all(|t| !t.outdated));
+        let mut reads = 0;
+        outside::apply(&mut threads, "rev-fixture", || {
+            reads += 1;
+            Some(head.clone())
+        });
+        assert_eq!(reads, 1);
+        let a = threads[0].anchor.as_ref().unwrap();
+        assert_eq!(
+            (a.side, a.line_new, a.start_line, a.outside_diff),
+            (Side::New, Some(18), Some(12), true)
+        );
+        assert_eq!(a.head_sha, head);
+        assert!(!threads[0].outdated);
+        assert_eq!(threads[0].notes[0].body, "Leaks here.");
+        // Written at an older head: its lines may hold other code now.
+        assert!(threads[1].outdated);
+        // Not the user's: left as GitHub has it.
+        let other = threads[2].anchor.as_ref().unwrap();
+        assert_eq!((other.line_new, other.outside_diff), (None, false));
+        assert!(threads[2].notes[0].body.contains("argus:lines"));
     }
 }

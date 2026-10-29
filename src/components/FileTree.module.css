@@ -16,6 +16,10 @@
   display: flex;
   align-items: center;
   min-width: 0;
+  /* A review of a thousand files: rows out of view are neither laid out
+     nor painted (the row height is fixed, so the scrollbar stays true). */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 26px;
 }
 
 .dir,
@@ -114,4 +118,12 @@
 .fileItem:focus-within .fileAction,
 .fileItem[data-selected="true"] .fileAction {
   display: inline-flex;
+}
+
+/* A file that changed only in whitespace, with whitespace hidden. */
+.whitespaceOnly {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
 }

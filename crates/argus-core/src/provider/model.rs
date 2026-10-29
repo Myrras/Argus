@@ -343,6 +343,13 @@ pub struct Anchor {
     /// `None` there. Absent in anchors stored before it existed.
     #[serde(default)]
     pub current_line: Option<u32>,
+    /// On unchanged lines outside the diff, as a GitHub file comment Argus
+    /// posted (its marker names the lines; `provider::github_outside`):
+    /// the UI says "on lines 12–18 (outside the diff)". GitLab comments on
+    /// such lines are ordinary line comments, so `false` there. Absent in
+    /// anchors stored before it existed.
+    #[serde(default)]
+    pub outside_diff: bool,
 }
 
 /// One comment in a thread.

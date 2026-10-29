@@ -80,12 +80,15 @@ interface ReviewStoreState {
    * head the dialog named), with an optional summary. Resolves to the
    * error, or null once submitted. An approval leaves the active lists
    * after `APPROVED_LINGER_MS`. While another submit runs: a `busy` error.
+   * `scriptIds`: the submit scripts ticked in the dialog; the backend runs
+   * them only once the submit succeeded (`scripts:done` reports them).
    */
   submit: (
     id: ReviewId,
     headSha: string,
     verdict: ReviewVerdict,
     summary?: string | null,
+    scriptIds?: string[],
   ) => Promise<IpcError | null>;
   /** `submit` with "approve" and no summary. */
   approve: (id: ReviewId, headSha: string) => Promise<IpcError | null>;
@@ -251,7 +254,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
     }
   },
 
-  submit: async (id, headSha, verdict, summary = null) => {
+  submit: async (id, headSha, verdict, summary = null, scriptIds = []) => {
     if (get().approving) {
       return {
         kind: "busy",
@@ -266,6 +269,7 @@ export const useReviewStore = create<ReviewStoreState>((set, get) => ({
         headSha,
         verdict,
         summary?.trim() ? summary : null,
+        scriptIds,
       );
       toastSuccess(
         `${VERDICT_DONE[verdict]} ${reviewRef(record)} at ${headSha.slice(0, 7)}`,

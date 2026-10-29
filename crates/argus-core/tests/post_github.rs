@@ -169,6 +169,8 @@ fn placed(side: Side, line: DiffLine, start: Option<DiffLine>, body: &str) -> Pl
         side,
         line,
         start,
+        in_diff: true,
+        excerpt: None,
         head_sha: HEAD.into(),
         base_sha: "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0".into(),
         body: body.into(),
@@ -241,6 +243,81 @@ fn posts_ranges_and_old_side_lines() {
     assert_eq!(bodies[1]["side"], "LEFT");
     assert_eq!(bodies[1]["line"], 2);
     assert!(bodies[1].get("start_line").is_none());
+}
+
+/// A suggestion is markdown: its fence goes out as written, and the range
+/// it replaces is the comment's own `start_line..line` (GitHub's fence
+/// names none).
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_suggestion_goes_out_unchanged_on_its_lines() {
+    let fake = fake();
+    let gh = fake.provider();
+    let body = "Simpler:\n```suggestion\nlet ttl = 60;\n\tlet max = 10;\n```";
+    let c = placed(
+        Side::New,
+        row(LineKind::Context, 3, 4),
+        Some(row(LineKind::Added, 3, 2)),
+        body,
+    );
+    gh.post_comment(&pr(12), &c).unwrap();
+    // A block holding fences gets a longer one: still sent as is.
+    let nested = "````suggestion\n/// ```rust\n/// x\n/// ```\n````";
+    gh.reply(&pr(12), "4001", nested).unwrap();
+    let bodies = fake.bodies();
+    assert_eq!(
+        bodies[0],
+        json!({
+            "body": body,
+            "commit_id": HEAD,
+            "path": "src/cache.rs",
+            "line": 4,
+            "side": "RIGHT",
+            "start_line": 2,
+            "start_side": "RIGHT",
+        })
+    );
+    // A reply carries no position: it is on its thread's lines.
+    assert_eq!(bodies[1], json!({ "body": nested }));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn lines_outside_the_diff_go_as_a_file_comment_quoting_them() {
+    let fake = fake();
+    let gh = fake.provider();
+    // Old side 10..11 (unchanged, so new 12..13) outside every hunk: GitHub
+    // has no line comment there, so a file comment on the head's lines.
+    let c = PlacedComment {
+        in_diff: false,
+        excerpt: Some(vec!["fn keep() {".into(), "}".into()]),
+        ..placed(
+            Side::Old,
+            row(LineKind::Context, 11, 13),
+            Some(row(LineKind::Context, 10, 12)),
+            "Unrelated, but this leaks.",
+        )
+    };
+    let posted = gh.post_comment(&pr(12), &c).unwrap();
+    assert_eq!(
+        (posted.side, posted.line, posted.start_line),
+        (Side::New, 13, Some(12))
+    );
+    let bodies = fake.bodies();
+    assert_eq!(bodies.len(), 1);
+    let b = &bodies[0];
+    // No line, side or position: GitHub would answer "line could not be
+    // resolved".
+    assert_eq!(b["subject_type"], "file");
+    assert_eq!(b["path"], "src/cache.rs");
+    assert_eq!(b["commit_id"], HEAD);
+    assert!(b.get("line").is_none() && b.get("side").is_none());
+    assert_eq!(
+        b["body"],
+        format!(
+            "[Lines 12–13](https://github.com/acme-fixture/widgets/blob/{HEAD}/src/cache.rs#L12-L13) of `src/cache.rs` (outside the diff):\n\n```rs\n12  fn keep() {{\n13  }}\n```\n\nUnrelated, but this leaks.\n\n<!-- argus:lines {HEAD} 12-13 -->"
+        )
+    );
 }
 
 #[test]

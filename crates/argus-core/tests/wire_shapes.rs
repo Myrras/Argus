@@ -23,17 +23,19 @@ use argus_core::history::{
     ThreadHistory, TimelineEntry, TimelineEvent,
 };
 use argus_core::post::{
-    CommentableHunk, CommentableLines, NewComment, PostError, PostErrorKind, PostResult,
-    PostedComment, PostedNote,
+    CommentableHunk, CommentableLines, NewComment, OutsideDiff, PostError, PostErrorKind,
+    PostResult, PostedComment, PostedNote,
 };
 use argus_core::provider::{
-    Anchor, ChangedFile, FileStatus, GithubStatus, GitlabProblem, GitlabStatus, Note, ProviderId,
-    ProviderStatus, ReviewRef, ReviewState, Side, Thread,
+    Anchor, ChangedFile, FileStatus, Note, ProviderId, ReviewRef, ReviewState, Side, Thread,
 };
 use argus_core::{
-    CloneStatus, LocalFile, MyReviewState, RefreshError, RefreshReport, ReviewId, ReviewRecord,
-    ReviewRefresh, ReviewSkillChoice, ReviewStatus, ReviewVerdict, RoundReason, Settings,
-    SkillSource, StoredThread, ThreadId,
+    Account, AccountChoice, AccountState, CloneState, CloneStatus, CloneSuggestion, DraftStage,
+    DraftTurn, GeneratedScript, LocalFile, MyReviewState, RefreshError, RefreshReport, RepoSetup,
+    ReviewId, ReviewLanguage, ReviewRecord, ReviewRefresh, ReviewSkillChoice, ReviewStatus,
+    ReviewVerdict, RoundReason, ScriptDraft, ScriptDraftProgress, ScriptDraftProgressEvent,
+    ScriptDraftStatus, ScriptGenerationStatus, ScriptResult, ScriptStatus, ScriptsDone, Settings,
+    SkillSource, StoredThread, SubmitScript, ThreadId,
 };
 use chrono::{TimeZone, Utc};
 use serde::Serialize;
@@ -119,6 +121,7 @@ fn post_error_kinds() -> Vec<PostErrorKind> {
         InvalidInput,
         GithubUnavailable,
         GitlabNotConfigured,
+        GlabMissing,
         GitlabAuth,
         Provider,
         Store,
@@ -130,8 +133,9 @@ fn post_error_kinds() -> Vec<PostErrorKind> {
     ];
     for k in &all {
         match k {
-            NotFound | InvalidInput | GithubUnavailable | GitlabNotConfigured | GitlabAuth
-            | Provider | Store | Io | PostRejected | LineNotInDiff | HeadMoved | Unsupported => {}
+            NotFound | InvalidInput | GithubUnavailable | GitlabNotConfigured | GlabMissing
+            | GitlabAuth | Provider | Store | Io | PostRejected | LineNotInDiff | HeadMoved
+            | Unsupported => {}
         }
     }
     all
@@ -242,6 +246,39 @@ fn timeline_entries() -> Vec<TimelineEntry> {
     all
 }
 
+fn draft_stages() -> Vec<DraftStage> {
+    use DraftStage::*;
+    let all = vec![Reading, Starting, Thinking, Writing, Validating, Repairing];
+    for s in &all {
+        match s {
+            Reading | Starting | Thinking | Writing | Validating | Repairing => {}
+        }
+    }
+    all
+}
+
+fn script_draft_statuses() -> Vec<ScriptDraftStatus> {
+    use ScriptDraftStatus::*;
+    let all = vec![Idle, Running, Failed, Cancelled];
+    for s in &all {
+        match s {
+            Idle | Running | Failed | Cancelled => {}
+        }
+    }
+    all
+}
+
+fn script_statuses() -> Vec<ScriptStatus> {
+    use ScriptStatus::*;
+    let all = vec![Ok, Failed, TimedOut, Skipped, NotFound, NotExecutable];
+    for s in &all {
+        match s {
+            Ok | Failed | TimedOut | Skipped | NotFound | NotExecutable => {}
+        }
+    }
+    all
+}
+
 fn review_skill_choices() -> Vec<ReviewSkillChoice> {
     vec![
         ReviewSkillChoice::Auto,
@@ -251,6 +288,37 @@ fn review_skill_choices() -> Vec<ReviewSkillChoice> {
             name: "code-review".into(),
         },
     ]
+}
+
+fn review_languages() -> Vec<ReviewLanguage> {
+    let all = vec![
+        ReviewLanguage::Auto,
+        ReviewLanguage::English,
+        ReviewLanguage::Dutch,
+        ReviewLanguage::Other {
+            name: "Deutsch".into(),
+        },
+    ];
+    for l in &all {
+        match l {
+            ReviewLanguage::Auto
+            | ReviewLanguage::English
+            | ReviewLanguage::Dutch
+            | ReviewLanguage::Other { .. } => {}
+        }
+    }
+    all
+}
+
+fn clone_states() -> Vec<CloneState> {
+    use CloneState::*;
+    let all = vec![NotSet, Found, Missing, NotRepository];
+    for c in &all {
+        match c {
+            NotSet | Found | Missing | NotRepository => {}
+        }
+    }
+    all
 }
 
 /// The snapshot as the Rust types serialise today.
@@ -323,6 +391,7 @@ fn current() -> Value {
                 head_sha: "c1".into(),
                 diff_hunk: Some("@@ -1 +1 @@".into()),
                 current_line: Some(10),
+                outside_diff: false,
             }),
             notes: vec![note],
         },
@@ -359,6 +428,7 @@ fn current() -> Value {
             old: vec![1],
             new: vec![1, 2],
         }],
+        outside: OutsideDiff::Native,
     };
     let new_comment = NewComment {
         path: "src/cache.rs".into(),
@@ -384,6 +454,7 @@ fn current() -> Value {
         changed: vec![review_id],
         errors: vec![RefreshError {
             provider: ProviderId::Gitlab,
+            host: "gitlab.example.test".into(),
             review: Some(review_id),
             message: "GitLab is not set up.".into(),
             unavailable: true,
@@ -392,22 +463,39 @@ fn current() -> Value {
         refreshed_at: t,
     };
     let mut settings = Settings::default();
-    settings.github.account = Some("work".into());
-    settings.ai.binary = Some("/usr/local/bin/claude".into());
-    let status = ProviderStatus {
-        github: GithubStatus {
+    settings.accounts.insert(
+        "github:github.com".into(),
+        AccountChoice {
             enabled: true,
-            host: "github.com".into(),
-            installed: true,
-            logged_in: true,
+            account: Some("work".into()),
         },
-        gitlab: GitlabStatus {
-            configured: true,
-            base_url: "https://gitlab.example.test".into(),
-            token_present: true,
-            problem: Some(GitlabProblem::InvalidUrl),
-            insecure: true,
+    );
+    settings.ai.binary = Some("/usr/local/bin/claude".into());
+    settings.ai.review_language = ReviewLanguage::English;
+    settings.submit_scripts = vec![SubmitScript {
+        id: "0f2c4b1e-2f0a-4f7e-9b51-6f0e7c1d2a3b".into(),
+        name: "Tick the checklist".into(),
+        command: "/Users/fixture/bin/tick.sh".into(),
+        args: vec!["--quiet".into()],
+        verdicts: vec![ReviewVerdict::Approve],
+        repos: vec!["gitlab.example.test/acme-fixture/api".into()],
+        default_on: true,
+        timeout_secs: 60,
+    }];
+    let account = Account {
+        key: "github:github.com".into(),
+        provider: ProviderId::Github,
+        host: "github.com".into(),
+        user: Some("work".into()),
+        state: AccountState::NotLoggedIn {
+            message: Some("gh's login of work on github.com is no longer valid.".into()),
         },
+        active: Some("rev-fixture".into()),
+        accounts: vec!["rev-fixture".into(), "work".into()],
+        account: Some("work".into()),
+        enabled: true,
+        scheme: Some("https".into()),
+        login_command: "gh auth login --hostname github.com".into(),
     };
     let snapshot = CodeSnapshot {
         sha: "c1".into(),
@@ -462,6 +550,9 @@ fn current() -> Value {
                 source: SkillSource::Project,
             }),
             worktree: true,
+            language: Some(ReviewLanguage::Other {
+                name: "Deutsch".into(),
+            }),
             notes: vec!["Couldn't create a review worktree: …".into()],
         }),
     };
@@ -546,7 +637,14 @@ fn current() -> Value {
         }),
     );
     add("Settings", val(&settings));
-    add("ProviderStatus", val(&status));
+    add(
+        "CacheStats",
+        val(argus_core::cache::CacheStats {
+            entries: 3,
+            bytes: 1024,
+        }),
+    );
+    add("Account", val(&account));
     add("ThreadHistory", val(&history));
     // One sample per tagged variant: `<Name>:<kind>`.
     for v in line_statuses().iter().map(val) {
@@ -625,6 +723,121 @@ fn current() -> Value {
         }),
     );
 
+    add(
+        "CloneSuggestion",
+        val(CloneSuggestion {
+            repo: "github.com/acme-fixture/widgets".into(),
+            path: "/Users/fixture/code/widgets".into(),
+        }),
+    );
+
+    // --- Repositories ---
+    add(
+        "RepoSetup",
+        val(RepoSetup {
+            key: "github.com/acme-fixture/widgets".into(),
+            host: "github.com".into(),
+            repo: "acme-fixture/widgets".into(),
+            provider: Some(ProviderId::Github),
+            open_reviews: 2,
+            clone_path: Some("/Users/fixture/code/widgets".into()),
+            clone: CloneState::Found,
+            review_skill: ReviewSkillChoice::Skill {
+                source: SkillSource::User,
+                name: "code-review".into(),
+            },
+            review_language: Some(ReviewLanguage::Other {
+                name: "Deutsch".into(),
+            }),
+        }),
+    );
+    for language in review_languages() {
+        let v = val(&language);
+        add(
+            &format!("ReviewLanguage:{}", v["kind"].as_str().unwrap()),
+            v.clone(),
+        );
+    }
+
+    // --- Submit scripts ---
+    let script_result = ScriptResult {
+        script_id: "0f2c4b1e-2f0a-4f7e-9b51-6f0e7c1d2a3b".into(),
+        name: "Tick the checklist".into(),
+        status: ScriptStatus::Failed,
+        exit_code: Some(1),
+        stdout: "out".into(),
+        stderr: "err".into(),
+        duration_ms: 120,
+        message: Some("Exited with status 1.".into()),
+        finished_at: t,
+    };
+    add("ScriptResult", val(&script_result));
+    add(
+        "ScriptsDone",
+        val(ScriptsDone {
+            review_id,
+            results: vec![script_result],
+        }),
+    );
+    let generated = GeneratedScript {
+        name: "Tick the checklist".into(),
+        verdicts: vec![ReviewVerdict::Approve],
+        script: "#!/bin/sh\nset -eu\n".into(),
+        explanation: "Ticks every task.".into(),
+    };
+    add("GeneratedScript", val(&generated));
+    let progress = ScriptDraftProgress {
+        turn: 0,
+        stage: DraftStage::Thinking,
+        started_at: t,
+        thinking: "Reading the template.".into(),
+        thinking_cut: false,
+        thinking_tokens: Some(150),
+        answer_chars: 0,
+        notice: Some("The API did not answer.".into()),
+    };
+    add("ScriptDraftProgress", val(&progress));
+    add(
+        "ScriptDraftProgressEvent",
+        val(ScriptDraftProgressEvent {
+            draft_id: "5b0c1a2e-8f3d-4c6b-9a71-2e4f6d8c0b13".into(),
+            progress: progress.clone(),
+        }),
+    );
+    add(
+        "ScriptDraft",
+        val(ScriptDraft {
+            id: "5b0c1a2e-8f3d-4c6b-9a71-2e4f6d8c0b13".into(),
+            script_id: Some("0f2c4b1e-2f0a-4f7e-9b51-6f0e7c1d2a3b".into()),
+            title: "Tick the checklist".into(),
+            base: Some(generated.clone()),
+            turns: vec![{
+                let mut turn = DraftTurn::new("Tick every checklist item");
+                turn.at = t;
+                turn.result = Some(generated);
+                turn.error = Some("Stopped.".into());
+                turn.attachments = vec!["MR !12".into()];
+                turn.notes = vec!["Not read: /etc/hosts (outside your local clones)".into()];
+                turn
+            }],
+            status: ScriptDraftStatus::Failed,
+            waiting: false,
+            error: Some("Couldn't write the script.".into()),
+            progress: Some(progress.clone()),
+            created_at: t,
+            updated_at: t,
+            revision: 3,
+        }),
+    );
+    add(
+        "ScriptGenerationStatus",
+        val(ScriptGenerationStatus {
+            available: false,
+            adapter: "claude".into(),
+            reason: Some("The AI pass is off.".into()),
+        }),
+    );
+
     let enums: BTreeMap<&str, Vec<String>> = BTreeMap::from([
         (
             "ProviderId",
@@ -656,7 +869,19 @@ fn current() -> Value {
         ),
         ("RoundReason", values(&round_reasons())),
         ("Side", values(&[Side::Old, Side::New])),
-        ("GitlabProblem", values(&[GitlabProblem::InvalidUrl])),
+        (
+            "AccountState.kind",
+            values(&[
+                AccountState::LoggedIn,
+                AccountState::NotLoggedIn { message: None },
+                AccountState::Error {
+                    message: String::new(),
+                },
+                AccountState::CliMissing {
+                    hint: String::new(),
+                },
+            ]),
+        ),
         (
             "FileStatus",
             values(&[
@@ -668,10 +893,20 @@ fn current() -> Value {
         ),
         ("PostErrorKind", values(&post_error_kinds())),
         (
+            "OutsideDiff",
+            values(&[
+                OutsideDiff::None,
+                OutsideDiff::Native,
+                OutsideDiff::Fallback,
+            ]),
+        ),
+        (
             "SkillSource",
             values(&[SkillSource::User, SkillSource::Plugin, SkillSource::Project]),
         ),
         ("ReviewSkillChoice.kind", values(&review_skill_choices())),
+        ("ReviewLanguage.kind", values(&review_languages())),
+        ("CloneState", values(&clone_states())),
         ("LineStatus.kind", values(&line_statuses())),
         ("LineChange.kind", values(&line_changes())),
         (
@@ -721,6 +956,9 @@ fn current() -> Value {
             "RepeatReason",
             values(&[RepeatReason::AgentMarked, RepeatReason::Similar]),
         ),
+        ("ScriptStatus", values(&script_statuses())),
+        ("ScriptDraftStatus", values(&script_draft_statuses())),
+        ("DraftStage", values(&draft_stages())),
     ]);
     json!({ "structs": structs, "enums": enums })
 }

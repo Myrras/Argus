@@ -16,7 +16,7 @@ import styles from "./Sidebar.module.css";
 
 export function Sidebar({ now }: { now: number }) {
   const sidebarWidth = useLayoutStore((s) => s.sidebarWidth);
-  const status = useBackendSettingsStore((s) => s.status);
+  const accounts = useBackendSettingsStore((s) => s.accounts);
   const openSettings = useSettingsRequestStore((s) => s.open);
   const report = useReviewStore((s) => s.lastRefresh);
   const setupChanged = useBackendSettingsStore((s) => s.setupChanged);
@@ -35,9 +35,9 @@ export function Sidebar({ now }: { now: number }) {
         <ReviewList now={now} />
       </section>
       <ProvidersSection
-        status={status}
+        accounts={accounts}
         errors={currentErrors(report, setupChanged)}
-        onOpenSettings={openSettings}
+        onOpenSettings={(account) => openSettings("accounts", account)}
       />
     </aside>
   );
