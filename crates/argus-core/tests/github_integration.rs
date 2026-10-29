@@ -3,7 +3,7 @@
 //! Opt-in: every test is `#[ignore]`d, so `cargo test` skips them; run them
 //! with `just test-integration` (nightly in CI). They need the `gh` CLI and a
 //! token in `INTEGRATION_TOKEN`; without the token each test says so and
-//! returns. The target is the public repo `RobbieMinderhoud/ci-workflows`
+//! returns. The target is the public repo `RobbieMinderhoud/rust-base`
 //! (merged PRs #1 and #2), so a token with read access to public repos is
 //! enough. Nothing here writes to GitHub: only the provider's read methods
 //! are called.
@@ -22,7 +22,7 @@ use argus_core::provider::{
 use argus_core::store::Store;
 use argus_core::{AccountState, Core, Settings};
 
-const REPO: &str = "RobbieMinderhoud/ci-workflows";
+const REPO: &str = "RobbieMinderhoud/rust-base";
 /// PR #2 "Lean CI defaults": one commit on top of `PR2_BASE`, merged.
 const PR2_TITLE: &str = "Lean CI defaults: ubuntu rust job, Windows on main or by label";
 const PR2_HEAD: &str = "ef8723eb59a8fc4d92ef3903fc06e415c61ec764";
