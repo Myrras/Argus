@@ -17,6 +17,10 @@
  *   plain text shows until it loads), compact, with a copy button.
  * - `renderFence` lets the caller take over a fence by its info string (a
  *   thread renders ` ```suggestion ` blocks as a diff).
+ * - `findUnit`: the find bar's matches in this text are marked
+ *   (`lib/markdownText.rehypeFindMarks`: `<mark>` in the text nodes, so
+ *   links keep working; a fence's code block highlights its own), the
+ *   current one standing out. The wrapper carries `data-find-unit`.
  */
 
 import {
@@ -25,6 +29,7 @@ import {
   Suspense,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type AnchorHTMLAttributes,
@@ -38,6 +43,9 @@ import ReactMarkdown, {
 import remarkGfm from "remark-gfm";
 
 import { openExternal, resolveLink, type LinkBase } from "../lib/links";
+import { textMatches } from "../lib/findQuery";
+import { rehypeFindMarks } from "../lib/markdownText";
+import { useFindMarks } from "../state/findStore";
 import { useReviewStore } from "../state/reviewStore";
 import { CheckIcon, CopyIcon, ImageIcon } from "./icons";
 import styles from "./Markdown.module.css";
@@ -167,7 +175,16 @@ function fenceOf(pre: HastNode | undefined): { info: string; code: string } {
 }
 
 /** A fenced code block: label, copy button, highlighted text. */
-export function CodeBlock({ info, code }: { info: string; code: string }) {
+export function CodeBlock({
+  info,
+  code,
+  find = null,
+}: {
+  info: string;
+  code: string;
+  /** The comment's find unit and where this code starts in its text. */
+  find?: { unit: string; base: number } | null;
+}) {
   const [copied, setCopied] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
@@ -194,7 +211,7 @@ export function CodeBlock({ info, code }: { info: string; code: string }) {
         </button>
       </div>
       <Suspense fallback={<pre className={`${styles.plain} mono`}>{code}</pre>}>
-        <CodeEditorBlock code={code} info={info} />
+        <CodeEditorBlock code={code} info={info} find={find} />
       </Suspense>
     </div>
   );
@@ -202,11 +219,20 @@ export function CodeBlock({ info, code }: { info: string; code: string }) {
 
 /** The caller's fence renderer, for the module-level `pre` below. */
 const FenceContext = createContext<RenderFence | undefined>(undefined);
+/** The text's find unit, for a fence's code block. */
+const FindUnitContext = createContext<string | undefined>(undefined);
 
 function MarkdownPre({ node }: ExtraProps) {
   const renderFence = useContext(FenceContext);
+  const unit = useContext(FindUnitContext);
   const { info, code } = fenceOf(node);
-  return renderFence?.(info, code) ?? <CodeBlock info={info} code={code} />;
+  const base = Number(node?.properties.dataFindBase);
+  const find = unit && Number.isFinite(base) ? { unit, base } : null;
+  return (
+    renderFence?.(info, code) ?? (
+      <CodeBlock info={info} code={code} find={find} />
+    )
+  );
 }
 
 /**
@@ -224,17 +250,58 @@ const REMARK = [remarkGfm];
 export function Markdown({
   children,
   renderFence,
+  findUnit,
 }: {
   children: string;
   renderFence?: RenderFence;
+  /** The find bar's unit of this text (`lib/findInReview`). */
+  findUnit?: string;
 }) {
+  const marks = useFindMarks(findUnit);
+  const rehype = useMemo(
+    () => (marks ? [[rehypeFindMarks, marks] as const] : undefined),
+    [marks],
+  );
   return (
-    <div className={styles.prose}>
+    <div className={styles.prose} data-find-unit={findUnit}>
       <FenceContext.Provider value={renderFence}>
-        <ReactMarkdown remarkPlugins={REMARK} components={COMPONENTS}>
-          {children}
-        </ReactMarkdown>
+        <FindUnitContext.Provider value={findUnit}>
+          <ReactMarkdown
+            remarkPlugins={REMARK}
+            rehypePlugins={rehype as never}
+            components={COMPONENTS}
+          >
+            {children}
+          </ReactMarkdown>
+        </FindUnitContext.Provider>
       </FenceContext.Provider>
     </div>
   );
+}
+
+/**
+ * Plain text (a thread's author, a finding's title) with the find bar's
+ * matches marked, as `Markdown` marks a comment's.
+ */
+export function FindText({ text, unit }: { text: string; unit: string }) {
+  const marks = useFindMarks(unit);
+  if (!marks) return <>{text}</>;
+  const parts: ReactNode[] = [];
+  let at = 0;
+  textMatches(text, marks.re).forEach(([s, e], k) => {
+    if (s > at) parts.push(text.slice(at, s));
+    parts.push(
+      <mark
+        key={k}
+        className="argus-find-match"
+        data-find-match={k}
+        data-find-current={k === marks.current ? "true" : undefined}
+      >
+        {text.slice(s, e)}
+      </mark>,
+    );
+    at = e;
+  });
+  if (at < text.length) parts.push(text.slice(at));
+  return <span data-find-unit={unit}>{parts}</span>;
 }

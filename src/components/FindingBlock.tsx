@@ -36,7 +36,8 @@ import { useThreadStore } from "../state/threadStore";
 import { Badge } from "./Badge";
 import { CommentComposer } from "./CommentComposer";
 import { ExternalLinkIcon } from "./icons";
-import { Markdown } from "./Markdown";
+import { FindText, Markdown } from "./Markdown";
+import { findingUnit } from "../lib/findInReview";
 import styles from "./FindingBlock.module.css";
 
 const NO_THREADS: StoredThread[] = [];
@@ -166,7 +167,9 @@ export function FindingBlock({
           </>
         )}
       </div>
-      <p className={styles.title}>{f.title}</p>
+      <p className={styles.title}>
+        <FindText text={f.title} unit={findingUnit(f.id, "title")} />
+      </p>
       {ui.error && (
         <p className={styles.error} role="alert">
           Not posted: {ui.error.message}
@@ -202,7 +205,9 @@ export function FindingBlock({
       ) : (
         !f.dismissed && (
           <div className={styles.body}>
-            <Markdown>{ui.edit ?? f.body}</Markdown>
+            <Markdown findUnit={findingUnit(f.id, "body")}>
+              {ui.edit ?? f.body}
+            </Markdown>
           </div>
         )
       )}

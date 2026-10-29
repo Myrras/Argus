@@ -1,12 +1,12 @@
-//! The `Core` entry points' edges: unknown ids, bad input, the GitLab token
-//! calls without an instance, and the poll loop across a settings change.
-//! Never touches the keychain (every token call here fails before it).
+//! The `Core` entry points' edges: unknown ids, bad input, and the poll
+//! loop across a settings change.
 
 mod support;
 
 use std::sync::mpsc;
 use std::time::Duration;
 
+use argus_core::provider::ProviderId;
 use argus_core::{Core, CoreError, ReviewId, ThreadId};
 
 use support::*;
@@ -74,16 +74,6 @@ fn files_outside_the_diff_are_refused() {
 }
 
 #[test]
-fn gitlab_token_calls_need_an_instance_first() {
-    let core = Core::new();
-    assert!(!core.gitlab_token_present());
-    assert!(matches!(
-        core.set_gitlab_token("glpat-fixture-not-a-real-token"),
-        Err(CoreError::InvalidInput(m)) if !m.contains("glpat")
-    ));
-}
-
-#[test]
 fn a_settings_change_restarts_the_poll_loop() {
     let p = Platform::new();
     let core = core_over(&p);
@@ -96,11 +86,10 @@ fn a_settings_change_restarts_the_poll_loop() {
     });
     let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
 
-    // GitHub off: the loop restarts over the new (empty) provider list,
-    // with the same callback.
-    let mut s = core.settings();
-    s.github.enabled = false;
-    core.update_settings(s).unwrap();
+    // github.com off: the loop restarts over the new (empty) provider
+    // list, with the same callback.
+    core.update_settings(host_off(&core, ProviderId::Github, "github.com"))
+        .unwrap();
     let after = rx.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(after >= first);
     let calls = p.calls().len();

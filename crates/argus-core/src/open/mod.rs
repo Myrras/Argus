@@ -15,6 +15,15 @@
 //! for a file that would run instead of open (an executable, a `.command`,
 //! an `.exe`): the file comes from someone else's change.
 //!
+//! With an editor set and `openWithRepository` on (the default), the
+//! clone's root is handed over with the file ([`Opener::open_project_file`]),
+//! so the editor shows the project; the OS default app gets the file only.
+//!
+//! A repository with no clone set is offered one Argus finds on disk
+//! ([`Core::suggest_clone`], the scan in [`crate::git::discover`]): "Use
+//! it" stores it, "No thanks" is remembered in
+//! [`Settings::clone_suggest_ignored`].
+//!
 //! Launching goes through the injected [`Opener`] (the shell's, over
 //! tauri-plugin-opener; tests use a fake), so the core stays Tauri-free.
 //! Nothing here writes to the clone: the only git call is `rev-parse HEAD`
@@ -38,6 +47,13 @@ pub trait Opener: Send + Sync {
     /// Show `path` selected in the OS file manager (Finder / Explorer).
     /// Errors are app-owned text.
     fn reveal(&self, path: &Path) -> CoreResult<()>;
+
+    /// Open the folder `root` together with `file` in `app`, so the editor
+    /// shows the project with the file open. The default opens just the
+    /// file (an opener that cannot do better, e.g. Windows).
+    fn open_project_file(&self, app: &str, _root: &Path, file: &Path) -> CoreResult<()> {
+        self.open(file, Some(app))
+    }
 }
 
 /// The opener of a core the shell did not set one on.
@@ -91,6 +107,17 @@ pub struct CloneStatus {
     pub head: Option<String>,
     /// The clone is on the review's head commit.
     pub matches_review_head: bool,
+}
+
+/// A clone of a review's repository found on disk, offered to the user for
+/// a repository that has none set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneSuggestion {
+    /// The repository it is a clone of, `host/repo` (the settings key).
+    pub repo: String,
+    /// Where it is.
+    pub path: PathBuf,
 }
 
 /// Where a repository path is in the clone at `root` (canonical).
@@ -231,7 +258,7 @@ impl Core {
         *self.opener.lock().expect("opener lock poisoned") = opener;
     }
 
-    fn opener(&self) -> Arc<dyn Opener> {
+    pub(crate) fn opener(&self) -> Arc<dyn Opener> {
         self.opener.lock().expect("opener lock poisoned").clone()
     }
 
@@ -273,6 +300,62 @@ impl Core {
             head,
             matches_review_head,
         })
+    }
+
+    /// A clone of the review's repository found on disk, for a repository
+    /// that has none set and that the user did not say "No thanks" to
+    /// ([`ignore_clone_suggestion`](Self::ignore_clone_suggestion)); `None`
+    /// otherwise, and when nothing is found. Blocking and read-only: it
+    /// walks the folders of [`git::discover`] and reads remotes. Never
+    /// called from a poll or a refresh.
+    pub fn suggest_clone(&self, id: ReviewId) -> CoreResult<Option<CloneSuggestion>> {
+        let record = self.review(id)?;
+        let settings = self.settings();
+        let repo = crate::settings::repo_key(&record.review);
+        if settings.clone_paths.contains_key(&repo)
+            || settings.clone_suggest_ignored.contains(&repo)
+        {
+            return Ok(None);
+        }
+        let roots = git::discover::search_roots(
+            settings.clone_paths.values().map(PathBuf::as_path),
+            git::discover::home_dir().as_deref(),
+        );
+        let found = git::discover::find_clone(&record.review.host, &record.review.repo, &roots);
+        Ok(found.map(|path| CloneSuggestion { repo, path }))
+    }
+
+    /// Store `path` as the local clone of the review's repository (the
+    /// suggestion's "Use it"); the settings afterwards. The folder is
+    /// checked to be a clone of that repository again here: the webview
+    /// hands back a path, and only one whose remote matches is stored.
+    pub fn use_clone_suggestion(&self, id: ReviewId, path: &Path) -> CoreResult<Settings> {
+        let record = self.review(id)?;
+        let dir = std::fs::canonicalize(path)
+            .ok()
+            .filter(|d| d.is_dir())
+            .ok_or_else(|| CoreError::InvalidInput("that folder is not there".into()))?;
+        if !git::discover::is_clone_of(&record.review.host, &record.review.repo, &dir) {
+            return Err(CoreError::InvalidInput(
+                "that folder is not a clone of this review's repository".into(),
+            ));
+        }
+        let mut settings = self.settings();
+        settings
+            .clone_paths
+            .insert(crate::settings::repo_key(&record.review), dir);
+        self.update_settings(settings)
+    }
+
+    /// Never offer a found clone for the review's repository again (the
+    /// suggestion's "No thanks"); the settings afterwards.
+    pub fn ignore_clone_suggestion(&self, id: ReviewId) -> CoreResult<Settings> {
+        let record = self.review(id)?;
+        let mut settings = self.settings();
+        settings
+            .clone_suggest_ignored
+            .insert(crate::settings::repo_key(&record.review));
+        self.update_settings(settings)
     }
 
     /// Show the review's clone folder in the file manager. Only the folder
@@ -335,7 +418,7 @@ impl Core {
 
     /// The review's file `path` in the working tree, which must be a
     /// regular file.
-    fn openable(&self, id: ReviewId, path: &str) -> CoreResult<PathBuf> {
+    fn openable(&self, id: ReviewId, path: &str) -> CoreResult<(PathBuf, PathBuf)> {
         let (_, root) = self.clone_root(id)?;
         let root = root.ok_or_else(|| {
             CoreError::InvalidInput("no local clone is set for this repository".into())
@@ -346,7 +429,7 @@ impl Core {
                 "the file is not in your working tree".into(),
             ));
         }
-        Ok(r.path)
+        Ok((root, r.path))
     }
 
     /// Open the review's file `path` from its local clone in the editor
@@ -354,7 +437,7 @@ impl Core {
     /// default application instead. The path is resolved here, never taken
     /// from the webview.
     pub fn open_in_editor(&self, id: ReviewId, path: &str, use_default: bool) -> CoreResult<()> {
-        let file = self.openable(id, path)?;
+        let (root, file) = self.openable(id, path)?;
         let settings = self.settings();
         let app = if use_default {
             None
@@ -368,13 +451,20 @@ impl Core {
                     .into(),
             ));
         }
-        self.opener().open(&file, app)
+        match app {
+            // The folder goes with the file when asked: the editor then
+            // shows the project. The OS default app gets the file only.
+            Some(app) if settings.open_with_repository => {
+                self.opener().open_project_file(app, &root, &file)
+            }
+            _ => self.opener().open(&file, app),
+        }
     }
 
     /// Show the review's file `path` from its local clone in the file
     /// manager.
     pub fn reveal_local_file(&self, id: ReviewId, path: &str) -> CoreResult<()> {
-        let file = self.openable(id, path)?;
+        let (_, file) = self.openable(id, path)?;
         self.opener().reveal(&file)
     }
 }

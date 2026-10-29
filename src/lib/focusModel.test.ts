@@ -24,6 +24,7 @@ const anchorAt = (path: string, line: number, side: "old" | "new" = "new") => ({
   headSha: "c".repeat(40),
   diffHunk: null,
   currentLine: null,
+  outsideDiff: false,
 });
 
 const general = thread({ author: "carol-fixture", anchor: null });

@@ -1,0 +1,82 @@
+/* Settings → Accounts. The cards are SettingsModal's (.card); this lays out
+   one account's header and picker. Nothing may widen the pane: long hosts
+   and users end in an ellipsis. */
+
+.card {
+  transition: border-color var(--dur-2) var(--ease-out);
+}
+
+/* The account the tab was opened on (the sidebar's Providers section). */
+.card[data-highlighted="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.host {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.card[data-enabled="false"] .host {
+  color: var(--text-muted);
+}
+
+.state {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+.state[data-tone="ok"] {
+  color: var(--success);
+}
+
+.state[data-tone="warning"] {
+  color: var(--warning);
+}
+
+.switch {
+  flex: none;
+}
+
+.picker {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.picker label {
+  flex: none;
+}
+
+.picker select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.cli {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+}

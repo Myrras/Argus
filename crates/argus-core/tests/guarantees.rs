@@ -9,7 +9,9 @@
 //! - (1, 2) an outdated thread stays fully readable: notes, then/now code
 //!   and the commit that removed its line;
 //! - (4, 5, 9) after new commits: re-review with the since-last-review
-//!   diff; from the file list to a posted comment without leaving Argus.
+//!   diff; from the file list to a posted comment without leaving Argus;
+//! - a submit script runs only after a successful submit that ticked it,
+//!   and the GitLab token (glab's login) never reaches it.
 //!
 //! The AI pass' side of (6) and (8) needs the run executor, so it lives in
 //! `src/ai/guarantees.rs`.
@@ -21,7 +23,7 @@ use std::time::Duration;
 
 use argus_core::history::{LineChange, TimelineEvent};
 use argus_core::provider::{
-    MyReviewState, ReviewState, ReviewVerdict, Reviewer, ReviewerState, Side,
+    MyReviewState, ProviderId, ReviewState, ReviewVerdict, Reviewer, ReviewerState, Side,
 };
 use argus_core::{
     CoreError, LineStatus, NewComment, PostErrorKind, PostResult, ReviewStatus, RoundReason,
@@ -68,6 +70,15 @@ fn nothing_reaches_the_platform_without_an_explicit_write() {
     core.set_file_viewed(id, PATH, true).unwrap();
     core.set_file_viewed(id, PATH, false).unwrap();
     core.commentable_lines(id, PATH).unwrap();
+    // The batched reads and the disk cache.
+    let batch = core
+        .files_at(id, &[("c2".to_string(), PATH.to_string())])
+        .unwrap();
+    assert!(batch[0].is_ok());
+    assert!(core.commentable_lines_of(id, &[PATH.to_string()])[0].is_ok());
+    core.list_files(id, false).unwrap();
+    core.cache_stats().unwrap();
+    core.clear_cache().unwrap();
 
     // Thread history, computed and cached.
     let mine = thread_map(&core)[MY_THREAD].thread_id;
@@ -127,10 +138,22 @@ fn nothing_reaches_the_platform_without_an_explicit_write() {
     assert!(p.reads() > 20, "the test should exercise the reads");
     assert_eq!(p.writes(), Vec::<&str>::new());
 
-    // A settings change rebuilds the providers from settings (GitHub off
-    // here, so no `gh` is probed): still nothing written.
-    let mut s = core.settings();
-    s.github.enabled = false;
+    // Reading the accounts, Check again, switching the host off and on:
+    // nothing written either.
+    core.list_accounts(false);
+    core.list_accounts(true);
+    core.update_settings(host_off(&core, ProviderId::Github, "github.com"))
+        .unwrap();
+    core.list_accounts(false);
+    let mut on = core.settings();
+    on.accounts.clear();
+    core.update_settings(on).unwrap();
+    assert!(core.refresh().errors.is_empty());
+    assert_eq!(p.writes(), Vec::<&str>::new());
+
+    // A settings change rebuilds the providers (github.com switched off):
+    // still nothing written.
+    let mut s = host_off(&core, ProviderId::Github, "github.com");
     s.ai.enabled = false;
     s.poll_interval_secs = 600;
     core.update_settings(s).unwrap();
@@ -624,6 +647,7 @@ fn a_submit_is_one_review_state_write() {
 /// the submit adds the user first. That add is the one extra write, it
 /// happens only on the submit, and a reviewer gets none.
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_gitlab_change_request_adds_the_user_only_on_submit() {
     use std::sync::Arc;
 
@@ -743,4 +767,201 @@ fn refreshing_one_review_only_reads_that_review() {
     // No list call, no writes: the user, the review, its threads.
     assert_eq!(methods, ["current_user", "fetch_review", "fetch_threads"]);
     assert_eq!(p.writes(), Vec::<&str>::new());
+}
+
+// ------------------------------------------------ Submit scripts
+
+/// An executable script in `dir` that appends what it was told to `log`
+/// next to itself: its verdict, args, environment and stdin.
+#[cfg(unix)]
+fn logging_script(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("log.sh");
+    support::script::write_executable(
+        &path,
+        "#!/bin/sh\nlog=\"$(dirname \"$0\")/log\"\n{ echo \"verdict=$ARGUS_VERDICT\"; \
+         for a in \"$@\"; do echo \"arg=$a\"; done; env; echo \"stdin=$(cat)\"; } >> \"$log\"\n\
+         echo done\n",
+    );
+    path
+}
+
+#[cfg(unix)]
+fn submit_script(command: &std::path::Path) -> argus_core::SubmitScript {
+    argus_core::SubmitScript {
+        id: "log".into(),
+        name: "Log it".into(),
+        command: command.to_string_lossy().into_owned(),
+        args: vec!["--fixture".into()],
+        verdicts: vec![
+            ReviewVerdict::Approve,
+            ReviewVerdict::RequestChanges,
+            ReviewVerdict::Comment,
+        ],
+        repos: Vec::new(),
+        default_on: true,
+        timeout_secs: 60,
+    }
+}
+
+#[cfg(unix)]
+fn scripts_done(core: &argus_core::Core) -> mpsc::Receiver<argus_core::ScriptsDone> {
+    let (tx, rx) = mpsc::channel();
+    let tx = std::sync::Mutex::new(tx);
+    core.on_scripts_done(move |d| {
+        let _ = tx.lock().unwrap().send(d.clone());
+    });
+    rx
+}
+
+/// A submit script runs only after a successful Submit review, and only
+/// when ticked: never on a refresh, the poll loop, a refused or invalid
+/// submit, a submit without it ticked, or a settings change.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_submit_script_runs_only_after_a_successful_submit_that_ticked_it() {
+    #[cfg(unix)]
+    {
+        use argus_core::store::Store;
+        use argus_core::{Core, ScriptStatus, Settings};
+
+        let dir = tempfile::tempdir().unwrap();
+        let command = logging_script(dir.path());
+        let log = dir.path().join("log");
+        let p = Platform::new();
+        p.with(|w| w.detail.my_review_state = MyReviewState::AwaitingReview);
+        let settings = Settings {
+            submit_scripts: vec![submit_script(&command)],
+            ..Settings::default()
+        };
+        let core = Core::with_providers_and_settings(
+            Store::in_memory().unwrap(),
+            settings,
+            vec![p.clone()],
+        );
+        let done = scripts_done(&core);
+        assert!(core.refresh().errors.is_empty());
+        let id = the_review(&core).id;
+        let ticked = vec!["log".to_string()];
+
+        // Reads of every kind.
+        core.refresh();
+        core.refresh_review(id).unwrap();
+        core.list_files(id, false).unwrap();
+        core.review_histories(id).unwrap();
+        let (tx, rx) = mpsc::channel();
+        core.start_polling(move |_| {
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        core.stop_polling();
+
+        // Submits that do not go through.
+        let head = the_review(&core).head_sha;
+        assert_eq!(
+            core.submit_review_with_scripts(id, ReviewVerdict::Comment, &head, None, &ticked)
+                .unwrap_err()
+                .kind,
+            PostErrorKind::InvalidInput
+        );
+        assert_eq!(
+            core.submit_review_with_scripts(id, ReviewVerdict::Approve, "c0", None, &ticked)
+                .unwrap_err()
+                .kind,
+            PostErrorKind::HeadMoved
+        );
+        // A submit without the script ticked.
+        core.submit_review_with_scripts(
+            id,
+            ReviewVerdict::RequestChanges,
+            &head,
+            Some("Not yet."),
+            &[],
+        )
+        .unwrap();
+        assert!(core.wait_scripts_idle(Duration::from_secs(20)));
+        assert!(
+            !log.exists(),
+            "a script ran without a ticked, successful submit"
+        );
+        assert!(done.try_recv().is_err());
+
+        // Ticked and submitted: it runs once, after the platform write.
+        p.with(|w| w.detail.my_review_state = MyReviewState::AwaitingReview);
+        core.refresh();
+        let before = p.writes().len();
+        core.submit_review_with_scripts(id, ReviewVerdict::Approve, &head, None, &ticked)
+            .unwrap();
+        assert_eq!(p.writes().len(), before + 1);
+        let report = done.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(report.review_id, id);
+        assert_eq!(report.results.len(), 1);
+        assert_eq!(report.results[0].status, ScriptStatus::Ok, "{report:?}");
+        assert_eq!(report.results[0].stdout, "done\n");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.matches("verdict=").count(), 1);
+        assert!(text.contains("verdict=approve\narg=--fixture\n"), "{text}");
+
+        // A settings change runs nothing either.
+        core.update_settings(host_off(&core, ProviderId::Github, "github.com"))
+            .unwrap();
+        assert!(core.wait_scripts_idle(Duration::from_secs(20)));
+        assert_eq!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .matches("verdict=")
+                .count(),
+            1
+        );
+        assert!(done.try_recv().is_err());
+    }
+}
+
+/// The GitLab token (glab's login, what the provider's calls go out with)
+/// never reaches a submit script: not in its environment, stdin or
+/// arguments, nor in what Argus reports back.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn the_gitlab_token_never_reaches_a_submit_script() {
+    #[cfg(unix)]
+    {
+        use std::sync::Arc;
+
+        use argus_core::store::Store;
+        use argus_core::{Core, ScriptStatus, Settings};
+        use support::gitlab as gl;
+
+        let dir = tempfile::tempdir().unwrap();
+        let command = logging_script(dir.path());
+        let (base, _log) = gl::submitting(gl::SUBMIT);
+        let settings = Settings {
+            submit_scripts: vec![submit_script(&command)],
+            ..Settings::default()
+        };
+        let core = Core::with_providers_and_settings(
+            Store::in_memory().unwrap(),
+            settings,
+            vec![Arc::new(gl::provider(&base))],
+        );
+        let done = scripts_done(&core);
+        assert!(core.refresh().errors.is_empty());
+        let id = core.reviews().unwrap()[0].id;
+        core.submit_review_with_scripts(
+            id,
+            ReviewVerdict::RequestChanges,
+            gl::HEAD_SHA,
+            Some("Not yet."),
+            &["log".to_string()],
+        )
+        .unwrap();
+        let report = done.recv_timeout(Duration::from_secs(20)).unwrap();
+        assert_eq!(report.results[0].status, ScriptStatus::Ok, "{report:?}");
+        let text = std::fs::read_to_string(dir.path().join("log")).unwrap();
+        assert!(text.contains("ARGUS_PROVIDER=gitlab"), "{text}");
+        assert!(text.contains("verdict=requestChanges"), "{text}");
+        assert!(text.contains("\"summary\":\"Not yet.\""), "{text}");
+        assert!(!text.contains(gl::TOKEN), "the token reached the script");
+        assert!(!text.contains("glpat-"), "a token reached the script");
+        let reported = serde_json::to_string(&report).unwrap();
+        assert!(!reported.contains(gl::TOKEN));
+    }
 }

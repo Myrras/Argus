@@ -45,9 +45,11 @@ export type ActionId =
   | "commentLine"
   | "submitComment"
   | "cancelComment"
+  | "insertSuggestion"
   | "openSettings"
   | "toggleThenNow"
   | "toggleFindings"
+  | "toggleWhitespace"
   | "toggleFindingSelected"
   | "nextItem"
   | "prevItem"
@@ -64,14 +66,20 @@ export type ActionId =
   | "openInEditor"
   | "showInFinder"
   // Submit review
-  | "submitReview";
+  | "submitReview"
+  // Find in the review
+  | "find"
+  | "findNext"
+  | "findPrevious";
 
 /**
  * `list`: the review list, outside fields and dialogs; `files`: the review
  * view, likewise; `composer`: inside a comment composer's text field only
- * (the composer matches them itself); `app`: window-wide.
+ * (the composer matches them itself); `find`: while the find bar is open,
+ * fields included (a composer's own key wins inside it); `app`:
+ * window-wide.
  */
-export type ActionScope = "list" | "files" | "composer" | "app";
+export type ActionScope = "list" | "files" | "composer" | "find" | "app";
 
 export type ActionGroup = "Navigate" | "Lists" | "Files" | "Comments" | "View";
 
@@ -214,6 +222,14 @@ export const ACTIONS: ActionDef[] = [
     note: "Closes the comment without saving it.",
   },
   {
+    id: "insertSuggestion",
+    label: "Insert suggestion",
+    group: "Comments",
+    scope: "composer",
+    defaults: ["Mod+KeyG"],
+    note: "In a comment or reply on new-side lines: a suggested change prefilled with those lines.",
+  },
+  {
     id: "openSettings",
     label: "Open Settings",
     group: "View",
@@ -236,6 +252,14 @@ export const ACTIONS: ActionDef[] = [
     scope: "files",
     defaults: ["KeyA"],
     note: "In a review with the AI pass on: the AI panel at the right.",
+  },
+  {
+    id: "toggleWhitespace",
+    label: "Hide whitespace changes",
+    group: "View",
+    scope: "files",
+    defaults: ["KeyW"],
+    note: "Toggles hiding lines that changed only in whitespace, in every review (like GitHub's ?w=1). Nothing is posted.",
   },
   {
     id: "toggleFindingSelected",
@@ -364,6 +388,34 @@ export const ACTIONS: ActionDef[] = [
     scope: "files",
     defaults: ["Shift+KeyS"],
     note: "Opens Submit review (Approve / Request changes). It writes only from the dialog's button.",
+  },
+  // Find in the review: window-wide, so it works from a comment's field
+  // and the code too (it replaces CodeMirror's own search).
+  {
+    id: "find",
+    label: "Find in review…",
+    group: "Navigate",
+    scope: "app",
+    defaults: ["Mod+KeyF"],
+    note: "Searches the open review: its comments, findings and both sides of the code, unloaded files included. In the review list's filter, when it has one.",
+  },
+  {
+    id: "findNext",
+    label: "Next match",
+    group: "Navigate",
+    scope: "find",
+    defaults: ["Mod+KeyG"],
+    repeats: true,
+    note: "While the find bar is open; Enter in its field does the same.",
+  },
+  {
+    id: "findPrevious",
+    label: "Previous match",
+    group: "Navigate",
+    scope: "find",
+    defaults: ["Mod+Shift+KeyG"],
+    repeats: true,
+    note: "While the find bar is open; Shift+Enter in its field does the same.",
   },
 ];
 
@@ -597,6 +649,17 @@ export function bindingProblem(
   return null;
 }
 
+/**
+ * Whether two scopes can share a key: a composer's keys and the find bar's
+ * may, since the composer handles its own first (inside it the composer's
+ * key wins; elsewhere only the find bar's applies).
+ */
+export function scopesShareKeys(a: ActionScope, b: ActionScope): boolean {
+  return (
+    (a === "composer" && b === "find") || (a === "find" && b === "composer")
+  );
+}
+
 /** The action (other than `action`) that already uses the binding. */
 export function findConflict(
   keymap: Keymap,
@@ -605,8 +668,9 @@ export function findConflict(
   mac: boolean = isMac,
 ): ActionId | null {
   const text = serializeBinding(binding);
+  const scope = actionDef(action).scope;
   for (const a of activeActions(mac)) {
-    if (a.id === action) continue;
+    if (a.id === action || scopesShareKeys(scope, a.scope)) continue;
     if (keymap[a.id].includes(text)) return a.id;
   }
   return null;

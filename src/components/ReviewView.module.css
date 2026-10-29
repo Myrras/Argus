@@ -90,6 +90,12 @@
   flex-direction: column;
 }
 
+/* The cards' sticky headers sit under the toolbar, and under the find bar
+   while it is open. */
+.diff[data-find-open="true"] {
+  --page-sticky-top: calc(var(--tabbar-h) + var(--findbar-h));
+}
+
 /* The toolbar is a container so it can drop words before it overflows. */
 .toolbar {
   container-type: inline-size;
@@ -146,6 +152,22 @@
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
+/* "Hide whitespace changes": an icon, plus "Whitespace hidden" while on. */
+.whitespace {
+  height: 26px;
+  padding: 0 var(--sp-2);
+  flex-shrink: 0;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.whitespace[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
 /* Two or more icon buttons as one control (diff layout, file list). */
 .segmented {
   display: inline-flex;
@@ -171,7 +193,8 @@
 /* Too narrow for the label: "Since my last review" keeps its icon (and
    its name for screen readers). */
 @container (max-width: 380px) {
-  .sinceLabel {
+  .sinceLabel,
+  .whitespaceLabel {
     display: none;
   }
 }

@@ -9,7 +9,10 @@
 
 #![allow(dead_code)]
 
+pub mod gh;
 pub mod gitlab;
+pub mod glab;
+pub mod script;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -200,6 +203,7 @@ impl Platform {
                 head_sha: "c1".into(),
                 diff_hunk: None,
                 current_line: None,
+                outside_diff: false,
             }),
             notes: vec![note(MY_THREAD, ME, at(10, 11), "Why does line 10 stay?")],
         };
@@ -382,6 +386,7 @@ impl ReviewProvider for Platform {
                 head_sha: c.head_sha.clone(),
                 diff_hunk: None,
                 current_line: None,
+                outside_diff: false,
             }),
             notes: vec![note(&id, ME, Utc::now(), &c.body)],
         });
@@ -511,6 +516,19 @@ pub fn core_over(platform: &Arc<Platform>) -> Core {
 }
 
 /// The stored review (there is one).
+/// `core`'s settings with `provider`'s `host` switched off.
+pub fn host_off(core: &Core, provider: ProviderId, host: &str) -> argus_core::Settings {
+    let mut s = core.settings();
+    s.accounts.insert(
+        argus_core::settings::account_key(provider, host),
+        argus_core::AccountChoice {
+            enabled: false,
+            account: None,
+        },
+    );
+    s
+}
+
 pub fn the_review(core: &Core) -> argus_core::ReviewRecord {
     let all = core.reviews().unwrap();
     assert_eq!(all.len(), 1);

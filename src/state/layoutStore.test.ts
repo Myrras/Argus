@@ -48,6 +48,20 @@ describe("layoutStore", () => {
     expect(saved.diffLayout).toBe("split");
   });
 
+  it("hides whitespace changes only when asked, and remembers it", async () => {
+    const store = await freshStore();
+    expect(store.getState().hideWhitespace).toBe(false);
+    store.getState().toggleHideWhitespace();
+    expect(store.getState().hideWhitespace).toBe(true);
+    const reloaded = await freshStore();
+    expect(reloaded.getState().hideWhitespace).toBe(true);
+    reloaded.getState().setHideWhitespace(false);
+    expect((await freshStore()).getState().hideWhitespace).toBe(false);
+    // Anything but true reads as off.
+    localStorage.setItem("argus.layout", JSON.stringify({ hideWhitespace: 1 }));
+    expect((await freshStore()).getState().hideWhitespace).toBe(false);
+  });
+
   it("remembers the diff layout and the file list mode", async () => {
     const store = await freshStore();
     expect(store.getState().diffLayout).toBe("unified");

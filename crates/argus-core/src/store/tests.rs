@@ -24,6 +24,7 @@ fn migrates_an_empty_database_to_the_full_schema() {
     let tables = table_names(&store);
     for t in [
         "checklist",
+        "content_cache",
         "findings",
         "notes",
         "reviews",
@@ -433,6 +434,10 @@ fn upgrades_every_older_database_to_the_latest_keeping_its_data() {
         assert_eq!(verdicts[0].ai_label, Some(VerdictLabel::Addressed));
         // No run yet: the AI pass starts from scratch for this review.
         assert!(ai_store::run(&store, r.id).unwrap().is_none());
+        // The disk cache (migration 15) starts empty and takes entries.
+        assert_eq!(store.cache_stats().unwrap().entries, 0, "v{version}");
+        store.cache_put("k", "file", b"text", 1 << 20).unwrap();
+        assert_eq!(store.cache_get("k").unwrap().as_deref(), Some(&b"text"[..]));
         // New writes land in the upgraded schema.
         store
             .set_viewed(r.id, "src/other.rs", "blob2", at(11, 1))

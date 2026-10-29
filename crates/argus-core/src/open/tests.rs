@@ -547,3 +547,88 @@ fn a_file_set_as_the_clone_is_not_revealed() {
     ));
     assert!(opener.revealed.lock().unwrap().is_empty());
 }
+
+/// Records project opens apart from file opens.
+#[derive(Default)]
+struct ProjectOpener {
+    projects: Mutex<Vec<(String, PathBuf, PathBuf)>>,
+    files: Mutex<Vec<(PathBuf, Option<String>)>>,
+}
+
+impl Opener for ProjectOpener {
+    fn open(&self, path: &Path, app: Option<&str>) -> CoreResult<()> {
+        self.files
+            .lock()
+            .unwrap()
+            .push((path.to_path_buf(), app.map(str::to_string)));
+        Ok(())
+    }
+    fn reveal(&self, _path: &Path) -> CoreResult<()> {
+        Ok(())
+    }
+    fn open_project_file(&self, app: &str, root: &Path, file: &Path) -> CoreResult<()> {
+        self.projects.lock().unwrap().push((
+            app.to_string(),
+            root.to_path_buf(),
+            file.to_path_buf(),
+        ));
+        Ok(())
+    }
+}
+
+#[test]
+fn an_editor_gets_the_repository_with_the_file() {
+    let (_dir, root) = canonical_tempdir();
+    std::fs::write(root.join("a.rs"), "x").unwrap();
+    std::fs::write(root.join("b.md"), "x").unwrap();
+    let (core, id, _) = core_at("h1", Some(&root));
+    let opener = Arc::new(ProjectOpener::default());
+    core.set_opener(opener.clone());
+    let mut s = core.settings();
+    assert!(s.open_with_repository, "on by default");
+    s.default_editor = Some("/Applications/Zed.app".into());
+    core.update_settings(s.clone()).unwrap();
+
+    core.open_in_editor(id, "a.rs", false).unwrap();
+    assert_eq!(
+        *opener.projects.lock().unwrap(),
+        [(
+            "/Applications/Zed.app".to_string(),
+            root.clone(),
+            root.join("a.rs")
+        )]
+    );
+    // The OS default app: the file only.
+    core.open_in_editor(id, "b.md", true).unwrap();
+    assert_eq!(*opener.files.lock().unwrap(), [(root.join("b.md"), None)]);
+    // Switch off: today's behaviour.
+    s.open_with_repository = false;
+    core.update_settings(s).unwrap();
+    core.open_in_editor(id, "a.rs", false).unwrap();
+    assert_eq!(opener.projects.lock().unwrap().len(), 1);
+    assert_eq!(
+        opener.files.lock().unwrap()[1],
+        (root.join("a.rs"), Some("/Applications/Zed.app".to_string()))
+    );
+}
+
+#[test]
+fn project_open_falls_back_to_the_file() {
+    let (_dir, root) = canonical_tempdir();
+    std::fs::write(root.join("a.rs"), "x").unwrap();
+    let (core, id, opener) = core_at("h1", Some(&root));
+    let mut s = core.settings();
+    s.default_editor = Some("/Applications/Zed.app".into());
+    core.update_settings(s).unwrap();
+    core.open_in_editor(id, "a.rs", false).unwrap();
+    assert_eq!(
+        *opener.opened.lock().unwrap(),
+        [(root.join("a.rs"), Some("/Applications/Zed.app".to_string()))]
+    );
+}
+
+#[test]
+fn an_old_settings_file_opens_the_repository() {
+    let old: Settings = serde_json::from_str(r#"{"pollIntervalSecs": 60}"#).unwrap();
+    assert!(old.open_with_repository);
+}

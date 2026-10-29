@@ -13,7 +13,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use chrono::Utc;
 
 use super::adapter::{self, ChildSlot};
-use super::job::{self, JobContext};
+use super::job::JobContext;
 use super::model::AiRunState;
 use super::output::{self, RunOutput};
 use super::store as ai_store;
@@ -422,8 +422,10 @@ impl Inner {
             }
             Ok(mut out) => {
                 // Whatever secret the agent quoted from a file it read stays
-                // out of the store, and so off the platform.
-                output::redact(&mut out, &job::known_secrets(&ctx.settings));
+                // out of the store, and so off the platform. Argus holds no
+                // token of its own to add (gh and glab keep theirs); the
+                // token shapes cover both platforms'.
+                output::redact(&mut out, &[]);
                 ai_store::save_done(&self.store, review, record.round, &out, now)
             }
             Err(e) => ai_store::mark_failed(&self.store, review, &e, now),

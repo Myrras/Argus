@@ -1,10 +1,13 @@
 //! Review providers: one [`ReviewProvider`] per platform, normalising into
 //! the canonical [`model`].
 //!
+//! Both go through the user's own CLI and its login: GitHub through `gh`,
+//! GitLab through `glab`. Argus holds no token of either platform.
+//!
 //! Every call is blocking (as in Podium): run them on a poll thread or a
 //! `spawn_blocking` task, never on the UI thread. Every call is bounded by a
-//! timeout (`gh` is killed, an HTTP request gives up), so a hung call never
-//! blocks the poll loop for good.
+//! timeout (`gh` or `glab` is killed), so a hung call never blocks the poll
+//! loop for good.
 //!
 //! Reads are conditional where the platform allows it (see [`conditional`]):
 //! a poll that finds nothing new costs a 304 per call. A rate-limited
@@ -13,12 +16,14 @@
 mod conditional;
 pub mod github;
 mod github_conversation;
+mod github_outside;
 pub mod gitlab;
+mod http;
 pub mod model;
 mod rate_limit;
 
-pub use github::{GhAuth, GithubProvider};
-pub use gitlab::{GitlabProvider, KeychainToken, StaticToken, TokenSource};
+pub use github::GithubProvider;
+pub use gitlab::GitlabProvider;
 pub use model::{
     Anchor, ChangedFile, CommitInfo, DiffRange, DiffVersion, FileDiff, FileStatus, MyReviewState,
     Note, ProviderId, ReviewDetail, ReviewHead, ReviewRef, ReviewState, ReviewVerdict, Reviewer,
@@ -28,11 +33,12 @@ pub use model::{
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
 
+use crate::accounts::ProviderSpec;
 use crate::error::{CoreError, CoreResult};
-use crate::post::{PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote};
-use crate::settings::Settings;
+use crate::post::{
+    OutsideDiff, PlacedComment, PostError, PostErrorKind, PostedComment, PostedNote,
+};
 
 /// Read access to one platform for the current user, plus the explicit
 /// writes of M4 (posting, replying, approving, resolving threads).
@@ -92,13 +98,23 @@ pub trait ReviewProvider: Send + Sync {
     // user action; nothing else in Argus writes to a platform. The defaults
     // refuse, so a read-only provider (or a test double) needs none of them.
 
+    /// What this platform does with a comment on unchanged code outside
+    /// the diff's hunks. The default takes none (a read-only provider, a
+    /// test double).
+    fn outside_diff(&self) -> OutsideDiff {
+        OutsideDiff::None
+    }
+
     /// Post one new line comment, already placed on the current diff (see
-    /// [`post::resolve`](crate::post::resolve)).
+    /// [`post::resolve_in`](crate::post::resolve_in)).
     ///
     /// GitHub: `POST repos/{o}/{r}/pulls/{n}/comments` with `commit_id`,
-    /// `path`, `line`, `side` (+ `start_line`/`start_side`). GitLab: `POST
+    /// `path`, `line`, `side` (+ `start_line`/`start_side`); for lines
+    /// outside the diff ([`PlacedComment::in_diff`] `false`) a file comment
+    /// (`subject_type: "file"`) quoting them instead. GitLab: `POST
     /// merge_requests/:iid/discussions` with a text position from the latest
-    /// diff version, read right before posting.
+    /// diff version, read right before posting (an unchanged line, in a hunk
+    /// or not, with both `old_line` and `new_line`).
     fn post_comment(&self, _r: &ReviewRef, _c: &PlacedComment) -> PostResultOf<PostedComment> {
         Err(read_only())
     }
@@ -248,106 +264,22 @@ pub(crate) fn not_resolvable() -> PostError {
     )
 }
 
-/// The providers `settings` turns on: GitHub unless disabled, GitLab when a
-/// base URL is set (its token read from the keychain on each call).
-pub fn from_settings(settings: &Settings) -> Vec<Arc<dyn ReviewProvider>> {
-    let mut out: Vec<Arc<dyn ReviewProvider>> = Vec::new();
-    if settings.github.enabled {
-        out.push(Arc::new(GithubProvider::new(
-            settings.github.host.clone(),
-            settings.github.account.clone(),
-        )));
-    }
-    if settings.gitlab_enabled() {
-        let url = &settings.gitlab.base_url;
-        match GitlabProvider::new(url, KeychainToken::for_base_url(url)) {
-            Ok(p) => out.push(Arc::new(p)),
-            // `Settings::validated` rejects such a URL before it is saved;
-            // a hand-edited file lands here.
-            // Shown in the provider status as well (`GitlabProblem`).
-            Err(_) => tracing::warn!("ignoring the GitLab URL in settings: not https"),
-        }
-    }
-    out
-}
-
-/// Whether each provider can be used right now, for the status bar.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderStatus {
-    pub github: GithubStatus,
-    pub gitlab: GitlabStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GithubStatus {
-    /// Turned on in settings; when off, the other flags are `false`.
-    pub enabled: bool,
-    pub host: String,
-    /// The `gh` CLI could be started.
-    pub installed: bool,
-    /// `gh` has a token for the host (and the configured account).
-    pub logged_in: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GitlabStatus {
-    /// A base URL is set.
-    pub configured: bool,
-    pub base_url: String,
-    /// A token for that instance is in the keychain (never the token itself).
-    pub token_present: bool,
-    /// Why a configured GitLab is off anyway; `None` when nothing is wrong.
-    pub problem: Option<GitlabProblem>,
-    /// The URL is plain http to a host other than this machine: the token
-    /// travels unencrypted. Allowed (a VPN), but shown.
-    pub insecure: bool,
-}
-
-/// Why a configured GitLab is not used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum GitlabProblem {
-    /// The URL is not one Argus sends the token to: not http(s), or not a
-    /// plain instance URL (userinfo, query or fragment). Saving settings
-    /// refuses it; a hand-edited file can still hold one.
-    InvalidUrl,
-}
-
-/// The [`ProviderStatus`] for `settings`. Blocking: runs `gh auth token`
-/// (local, no network) and reads the keychain.
-pub fn status(settings: &Settings) -> ProviderStatus {
-    let gh = &settings.github;
-    let auth = if gh.enabled {
-        GithubProvider::new(gh.host.clone(), gh.account.clone()).auth_status()
-    } else {
-        GhAuth {
-            installed: false,
-            logged_in: false,
-        }
-    };
-    let url = settings.gitlab.base_url.trim().to_string();
-    // The same check `from_settings` makes: an unusable URL means no GitLab
-    // provider, and no keychain lookup for it either.
-    let problem = (!url.is_empty() && gitlab::normalize_base_url(&url).is_none())
-        .then_some(GitlabProblem::InvalidUrl);
-    ProviderStatus {
-        github: GithubStatus {
-            enabled: gh.enabled,
-            host: gh.host.clone(),
-            installed: auth.installed,
-            logged_in: auth.logged_in,
-        },
-        gitlab: GitlabStatus {
-            configured: !url.is_empty(),
-            token_present: !url.is_empty()
-                && problem.is_none()
-                && gitlab::gitlab_token_present(&url),
-            insecure: problem.is_none() && gitlab::is_insecure(&url),
-            base_url: url,
-            problem,
+/// The provider for `spec`, running `gh` / `glab` from `programs`; `None`
+/// for a GitLab host that names no instance (hand-edited settings).
+pub fn build(spec: &ProviderSpec, programs: (&str, &str)) -> Option<Arc<dyn ReviewProvider>> {
+    let (gh, glab) = programs;
+    match spec.provider {
+        ProviderId::Github => Some(Arc::new(GithubProvider::with_binary(
+            gh,
+            spec.host.clone(),
+            spec.account.clone(),
+        ))),
+        ProviderId::Gitlab => match GitlabProvider::with_binary(glab, &spec.base_url) {
+            Ok(p) => Some(Arc::new(p)),
+            Err(_) => {
+                tracing::warn!("ignoring a GitLab host that names no instance");
+                None
+            }
         },
     }
 }
@@ -422,53 +354,6 @@ pub(crate) fn first_line(message: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_gitlab_url_argus_will_not_use_says_why() {
-        // A hand-edited settings.json with userinfo in the URL: GitLab stays
-        // off, and the status says so instead of a silent log line.
-        let mut s = Settings::default();
-        s.github.enabled = false;
-        s.gitlab.base_url = "http://someone@gitlab.example.test".into();
-        assert!(from_settings(&s).is_empty());
-        let st = status(&s).gitlab;
-        assert!(st.configured);
-        assert!(!st.token_present);
-        assert!(!st.insecure);
-        assert_eq!(st.problem, Some(GitlabProblem::InvalidUrl));
-        assert_eq!(serde_json::to_value(&st).unwrap()["problem"], "invalidUrl");
-        // Not set up is no problem, just off.
-        s.gitlab.base_url = String::new();
-        assert_eq!(status(&s).gitlab.problem, None);
-    }
-
-    #[test]
-    fn the_status_flags_plain_http_off_this_machine() {
-        let mut s = Settings::default();
-        s.github.enabled = false;
-        for (url, insecure) in [
-            ("http://gitlab.vpn.test", true),
-            ("http://10.0.0.5:8080", true),
-            ("https://gitlab.example.test", false),
-            ("http://localhost:8080", false),
-            ("http://127.0.0.1:3000", false),
-            ("http://[::1]:8080", false),
-            ("", false),
-        ] {
-            s.gitlab.base_url = url.into();
-            let st = status(&s).gitlab;
-            assert_eq!(st.insecure, insecure, "{url}");
-            assert_eq!(st.problem, None, "{url}");
-            assert_eq!(
-                serde_json::to_value(&st).unwrap()["insecure"],
-                insecure,
-                "{url}"
-            );
-        }
-        // A plain-http GitLab is on: a provider is built for it.
-        s.gitlab.base_url = "http://gitlab.vpn.test".into();
-        assert_eq!(from_settings(&s).len(), 1);
-    }
 
     #[test]
     fn encodes_paths() {

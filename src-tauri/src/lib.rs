@@ -51,7 +51,7 @@ pub fn run() {
         )
         // Opens review links in the OS default browser.
         .plugin(tauri_plugin_opener::init())
-        // Native folder picker for a repository's local clone (Settings → AI),
+        // Native folder picker for a repository's local clone (Settings → Repositories),
         // and the startup error dialog.
         .plugin(tauri_plugin_dialog::init())
         // Logging sinks: stdout (dev), the per-OS log directory (support), and
@@ -170,6 +170,18 @@ pub fn run() {
             state
                 .core
                 .on_ai_state(move |ai| events::emit_ai_state(&handle, ai));
+            let handle = app.handle().clone();
+            state
+                .core
+                .on_scripts_done(move |done| events::emit_scripts_done(&handle, done));
+            let handle = app.handle().clone();
+            state
+                .core
+                .on_script_draft(move |draft| events::emit_script_draft(&handle, draft));
+            let handle = app.handle().clone();
+            state.core.on_script_draft_progress(move |progress| {
+                events::emit_script_draft_progress(&handle, progress)
+            });
             // Open in editor: files go to the editor from Rust, not the webview.
             state
                 .core
@@ -184,7 +196,15 @@ pub fn run() {
                     tracing::info!("removed {swept} stale review worktree(s)");
                 }
             });
-            start_polling(app.handle().clone(), &state);
+            // Ask gh and glab what they are logged in to (a request per
+            // host), then poll their hosts: off the main thread.
+            let handle = app.handle().clone();
+            let core = std::sync::Arc::clone(&state.core);
+            let last = state.last_refresh.clone();
+            std::thread::spawn(move || {
+                core.list_accounts(false);
+                start_polling(handle, &core, last);
+            });
             app.manage(state);
             Ok(())
         })
@@ -197,18 +217,21 @@ pub fn run() {
             commands::thread::list_threads,
             commands::files::list_files,
             commands::files::file_contents,
+            commands::files::file_contents_batch,
+            commands::files::warm_file_cache,
+            commands::files::cache_stats,
+            commands::files::clear_cache,
             commands::files::set_file_viewed,
             commands::post::post_comments,
             commands::post::reply_to_thread,
             commands::post::approve_review,
             commands::post::resolve_thread,
             commands::post::commentable_lines,
+            commands::post::commentable_lines_batch,
             commands::post::submit_review,
             commands::settings::get_settings,
             commands::settings::update_settings,
-            commands::settings::set_gitlab_token,
-            commands::settings::gitlab_token_present,
-            commands::provider::provider_status,
+            commands::provider::list_accounts,
             commands::history::thread_history,
             commands::history::review_histories,
             commands::ai::ai_state,
@@ -231,6 +254,23 @@ pub fn run() {
             commands::open::reveal_local_file,
             commands::open::clone_status,
             commands::open::reveal_clone,
+            commands::open::suggest_clone,
+            commands::open::use_clone_suggestion,
+            commands::open::ignore_clone_suggestion,
+            commands::repos::list_repositories,
+            commands::repos::reveal_repo_clone,
+            commands::scripts::script_generation_status,
+            commands::scripts::start_script_draft,
+            commands::scripts::send_script_draft,
+            commands::scripts::retry_script_draft,
+            commands::scripts::cancel_script_draft,
+            commands::scripts::list_script_drafts,
+            commands::scripts::discard_script_draft,
+            commands::scripts::link_script_draft,
+            commands::scripts::save_submit_script,
+            commands::scripts::read_submit_script,
+            commands::scripts::submit_scripts_dir,
+            commands::scripts::reveal_submit_scripts_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -275,14 +315,17 @@ fn startup_error_message(data_dir: Option<&Path>, error: &str) -> String {
 /// callback); every report is remembered for `last_refresh`, emitted, and
 /// handed to the AI pass, which queues the runs it calls for (it never
 /// waits on one).
-fn start_polling(app: tauri::AppHandle, state: &AppState) {
-    let last = state.last_refresh.clone();
+fn start_polling(
+    app: tauri::AppHandle,
+    core: &std::sync::Arc<argus_core::Core>,
+    last: std::sync::Arc<std::sync::Mutex<Option<argus_core::RefreshReport>>>,
+) {
     // Weak: the core owns this callback, a strong handle would be a cycle.
-    let core = std::sync::Arc::downgrade(&state.core);
-    state.core.start_polling(move |report| {
+    let weak = std::sync::Arc::downgrade(core);
+    core.start_polling(move |report| {
         AppState::record(&last, report);
         events::emit_report(&app, report);
-        if let Some(core) = core.upgrade() {
+        if let Some(core) = weak.upgrade() {
             core.on_refresh_report(report);
         }
     });

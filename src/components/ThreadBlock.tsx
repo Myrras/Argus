@@ -9,8 +9,9 @@
  * `ThenNow`), open by default on the user's own threads; the state lives in
  * `historyStore`, as does the thread last clicked (the `toggleThenNow` key).
  * Once its history is in, the notes become the thread's `Timeline` (notes,
- * commits and resolve events); until then, or when it fails, the plain
- * notes. "Reply" opens a reply composer at the foot of the thread
+ * commits and resolve events; the notes always the thread's own, so a
+ * reply shows with the threads' re-read, not the slower history's:
+ * `threadTimeline`); until then, or when it fails, the plain notes. "Reply" opens a reply composer at the foot of the thread
  * (`ReplyComposer`; posted only on its Reply button or ⌘↩). "Resolve" /
  * "Unresolve" (only on a thread its platform can resolve) writes that to
  * the platform at once (`threadStore.setResolved`; reversible, so no
@@ -20,7 +21,8 @@
  * reopened, it unfolds). A click, Reply, then/now or `h` still opens it.
  * The keyboard (M6, `focusStore`): the focused thread has a ring and the
  * DOM focus; Enter (or `t`) opens or folds it, `r` starts a reply, `s`
- * resolves or reopens it.
+ * resolves or reopens it. The find bar's matches are marked in its author
+ * and notes (`FindText`, `Markdown`'s `findUnit`).
  *
  * Rendered inside CodeMirror block widgets (its own React root), so it takes
  * everything as props and reports size changes through `onResize`.
@@ -30,8 +32,9 @@ import { useEffect, useRef } from "react";
 
 import type { ProviderId, StoredThread } from "../ipc/types";
 import { previewText } from "../lib/commentText";
-import { isConversationThread } from "../lib/diffThreads";
-import { parseSuggestionInfo } from "../lib/suggestions";
+import { isConversationThread, outsideDiffLabel } from "../lib/diffThreads";
+import { originalSource, parseSuggestionInfo } from "../lib/suggestions";
+import { threadTimeline } from "../lib/threadHistory";
 import { threadLocation } from "../lib/reviews";
 import { age, fullTime } from "../lib/time";
 import { useCommentStore } from "../state/commentStore";
@@ -45,12 +48,13 @@ import { useThreadHistory } from "../lib/useThreadHistory";
 import { threadDescription } from "../lib/focusModel";
 import { useThreadFocus } from "../state/focusStore";
 import { useThreadStore } from "../state/threadStore";
+import { noteUnit, threadUnit } from "../lib/findInReview";
 import { useKeymap } from "../lib/useKeymap";
 import { withHint } from "../lib/keymap";
 import { Badge } from "./Badge";
 import { ReplyComposer } from "./CommentBlocks";
 import { CaretIcon, ResolvedIcon } from "./icons";
-import { Markdown, type RenderFence } from "./Markdown";
+import { FindText, Markdown, type RenderFence } from "./Markdown";
 import { SuggestedChange } from "./SuggestedChange";
 import { ThenNow, Timeline } from "./ThreadHistory";
 import { VerdictBadge } from "./VerdictBadge";
@@ -104,7 +108,9 @@ export function ThreadBlock({
       <SuggestedChange
         spec={spec}
         body={code}
-        thread={t}
+        reviewId={t.reviewId}
+        anchor={t.anchor}
+        source={t.anchor ? originalSource(t.anchor) : null}
         provider={provider}
         onResize={onResize}
       />
@@ -135,6 +141,7 @@ export function ThreadBlock({
     requestAnimationFrame(() => resizeRef.current?.());
   }, [history, past.history, past.loading, past.error]);
 
+  const outsideLabel = outsideDiffLabel(t);
   return (
     <article
       id={`thread-${t.threadId}`}
@@ -162,10 +169,15 @@ export function ThreadBlock({
           onClick={toggle}
         >
           <CaretIcon size={12} className={styles.caret} data-open={open} />
-          <span className={styles.author}>{t.author}</span>
+          <span className={styles.author}>
+            <FindText text={t.author} unit={threadUnit(t.threadId)} />
+          </span>
           <span className={styles.count}>
             {comments} {comments === 1 ? "comment" : "comments"}
           </span>
+          {outsideLabel && (
+            <span className={styles.outside}>{outsideLabel}</span>
+          )}
           {t.resolved && (
             <Badge tone="success">
               <ResolvedIcon size={11} />
@@ -237,9 +249,10 @@ export function ThreadBlock({
       )}
       {open && past.history && (
         <Timeline
-          entries={past.history.timeline}
+          entries={threadTimeline(t, past.history)}
           now={now}
           renderFence={renderFence}
+          threadId={t.threadId}
         />
       )}
       {open && !past.history && (
@@ -253,7 +266,12 @@ export function ThreadBlock({
                 </span>
               </div>
               <div className={styles.noteBody}>
-                <Markdown renderFence={renderFence}>{n.body}</Markdown>
+                <Markdown
+                  renderFence={renderFence}
+                  findUnit={noteUnit(t.threadId, n.id)}
+                >
+                  {n.body}
+                </Markdown>
               </div>
             </li>
           ))}
@@ -263,6 +281,8 @@ export function ThreadBlock({
         <ReplyComposer
           reviewId={t.reviewId}
           threadId={t.threadId}
+          thread={t}
+          provider={provider}
           onResize={onResize}
         />
       )}
@@ -300,6 +320,9 @@ export function ListedThread({
         <span className={`${styles.location} mono`}>
           {threadLocation(t, provider)}
         </span>
+        {outsideDiffLabel(t) && (
+          <span className={styles.outside}>{outsideDiffLabel(t)}</span>
+        )}
         {t.outdated && (
           <Badge
             tone="warning"

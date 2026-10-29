@@ -112,6 +112,12 @@ export interface Anchor {
    * `lineOld`/`lineNew` are the original line). Always `null` on GitLab.
    */
   currentLine: number | null;
+  /**
+   * A GitHub file comment Argus posted for unchanged lines outside the diff,
+   * placed back at the lines its marker names ("on lines 12–18 (outside the
+   * diff)"). Always `false` on GitLab, where such lines take line comments.
+   */
+  outsideDiff: boolean;
 }
 
 /** `provider::Note`: one comment in a thread. */
@@ -245,6 +251,9 @@ export type PostErrorKind =
   | "invalidInput"
   | "githubUnavailable"
   | "gitlabNotConfigured"
+  /** The `glab` CLI was not found. */
+  | "glabMissing"
+  /** glab has no (accepted) login for the GitLab host. */
   | "gitlabAuth"
   | "provider"
   | "store"
@@ -284,8 +293,17 @@ export interface CommentableHunk {
 }
 
 /**
- * `post::CommentableLines`: the lines of one file a new comment can go on.
- * A range must stay inside one hunk.
+ * `post::OutsideDiff`: what the platform does with a comment on unchanged
+ * code outside the hunks. `native`: a line comment (GitLab). `fallback`: a
+ * file comment quoting the lines (GitHub). `none`: not commentable.
+ */
+export type OutsideDiff = "none" | "native" | "fallback";
+
+/**
+ * `post::CommentableLines`: the lines of one file a new comment can go on:
+ * the hunks' lines, and with `outside` other than `none` every other line
+ * of either side too. A range stays inside one region: one hunk, or one
+ * stretch of unchanged code between hunks (`lib/commentRanges`).
  */
 export interface CommentableLines {
   reviewId: ReviewId;
@@ -294,19 +312,19 @@ export interface CommentableLines {
   headSha: string;
   /** Empty for a file without a text patch (binary, too large). */
   hunks: CommentableHunk[];
+  /** `none` for a file without a patch, or an added or removed one. */
+  outside: OutsideDiff;
 }
 
-/** `settings::GithubSettings`. */
-export interface GithubSettings {
+/**
+ * `settings::AccountChoice`: the user's choice for one host of theirs
+ * (`Settings.accounts`, keyed `provider:host`). A host without an entry is
+ * on, with gh's active account.
+ */
+export interface AccountChoice {
   enabled: boolean;
-  host: string;
-  /** A logged-in `gh` account; `null` is gh's active account. */
+  /** GitHub only: the gh account to use; `null` is gh's active one. */
   account: string | null;
-}
-
-/** `settings::GitlabSettings`. Empty `baseUrl` = GitLab off. */
-export interface GitlabSettings {
-  baseUrl: string;
 }
 
 /** `settings::AiSettings`. */
@@ -320,7 +338,24 @@ export interface AiSettings {
    * a settings object without it still saves (serde `default`).
    */
   binary?: string | null;
+  /**
+   * The language the AI pass writes in for every repository without its
+   * own (`Settings.reviewLanguages`). Optional like `binary`; missing is
+   * `auto`.
+   */
+  reviewLanguage?: ReviewLanguage;
 }
+
+/**
+ * `settings::ReviewLanguage`: the language the AI pass writes its
+ * findings, checklist items and verdict reasons in. `auto` follows the
+ * merge request (English when unclear); `other` names any language.
+ */
+export type ReviewLanguage =
+  | { kind: "auto" }
+  | { kind: "english" }
+  | { kind: "dutch" }
+  | { kind: "other"; name: string };
 
 /**
  * `settings::ReviewSkillChoice`: which review skill a repository's AI runs
@@ -333,8 +368,8 @@ export type ReviewSkillChoice =
 
 /** `settings::Settings` (settings.json). Never holds a secret. */
 export interface Settings {
-  github: GithubSettings;
-  gitlab: GitlabSettings;
+  /** Per host of the user's, keyed `provider:host` (`github:github.com`). */
+  accounts: Record<string, AccountChoice>;
   pollIntervalSecs: number;
   ai: AiSettings;
   /** Local clone per repository, keyed `host/repo`. */
@@ -346,16 +381,186 @@ export interface Settings {
   editorOverrides?: Record<string, string>;
   /** The app for every other file; `null` is the OS default. */
   defaultEditor?: string | null;
+  /** With an editor set, open the clone's folder with the file; default on. */
+  openWithRepository?: boolean;
   /**
    * The review skill per repository, keyed `host/repo` like `clonePaths`;
    * a repository without an entry is `auto`. Optional like the others.
    */
   reviewSkills?: Record<string, ReviewSkillChoice>;
+  /**
+   * The review language per repository, keyed like `clonePaths`; a
+   * repository without an entry follows `ai.reviewLanguage`. Optional like
+   * the others.
+   */
+  reviewLanguages?: Record<string, ReviewLanguage>;
+  /**
+   * Repositories (keyed like `clonePaths`) the user said "No thanks" to
+   * when Argus offered a clone it found on disk. Optional like the others.
+   */
+  cloneSuggestIgnored?: string[];
+  /**
+   * The user's own scripts that run after a successful Submit review, in
+   * the order they run. Optional like the others.
+   */
+  submitScripts?: SubmitScript[];
+  /**
+   * How large the disk cache of file contents and file lists may grow, in
+   * MB (default 512; clamped 32–16384 by the core). Optional like the others.
+   */
+  cacheLimitMb?: number;
+}
+
+/** `cache::CacheStats`: what the disk cache holds. */
+export interface CacheStats {
+  entries: number;
+  bytes: number;
+}
+
+/**
+ * One entry of a batch answer (`file_contents_batch`,
+ * `commentable_lines_batch`): its value, or why that one failed.
+ */
+export type Batched<T> = { ok: T } | { error: IpcError };
+
+// --- Submit scripts ---
+
+/** `scripts::SubmitScript`: one script of the user's (settings.json). */
+export interface SubmitScript {
+  /** A UUID string; what the submit dialog ticks. */
+  id: string;
+  name: string;
+  /** An absolute path, `~/…`, or a bare name on the login shell's PATH. */
+  command: string;
+  args: string[];
+  /** The verdicts it is offered for; none means never. */
+  verdicts: ReviewVerdict[];
+  /** `host/repo` keys; empty means every repository. */
+  repos: string[];
+  /** Ticked in the submit dialog unless the user unticks it. */
+  defaultOn: boolean;
+  /** 5–600 seconds. */
+  timeoutSecs: number;
+}
+
+/** `scripts::ScriptStatus`: how one script's run ended. */
+export type ScriptStatus =
+  "ok" | "failed" | "timedOut" | "skipped" | "notFound" | "notExecutable";
+
+/** `scripts::ScriptResult`: one script's outcome after a submit. */
+export interface ScriptResult {
+  scriptId: string;
+  name: string;
+  status: ScriptStatus;
+  /** `null` when it did not run to an exit. */
+  exitCode: number | null;
+  /** The tail of its output (at most 16 KB each). */
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  /** Argus' own explanation ("not executable — run chmod +x …"). */
+  message: string | null;
+  finishedAt: string;
+}
+
+/** `scripts::ScriptsDone`: the `scripts:done` payload. */
+export interface ScriptsDone {
+  reviewId: ReviewId;
+  results: ScriptResult[];
+}
+
+/** `scripts::GeneratedScript`: a script the AI wrote, to read before saving. */
+export interface GeneratedScript {
+  name: string;
+  verdicts: ReviewVerdict[];
+  script: string;
+  explanation: string;
+}
+
+/** `scripts::ScriptDraftStatus`: where a "Write with AI" draft is. */
+export type ScriptDraftStatus = "idle" | "running" | "failed" | "cancelled";
+
+/** `scripts::DraftTurn`: one request of the user's and what came back. */
+export interface DraftTurn {
+  prompt: string;
+  at: string;
+  /** The whole script for it; `null` while running, failed or stopped. */
+  result: GeneratedScript | null;
+  /** Why no script came back ("Stopped." when the user stopped it). */
+  error: string | null;
+  /** What Argus attached for it ("MR !4242", "Code_review.md"). */
+  attachments: string[];
+  /** What it named but Argus did not attach, and why. */
+  notes: string[];
+}
+
+/** `scripts::DraftStage`: where a running turn is. */
+export type DraftStage =
+  "reading" | "starting" | "thinking" | "writing" | "validating" | "repairing";
+
+/**
+ * `scripts::ScriptDraftProgress`: what the agent of a running turn is
+ * doing. Gone once the turn ends (the thinking is not kept).
+ */
+export interface ScriptDraftProgress {
+  turn: number;
+  stage: DraftStage;
+  /** When the turn got its slot. */
+  startedAt: string;
+  /** The end of the thinking so far (summarised; empty when hidden). */
+  thinking: string;
+  /** The thinking was longer: its start is left out. */
+  thinkingCut: boolean;
+  thinkingTokens: number | null;
+  answerChars: number;
+  /** E.g. that the API is busy and the agent retries. */
+  notice: string | null;
+}
+
+/** The `script-draft:progress` payload (paced by the core). */
+export interface ScriptDraftProgressEvent {
+  draftId: string;
+  progress: ScriptDraftProgress;
+}
+
+/**
+ * `scripts::ScriptDraft`: one "Write with AI" conversation, running in the
+ * background (memory only: gone when Argus quits). The
+ * `script-draft:state` payload.
+ */
+export interface ScriptDraft {
+  id: string;
+  /** The submit script it changes (Edit with AI, or after saving). */
+  scriptId: string | null;
+  title: string;
+  /** Edit with AI: the saved script it started from. */
+  base: GeneratedScript | null;
+  turns: DraftTurn[];
+  status: ScriptDraftStatus;
+  /** Running, but waiting for a free slot (two drafts run at once). */
+  waiting: boolean;
+  error: string | null;
+  /** While a turn runs (not while it waits). */
+  progress: ScriptDraftProgress | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Goes up with every change: the higher one is the newer copy. */
+  revision: number;
+}
+
+/** `scripts::ScriptGenerationStatus`: whether "Write with AI" can run. */
+export interface ScriptGenerationStatus {
+  available: boolean;
+  adapter: string;
+  /** Why not; `null` when it can. */
+  reason: string | null;
 }
 
 /** `poll::RefreshError`: one failure during a refresh. */
 export interface RefreshError {
   provider: ProviderId;
+  /** The provider's host: one provider per host of the user's. */
+  host: string;
   /** `null` when the provider as a whole failed. */
   review: ReviewId | null;
   message: string;
@@ -382,32 +587,40 @@ export interface ReviewRefresh {
   changed: boolean;
 }
 
-/** `provider::GithubStatus`. */
-export interface GithubStatus {
-  enabled: boolean;
+/**
+ * `accounts::AccountState`: whether a host can be used. `error`: the login
+ * could not be checked (the host did not answer); Argus keeps polling it.
+ */
+export type AccountState =
+  | { kind: "loggedIn" }
+  | { kind: "notLoggedIn"; message: string | null }
+  | { kind: "error"; message: string }
+  | { kind: "cliMissing"; hint: string };
+
+/**
+ * `accounts::Account`: one host gh or glab is logged in to (or one the
+ * settings name), with the user's choice; a missing CLI is one row with an
+ * empty `host`.
+ */
+export interface Account {
+  /** `provider:host`, the key of `Settings.accounts`. */
+  key: string;
+  provider: ProviderId;
   host: string;
-  installed: boolean;
-  loggedIn: boolean;
-}
-
-/** `provider::GitlabProblem`: why a configured GitLab is off anyway. */
-export type GitlabProblem = "invalidUrl";
-
-/** `provider::GitlabStatus`. */
-export interface GitlabStatus {
-  configured: boolean;
-  baseUrl: string;
-  tokenPresent: boolean;
-  /** `null` when nothing is wrong. */
-  problem: GitlabProblem | null;
-  /** Plain http to a host other than this machine: the token is unencrypted. */
-  insecure: boolean;
-}
-
-/** `provider::ProviderStatus`. */
-export interface ProviderStatus {
-  github: GithubStatus;
-  gitlab: GitlabStatus;
+  /** The login Argus uses on the host. */
+  user: string | null;
+  state: AccountState;
+  /** gh's active account on the host. */
+  active: string | null;
+  /** gh: every account on the host (the picker); empty for GitLab. */
+  accounts: string[];
+  /** gh: the account chosen in settings; `null` follows gh's active one. */
+  account: string | null;
+  enabled: boolean;
+  /** glab's API protocol for the host, when it said. */
+  scheme: string | null;
+  /** `gh auth login --hostname <host>` / `glab auth login --hostname <host>`. */
+  loginCommand: string;
 }
 
 /** Payload of the `review:changed` event (`events::ReviewRefPayload`). */
@@ -575,7 +788,7 @@ export interface AiRunState {
   skippedChecklist: number;
   /**
    * Whether Argus can guarantee the configured agent only reads. `false` for
-   * `auggie`, whose user-configured MCP tools cannot be turned off.
+   * `auggie`: no path rules, so it can read any file, and its hooks run.
    */
   readOnlyGuaranteed: boolean;
   /**
@@ -593,6 +806,11 @@ export interface RunContext {
   skill: UsedSkill | null;
   /** The agent read a worktree checked out at the review's head. */
   worktree: boolean;
+  /**
+   * The language the answer was asked in, resolved for the repository;
+   * `null` for a run from before languages.
+   */
+  language: ReviewLanguage | null;
   /** What did not go as set up (no worktree and why, a gone skill, …). */
   notes: string[];
 }
@@ -761,4 +979,42 @@ export interface CloneStatus {
   head: string | null;
   /** The clone is on the review's head commit. */
   matchesReviewHead: boolean;
+}
+
+/**
+ * `open::CloneSuggestion`: a clone of the review's repository Argus found
+ * on disk, offered when none is set.
+ */
+export interface CloneSuggestion {
+  /** The repository it clones, `host/repo` (the `clonePaths` key). */
+  repo: string;
+  /** Where it is. */
+  path: string;
+}
+
+// --- Repositories ---
+
+/** `repos::CloneState`: what a repository's clone is on disk. */
+export type CloneState = "notSet" | "found" | "missing" | "notRepository";
+
+/**
+ * `repos::RepoSetup`: one repository Argus knows (from a stored review or
+ * the settings) and how it is set up (Settings → Repositories).
+ */
+export interface RepoSetup {
+  /** `host/repo`, the key of every per-repository setting. */
+  key: string;
+  host: string;
+  /** `owner/name` (GitLab groups may nest deeper). */
+  repo: string;
+  /** `null` when neither its reviews nor the configured hosts tell. */
+  provider: ProviderId | null;
+  /** Its reviews in the active tabs. */
+  openReviews: number;
+  /** The clone as set; `null` when none is. */
+  clonePath: string | null;
+  clone: CloneState;
+  reviewSkill: ReviewSkillChoice;
+  /** Its own language; `null` follows `ai.reviewLanguage`. */
+  reviewLanguage: ReviewLanguage | null;
 }

@@ -1,5 +1,5 @@
-/* Settings → AI → Review skill. The repository cards are SettingsModal's
-   own (.card, .cardHeader); this is the picker inside one. */
+/* Settings → Repositories → Review skill. The repository cards are
+   RepositoriesTab's; this is the field and the picker inside one. */
 
 .picker {
   display: flex;
@@ -114,4 +114,19 @@
 
 .gone {
   color: var(--warning);
+}
+
+/* The field in a repository card: the choice, then "Change". */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.fieldHeader {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
 }

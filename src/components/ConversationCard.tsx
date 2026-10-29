@@ -19,12 +19,8 @@ import { useId, useState } from "react";
 import type { IpcError, ProviderId, StoredThread } from "../ipc/types";
 import { CONVERSATION_CARD } from "../lib/focusModel";
 import { useFocusStore, useRevealCard } from "../state/focusStore";
-import {
-  groupThreads,
-  threadCounts,
-  unresolvedCount,
-} from "../lib/diffThreads";
-import { OpenCount, ThreadCount } from "./FileStatusMark";
+import { groupThreads, unresolvedCount } from "../lib/diffThreads";
+import { OpenCount } from "./FileStatusMark";
 import { CaretIcon, OpenThreadIcon, ResolvedIcon, ThreadsIcon } from "./icons";
 import { ListedThread, ThreadBlock } from "./ThreadBlock";
 import styles from "./ConversationCard.module.css";
@@ -72,7 +68,6 @@ export function ConversationCard({
     if (held(elsewhere)) showResolved("elsewhere", true);
   });
   const all = [...conversation, ...elsewhere];
-  const count = threadCounts(all);
   const open = unresolvedCount(all);
   const empty = conversation.length === 0 && elsewhere.length === 0;
 
@@ -113,7 +108,6 @@ export function ConversationCard({
           Conversation
         </button>
         <OpenCount count={open} />
-        <ThreadCount {...count} />
       </header>
       {!collapsed && (
         <div className={styles.body}>

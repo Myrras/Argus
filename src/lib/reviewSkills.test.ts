@@ -9,7 +9,6 @@ import {
   choiceFor,
   choiceSummary,
   filterSkills,
-  knownRepos,
   sameChoice,
   withChoice,
 } from "./reviewSkills";
@@ -65,7 +64,12 @@ describe("review skill choices", () => {
         { kind: "skill", source: "user", name: "code-review" },
         null,
       ),
-    ).toBe("code-review (yours)");
+    ).toBe("code-review · yours");
+    expect(choiceSummary(AUTO, list())).toBe("Auto: code-review");
+    expect(choiceSummary(AUTO, list({ autoPick: null }))).toBe(
+      "Auto: none found",
+    );
+    expect(choiceSummary(AUTO, null)).toBe("Auto");
   });
 
   it("filters by name, description and source, grouped by source", () => {
@@ -81,22 +85,5 @@ describe("review skill choices", () => {
       { source: "project", skills: [skills[2]] },
     ]);
     expect(filterSkills(skills, "nothing like it")).toEqual([]);
-  });
-
-  it("lists every repository with a clone, a choice or a review, once", () => {
-    const s = settings({
-      clonePaths: { [WIDGETS]: "/src/widgets" },
-      reviewSkills: { "gitlab.example.test/acme-fixture/api": NONE },
-    });
-    expect(
-      knownRepos(s, [
-        { host: "github.com", repo: "acme-fixture/widgets" },
-        { host: "github.com", repo: "acme-fixture/gadgets" },
-      ]),
-    ).toEqual([
-      "github.com/acme-fixture/gadgets",
-      WIDGETS,
-      "gitlab.example.test/acme-fixture/api",
-    ]);
   });
 });

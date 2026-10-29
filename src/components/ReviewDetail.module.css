@@ -28,15 +28,17 @@
   border-bottom: 1px solid var(--border);
 }
 
-/* The title with the actions top right; the review's facts below, full
-   width. */
+/* Three zones under one header: the title with the actions top right; the
+   status line (what needs you and why), loudest after the title; then the
+   context bar, a quieter full-bleed strip with the reference facts left and
+   the thread navigation right. */
 .grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     "title actions"
-    "meta meta"
-    "status status";
+    "status status"
+    "context context";
   column-gap: var(--sp-4);
   row-gap: var(--sp-2);
   align-items: start;
@@ -62,7 +64,7 @@
   gap: var(--sp-2);
 }
 
-/* The verdict slot: today "Mark round reviewed" + "Approve…". */
+/* The verdict slot: "Submit review…". */
 .submit {
   display: inline-flex;
   align-items: center;
@@ -73,31 +75,191 @@
   height: 28px;
 }
 
-.meta,
+/* --- The status line ---------------------------------------------------- */
+
 .status {
+  grid-area: status;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--sp-1) var(--sp-2);
+  gap: var(--sp-1) var(--sp-3);
   min-width: 0;
+  font-size: var(--fs-md);
+  color: var(--text-muted);
+}
+
+/* "Needs re-review | Round 2": the status with its round as a second
+   segment, the one boxed element of the line. */
+.statusPill {
+  display: inline-flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  height: 24px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.statusPill > span {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--sp-2);
+}
+
+.statusPill .round {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.statusPill[data-tone="accent"] {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.statusPill[data-tone="accent"] .round {
+  border-left-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.statusPill[data-tone="success"] {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+}
+
+.statusPill[data-tone="success"] .round {
+  border-left-color: color-mix(in srgb, var(--success) 35%, transparent);
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+}
+
+/* The user's review state on the platform: plain text in the line's size. */
+.myState {
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.myState[data-state="awaitingReview"],
+.myState[data-state="reviewStarted"] {
+  color: var(--accent);
+}
+
+.myState[data-state="approved"] {
+  color: var(--success);
+}
+
+/* Why it is back: unboxed, an icon each, one step quieter than the state.
+   The list wraps as a unit before it wraps inside. */
+.reasons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
   font-size: var(--fs-sm);
   color: var(--text-muted);
 }
 
-.meta {
-  grid-area: meta;
+.reasons li {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
 }
 
-.status {
-  grid-area: status;
+.reasonIcon {
+  flex-shrink: 0;
+  color: var(--accent);
 }
 
-.meta strong {
+.untouched {
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  color: var(--warning);
+}
+
+/* Context, not news: right-aligned and faint while there is room. */
+.lastReviewed {
+  margin-left: auto;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  color: var(--text-faint);
+}
+
+/* --- The context bar ----------------------------------------------------- */
+
+/* Full bleed to the island's edges, a half-step darker than the header, so
+   it reads as reference, not news. */
+.context {
+  grid-area: context;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-1) var(--sp-4);
+  min-width: 0;
+  margin: var(--sp-1) calc(-1 * var(--sp-4)) calc(-1 * var(--sp-3));
+  padding: 5px var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface));
+  border-top: 1px solid var(--border);
+}
+
+/* The facts: where it lives, who wrote it, when, the local clone. Groups
+   keep their parts together and wrap between them, inside their own
+   column: a zero basis keeps the navigation on the bar's first line. */
+.facts {
+  flex: 1 1 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-4);
+  min-width: 0;
+}
+
+.fact {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+
+.facts strong {
   color: var(--text);
   font-weight: 500;
 }
 
-/* The ref and its open-in-browser icon stay together. */
+/* A long author name shortens, its full name in the tooltip. */
+.author {
+  display: inline-flex;
+  gap: 0.3em;
+  min-width: 0;
+}
+
+.authorName {
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The ref and its open / refresh buttons stay together. */
 .ref {
   display: inline-flex;
   align-items: center;
@@ -110,6 +272,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--text);
 }
 
 .ref .open {
@@ -128,67 +291,15 @@
   animation: spin var(--dur-spin) linear infinite;
 }
 
-/* "Needs re-review | R2": the status badge with its round as a second
-   segment, so the round is read as part of the status. */
-.statusPill {
-  display: inline-flex;
-  align-items: stretch;
-  flex-shrink: 0;
-  height: 20px;
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  line-height: 1;
-  white-space: nowrap;
-  color: var(--text-muted);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-}
-
-.statusPill > span {
-  display: inline-flex;
-  align-items: center;
-  padding: 0 6px;
-}
-
-.statusPill .round {
-  font-variant-numeric: tabular-nums;
-  border-left: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.statusPill[data-tone="accent"] {
-  color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
-}
-
-.statusPill[data-tone="accent"] .round {
-  border-left-color: color-mix(in srgb, var(--accent) 30%, transparent);
-  background: color-mix(in srgb, var(--accent) 20%, transparent);
-}
-
-/* The user's review state on the platform. */
-.myState {
-  color: var(--text-muted);
-}
-
-.myState[data-state="awaitingReview"],
-.myState[data-state="reviewStarted"] {
-  color: var(--accent);
-}
-
-.myState[data-state="approved"] {
-  color: var(--success);
-}
-
-/* Unresolved threads, GitLab style: the icon carries the hue, the text
-   stays readable; all resolved reads as done. */
+/* Unresolved threads, GitLab style, at the bar's right end: the icon
+   carries the hue, the text stays readable; all resolved reads as done. */
 .resolution {
   display: inline-flex;
   align-items: center;
+  flex: none;
   gap: var(--sp-1);
+  min-height: 22px;
+  margin-left: auto;
   white-space: nowrap;
   color: var(--text);
 }
@@ -199,7 +310,7 @@
 }
 
 /* GitLab's ⌃ ⌄ beside the count: a tight pair, smaller than a toolbar
-   button so the status row keeps its height. */
+   button so the bar keeps its height. */
 .jumps {
   display: inline-flex;
   align-items: center;
@@ -207,25 +318,14 @@
 }
 
 .jumps .jump {
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   color: var(--text-muted);
 }
 
 .resolution[data-done="true"],
 .resolution[data-done="true"] .resolutionIcon {
   color: var(--success);
-}
-
-.untouched {
-  color: var(--warning);
-}
-
-/* Context, not news: right-aligned and faint while there is room. */
-.lastReviewed {
-  margin-left: auto;
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
 }
 
 .pending {
@@ -244,15 +344,16 @@
   color: var(--warning);
 }
 
-/* A narrow island: one column, the actions last and left-aligned. */
+/* A narrow island: one column, the actions under the status line and
+   left-aligned; the context bar stays last. */
 @container (max-width: 780px) {
   .grid {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
       "title"
-      "meta"
       "status"
-      "actions";
+      "actions"
+      "context";
   }
 
   .actions {
@@ -261,5 +362,12 @@
 
   .lastReviewed {
     margin-left: 0;
+  }
+}
+
+/* Too narrow for two columns: the navigation gets its own line. */
+@container (max-width: 520px) {
+  .facts {
+    flex-basis: auto;
   }
 }

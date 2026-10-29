@@ -42,10 +42,10 @@ export function headLine(status: CloneStatus): string {
 /** The chip's tooltip, one fact per line. */
 export function cloneTitle(status: CloneStatus): string {
   if (!status.configured || !status.path) {
-    return "No local clone is set for this repository\nSet one in Settings";
+    return "No local clone is set for this repository\nClick: set one in Settings → Repositories";
   }
   if (!status.found) {
-    return `Local clone not found: ${status.path}\nCheck the folder in Settings`;
+    return `Local clone not found: ${status.path}\nClick: check it in Settings → Repositories`;
   }
   return `${status.path}\n${headLine(status)}\nShow in folder`;
 }

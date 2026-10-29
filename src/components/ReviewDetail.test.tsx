@@ -21,9 +21,11 @@ vi.mock("./DiffEditor", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type { PostResult } from "../ipc/types";
+import { useCloneSuggestStore } from "../state/cloneSuggestStore";
 import { clearContentsCache, useCodeViewStore } from "../state/codeViewStore";
 import { useCommentStore, type Draft } from "../state/commentStore";
 import { useOverlayStore } from "../state/overlayStore";
@@ -34,7 +36,7 @@ import { ReviewDetail } from "./ReviewDetail";
 import { ReviewDialogs } from "./ReviewDialogs";
 import { Toasts } from "./Toasts";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const initialReviews = useReviewStore.getState();
 const initialThreads = useThreadStore.getState();
 const initialCode = useCodeViewStore.getState();
@@ -122,6 +124,8 @@ function backend(extra: Record<string, (args: unknown) => unknown> = {}) {
         return Promise.reject(e);
       }
     }
+    // No clone is set and none is found, so no suggestion bar.
+    if (cmd === "suggest_clone") return Promise.resolve(null);
     return Promise.resolve(
       cmd === "list_threads"
         ? threads
@@ -158,6 +162,7 @@ describe("ReviewDetail", () => {
       posting: {},
       focus: null,
     });
+    useCloneSuggestStore.setState({ byReview: {}, dismissed: {}, busy: {} });
     mockInvoke.mockImplementation((cmd: string) =>
       Promise.resolve(
         cmd === "list_threads"
@@ -168,7 +173,9 @@ describe("ReviewDetail", () => {
               ? files
               : cmd === "file_contents"
                 ? "a\nb\nc"
-                : r,
+                : cmd === "suggest_clone"
+                  ? null
+                  : r,
       ),
     );
     useCodeViewStore.setState({ ...initialCode, byReview: {} }, true);
@@ -227,13 +234,44 @@ describe("ReviewDetail", () => {
     expect(
       screen.getByRole("heading", { name: "Add widget caching" }),
     ).toBeInTheDocument();
-    // The round sits on the status badge: "R3" for the eye, named in full.
-    expect(screen.getByText("Round 3")).toBeInTheDocument();
-    expect(screen.getByTitle("Round 3")).toHaveTextContent("R3");
-    expect(screen.getByText("Needs re-review")).toBeInTheDocument();
-    expect(screen.getByText("New commits")).toBeInTheDocument();
-    expect(screen.getByText("1 of your threads untouched")).toBeInTheDocument();
-    expect(screen.getByText("Awaiting your review")).toBeInTheDocument();
+    // What needs you and why, in one group: the status with its round on
+    // the same pill, your platform state, the reasons, what is untouched.
+    const status = screen.getByRole("group", { name: "Review status" });
+    const pill = within(status).getByText("Needs re-review").parentElement!;
+    expect(pill).toHaveTextContent("Needs re-reviewRound 3");
+    expect(within(status).getByText("Round 3")).toBeInTheDocument();
+    expect(
+      within(
+        within(status).getByRole("list", { name: "Why it is back" }),
+      ).getAllByRole("listitem"),
+    ).toHaveLength(1);
+    expect(within(status).getByText("New commits")).toBeInTheDocument();
+    expect(
+      within(status).getByText("1 of your threads untouched"),
+    ).toBeInTheDocument();
+    expect(within(status).getByText("Awaiting your review")).toHaveAttribute(
+      "title",
+      "Your review state on GitHub",
+    );
+    // The reference facts are a group of their own, apart from the status.
+    const facts = screen.getByRole("group", { name: "Review details" });
+    expect(within(facts).getByText("GitHub")).toBeInTheDocument();
+    expect(
+      within(facts).getByText(`acme-fixture/widgets#${r.number}`),
+    ).toBeInTheDocument();
+    expect(
+      within(facts).getByRole("button", { name: "Open in GitHub" }),
+    ).toBeInTheDocument();
+    expect(
+      within(facts).getByRole("button", { name: "Refresh this review" }),
+    ).toBeInTheDocument();
+    expect(within(facts).getByText(r.author)).toHaveAttribute(
+      "title",
+      r.author,
+    );
+    expect(within(facts).getByText(/^updated /)).toBeInTheDocument();
+    expect(within(facts).queryByText("Needs re-review")).toBeNull();
+    expect(within(status).queryByText(r.author)).toBeNull();
     // The local-only "Mark round reviewed" is gone.
     expect(
       screen.queryByRole("button", { name: "Mark round reviewed" }),
@@ -474,6 +512,7 @@ describe("ReviewDetail", () => {
           headSha: r.headSha,
           verdict: "approve",
           summary: null,
+          scriptIds: [],
         },
       ],
       [
@@ -483,6 +522,7 @@ describe("ReviewDetail", () => {
           headSha: r.headSha,
           verdict: "approve",
           summary: null,
+          scriptIds: [],
         },
       ],
     ]);
@@ -518,6 +558,7 @@ describe("ReviewDetail", () => {
           headSha: r.headSha,
           verdict: "requestChanges",
           summary: "Please **add** a test.",
+          scriptIds: [],
         },
       ],
     ]);

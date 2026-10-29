@@ -132,6 +132,7 @@ impl Recorder {
                 head_sha: "c1".into(),
                 diff_hunk: None,
                 current_line: None,
+                outside_diff: false,
             }),
             notes,
         };
@@ -298,7 +299,6 @@ impl Agent {
         let script = dir.path().join("claude");
         crate::testutil::write_executable(&script, FAKE_CLAUDE);
         let mut settings = Settings::default();
-        settings.github.enabled = false;
         settings.ai.binary = Some(script.to_string_lossy().into_owned());
         Self { dir, settings }
     }
@@ -477,7 +477,6 @@ fn a_thread_the_user_replied_in_is_judged_in_the_next_round() {
 fn with_the_ai_pass_off_tracking_and_history_still_work() {
     let recorder = Recorder::new();
     let mut settings = Settings::default();
-    settings.github.enabled = false;
     settings.ai.enabled = false;
     let core = core_over(&recorder, settings);
     let starts = Arc::new(AtomicUsize::new(0));

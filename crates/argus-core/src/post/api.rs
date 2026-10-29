@@ -9,14 +9,16 @@ use chrono::{DateTime, Utc};
 
 use super::anchor;
 use super::{
-    commentable_hunks, CommentableCache, CommentableLines, NewComment, PostError, PostErrorKind,
-    PostResult, PostedComment, PostedNote,
+    commentable_hunks, CommentableCache, CommentableLines, NewComment, OutsideDiff, PostError,
+    PostErrorKind, PostResult, PostedComment, PostedNote, EXCERPT_READ_MAX,
 };
 use crate::error::{CoreError, CoreResult};
 use crate::files;
 use crate::ids::{ReviewId, ThreadId};
 use crate::poll;
-use crate::provider::{self as providers, DiffRange, FileDiff, ReviewProvider, Side, Thread};
+use crate::provider::{
+    self as providers, DiffRange, FileDiff, FileStatus, ReviewProvider, Side, Thread,
+};
 use crate::review::{self, ReviewStatus, RoundInput};
 use crate::store::{self, ReviewRecord, StoredThread};
 use crate::Core;
@@ -91,6 +93,7 @@ impl Core {
                 written_at,
                 &current,
                 &mut since,
+                &|sha, path| self.file_at(record.id, sha, path),
             );
             posted_any |= outcome.is_ok();
             head_moved |= outcome
@@ -194,9 +197,13 @@ impl Core {
         });
         if !fresh {
             // The left side is resolved below, on a hit as well.
-            let diff = self
-                .provider_for(&record)?
-                .fetch_files(&record.review, &files::review_range(&record))?;
+            // The disk cache usually has it: `list_files` read the same
+            // range moments before.
+            let diff = self.cached_diff(
+                self.provider_for(&record)?.as_ref(),
+                &record,
+                &files::review_range(&record),
+            )?;
             *cache = Some(CommentableCache {
                 review: id,
                 stored_head: record.head_sha.clone(),
@@ -210,7 +217,11 @@ impl Core {
                             .as_deref()
                             .map(commentable_hunks)
                             .unwrap_or_default();
-                        (f.path.clone(), hunks)
+                        // As `resolve_in` allows it: unchanged lines exist
+                        // only in a file with both sides and a patch.
+                        let outside = f.patch.is_some()
+                            && matches!(f.status, FileStatus::Modified | FileStatus::Renamed);
+                        (f.path.clone(), (hunks, outside))
                     })
                     .collect(),
                 base_sha: diff.base_sha,
@@ -238,17 +249,37 @@ impl Core {
             c.base_sha = sides.base_sha;
             c.base_approximate = sides.base_approximate;
         }
-        let hunks = c
+        let (hunks, outside) = c
             .files
             .get(path)
             .ok_or_else(|| CoreError::InvalidInput("not a changed file of this review".into()))?;
+        let outside = if *outside {
+            self.provider_for(&record)?.outside_diff()
+        } else {
+            OutsideDiff::None
+        };
         Ok(CommentableLines {
             review_id: id,
             path: path.to_string(),
             hunks: hunks.clone(),
+            outside,
             base_sha: c.base_sha.clone(),
             head_sha: c.head_sha.clone(),
         })
+    }
+
+    /// [`commentable_lines`](Self::commentable_lines) of several files of
+    /// one review, in order: one IPC round trip for the cards that load
+    /// together. One file's failure fails only its own entry.
+    pub fn commentable_lines_of(
+        &self,
+        id: ReviewId,
+        paths: &[String],
+    ) -> Vec<CoreResult<CommentableLines>> {
+        paths
+            .iter()
+            .map(|p| self.commentable_lines(id, p))
+            .collect()
     }
 
     /// The stored thread `id` and its review.
@@ -374,6 +405,9 @@ fn before_watermark_write() {
     }
 }
 
+/// Reads a file at a commit (`sha`, `path`): the clone-aware `Core::file_at`.
+type ReadFile<'a> = &'a dyn Fn(&str, &str) -> CoreResult<String>;
+
 /// Resolve one comment against the current diff and post it.
 fn post_one(
     provider: &dyn ReviewProvider,
@@ -382,6 +416,7 @@ fn post_one(
     written_at: &str,
     current: &FileDiff,
     since: &mut HashMap<String, Result<FileDiff, PostError>>,
+    read: ReadFile,
 ) -> Result<PostedComment, PostError> {
     // Only a new-side line moves with the head (see `resolve`).
     let since_diff = if c.side == Side::New && written_at != current.head_sha {
@@ -400,8 +435,48 @@ fn post_one(
     } else {
         None
     };
-    let placed = anchor::resolve(c, written_at, current, since_diff)?;
+    let outside = provider.outside_diff();
+    let mut placed = anchor::resolve_in(c, written_at, current, since_diff, outside)?;
+    if !placed.in_diff && outside == OutsideDiff::Fallback {
+        placed.excerpt = excerpt(&placed, read)?;
+    }
     provider.post_comment(&record.review, &placed)
+}
+
+/// The head's text of an outside-the-diff comment's lines (new side), for
+/// the file comment a [`OutsideDiff::Fallback`] provider posts. A file that
+/// can't be read leaves the excerpt out (the comment still links to the
+/// lines); a line past its end fails the comment.
+fn excerpt(
+    placed: &super::PlacedComment,
+    read: ReadFile,
+) -> Result<Option<Vec<String>>, PostError> {
+    let last = placed.line.new_line().unwrap_or(0);
+    let first = placed.start.and_then(|s| s.new_line()).unwrap_or(last);
+    let text = match read(&placed.head_sha, &placed.path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!("reading the lines to quote failed: {e}");
+            return Ok(None);
+        }
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    if first == 0 || last as usize > lines.len() {
+        return Err(PostError::new(
+            PostErrorKind::LineNotInDiff,
+            format!(
+                "{}:{last} is past the end of the file at the review's head",
+                placed.path
+            ),
+        ));
+    }
+    Ok(Some(
+        lines[first as usize - 1..last as usize]
+            .iter()
+            .take(EXCERPT_READ_MAX)
+            .map(|l| l.to_string())
+            .collect(),
+    ))
 }
 
 /// The record after a successful write (plan §7: the watermark moves when

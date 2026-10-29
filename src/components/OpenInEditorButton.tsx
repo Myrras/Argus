@@ -11,7 +11,8 @@
 
 import type { ReviewId } from "../ipc/types";
 import { withHint } from "../lib/keymap";
-import { openTitle } from "../lib/localFiles";
+import { openTitle, opensRepository } from "../lib/localFiles";
+import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useKeymap } from "../lib/useKeymap";
 import { openLocalFile, useLocalFile } from "../state/localFileStore";
 import { OpenInEditorIcon } from "./icons";
@@ -28,10 +29,12 @@ export function OpenInEditorButton({
 }) {
   const file = useLocalFile(reviewId, path);
   const keymap = useKeymap();
+  const settings = useBackendSettingsStore((s) => s.settings);
   if (!file) return null;
   const title = openTitle(
     file,
     withHint("Open in editor", keymap, "openInEditor"),
+    opensRepository(settings, path),
   );
   return (
     <button

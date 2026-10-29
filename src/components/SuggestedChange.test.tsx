@@ -8,13 +8,14 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import type { StoredThread } from "../ipc/types";
 import { clearContentsCache } from "../state/codeViewStore";
 import { thread } from "../test/fixtures";
 import { ThreadBlock } from "./ThreadBlock";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const NOW = Date.parse("2026-10-16T12:00:00Z");
 const FILE = "fn a() {}\nlet one = 1;\nlet two = 2;\nfn b() {}\n";
 

@@ -10,14 +10,17 @@
 import { create } from "zustand";
 
 import {
-  fileContents,
+  fileContentsBatch,
   listFiles,
   setFileViewed,
   toIpcError,
+  type FileRequest,
 } from "../ipc/commands";
 import { onReviewChanged } from "../ipc/events";
 import type { FileEntry, IpcError, ReviewFiles, ReviewId } from "../ipc/types";
 import { latestOnly } from "../lib/latest";
+import { createRequestQueue, type Priority } from "../lib/requestQueue";
+import { pinCard } from "./mountStore";
 
 /**
  * The Conversation section's key in `selected` / `order`: the first stop of
@@ -35,6 +38,11 @@ export interface ReviewCode {
   selected: string | null;
   /** `CONVERSATION`, then the files as shown (filtered, tree order). */
   order: string[];
+  /**
+   * `selected` was set without the view's scroll to the card (the find
+   * bar scrolls to its match itself).
+   */
+  quietly?: string | null;
 }
 
 interface CodeViewState {
@@ -42,7 +50,12 @@ interface CodeViewState {
   /** Load (or reload) the review's files in `since` mode (default: the current one). */
   load: (id: ReviewId, since?: boolean) => Promise<void>;
   setViewed: (id: ReviewId, path: string, viewed: boolean) => Promise<void>;
-  select: (id: ReviewId, path: string | null) => void;
+  /** `scroll: false`: the view leaves the page where it is. */
+  select: (
+    id: ReviewId,
+    path: string | null,
+    opts?: { scroll?: boolean },
+  ) => void;
   setOrder: (id: ReviewId, order: string[]) => void;
   /** Select the next (+1) or previous (-1) stop of the shown order. */
   move: (id: ReviewId, delta: 1 | -1) => string | null;
@@ -59,6 +72,7 @@ const EMPTY: ReviewCode = {
   error: null,
   selected: null,
   order: [],
+  quietly: null,
 };
 
 const reads = latestOnly<ReviewId>();
@@ -119,7 +133,11 @@ export const useCodeViewStore = create<CodeViewState>((set, get) => {
       }
     },
 
-    select: (id, path) => patch(id, { selected: path }),
+    select: (id, path, opts) =>
+      patch(id, {
+        selected: path,
+        quietly: opts?.scroll === false ? path : null,
+      }),
 
     setOrder: (id, order) => {
       const cur = entry(id);
@@ -142,7 +160,7 @@ export const useCodeViewStore = create<CodeViewState>((set, get) => {
             : order.length - 1
           : Math.min(order.length - 1, Math.max(0, at + delta));
       const path = order[next];
-      patch(id, { selected: path });
+      patch(id, { selected: path, quietly: null });
       return path;
     },
 
@@ -167,25 +185,71 @@ export function subscribeCodeViewEvents(): Promise<() => void> {
 
 // -- File contents --------------------------------------------------------
 
-const contents = new Map<string, Promise<string>>();
+/**
+ * Contents kept in memory, most recently used last, up to `MEMORY_CHARS`
+ * in all: the hot layer over the core's disk cache. Large and never
+ * rendered from state, so outside the store.
+ */
+const memory = new Map<string, string>();
+let memoryChars = 0;
+/** About 128 MB of UTF-16. */
+export const MEMORY_CHARS = 64 * 1024 * 1024;
+
+function remember(key: string, text: string) {
+  const old = memory.get(key);
+  if (old !== undefined) memoryChars -= old.length;
+  memory.delete(key);
+  memory.set(key, text);
+  memoryChars += text.length;
+  for (const [k, v] of memory) {
+    if (memoryChars <= MEMORY_CHARS || k === key) break;
+    memory.delete(k);
+    memoryChars -= v.length;
+  }
+}
+
+/** Contents reads: batched per review, the visible files first. */
+const contentReads = createRequestQueue<FileRequest, string>({
+  send: (reviewId, requests) => fileContentsBatch(reviewId, requests),
+  // A card asks for both sides: 12 cards' worth per call.
+  maxBatch: 24,
+  concurrency: 3,
+});
 
 /**
  * The content of `path` at `sha`, fetched once per (review, sha, path) and
- * kept in memory. A failed fetch is forgotten so a retry fetches again.
+ * kept in memory (bounded, least recently used out). A failed fetch is
+ * forgotten so a retry fetches again. `priority` orders it among the other
+ * reads waiting (`lib/requestQueue`).
  */
 export function loadContents(
   id: ReviewId,
   sha: string,
   path: string,
+  priority: Priority = "visible",
 ): Promise<string> {
   const key = `${id}|${sha}|${path}`;
-  let p = contents.get(key);
-  if (!p) {
-    p = fileContents(id, sha, path);
-    contents.set(key, p);
-    p.catch(() => contents.delete(key));
+  const kept = memory.get(key);
+  if (kept !== undefined) {
+    remember(key, kept);
+    return Promise.resolve(kept);
   }
+  const p = contentReads.request(id, key, { sha, path }, priority);
+  p.then(
+    (text) => remember(key, text),
+    () => undefined,
+  );
   return p;
+}
+
+/** Whether contents reads are queued or in flight (the prefetch waits). */
+export function contentsBusy(): boolean {
+  return contentReads.queued() > 0 || contentReads.active() > 0;
+}
+
+/** Whether `path` at `sha` is in memory now (no read needed). */
+export function hasContents(id: ReviewId, sha: string, path: string): boolean {
+  return memory.has(`${id}|${sha}|${path}`);
 }
 
 /** Above this many changed lines a diff waits for "Load anyway". */
@@ -200,34 +264,56 @@ export function waitsForLoadAnyway(f: FileEntry): boolean {
 export function loadFileSides(
   review: ReviewFiles,
   f: FileEntry,
+  priority: Priority = "visible",
 ): Promise<[string, string]> {
   const base =
     f.status === "added"
       ? Promise.resolve("")
-      : loadContents(review.reviewId, review.baseSha, f.oldPath ?? f.path);
+      : loadContents(
+          review.reviewId,
+          review.baseSha,
+          f.oldPath ?? f.path,
+          priority,
+        );
   const head =
     f.status === "removed"
       ? Promise.resolve("")
-      : loadContents(review.reviewId, review.headSha, f.path);
+      : loadContents(review.reviewId, review.headSha, f.path, priority);
   return Promise.all([base, head]);
 }
 
+/** The `(sha, path)` reads a file's diff needs. */
+export function fileSides(review: ReviewFiles, f: FileEntry): FileRequest[] {
+  const out: FileRequest[] = [];
+  if (f.status !== "added") {
+    out.push({ sha: review.baseSha, path: f.oldPath ?? f.path });
+  }
+  if (f.status !== "removed") out.push({ sha: review.headSha, path: f.path });
+  return out;
+}
+
 /**
- * Start (or join) the load of a shown file's two sides, as its card would:
- * a keyboard move to one of its threads waits for it. Null when no editor
+ * Start (or join) the load of a shown file's two sides, as its card would,
+ * and mount its card's diff: a keyboard move to one of its threads (or the
+ * find bar going to a match in it) waits for it. Null when no editor
  * would show the file (unknown, binary, large) — nothing to wait for.
  */
 export function prefetchFile(
   id: ReviewId,
   path: string,
 ): Promise<[string, string]> | null {
+  // A card far from the viewport has no diff mounted: pin it, so the
+  // reveal finds its editor (`mountStore`).
+  pinCard(id, path);
   const files = useCodeViewStore.getState().byReview[id]?.files;
   const f = files?.files.find((x) => x.path === path);
   if (!files || !f || f.binary || waitsForLoadAnyway(f)) return null;
   return loadFileSides(files, f);
 }
 
-/** Tests: forget every cached file. */
+/** Tests: forget every cached file and queued read. */
 export function clearContentsCache() {
-  contents.clear();
+  memory.clear();
+  memoryChars = 0;
+  contentReads.reset();
 }

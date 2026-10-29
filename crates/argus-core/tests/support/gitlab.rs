@@ -1,17 +1,19 @@
 //! A local GitLab double (a plain `TcpListener`) that records each
-//! request's method, path, token headers and body, and answers reads from
-//! `tests/fixtures/gitlab/`; plus the Submit review routes on top. Shared by
-//! `post_gitlab.rs` and `guarantees.rs`. No network, no real token.
+//! request's method, path, token header and body, and answers reads from
+//! `tests/fixtures/gitlab/`; plus the Submit review routes on top. The
+//! provider reaches it through the fake `glab` ([`super::glab`]), which adds
+//! glab's own login. Shared by `post_gitlab.rs` and `guarantees.rs`. No
+//! network, no real token.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use argus_core::provider::{GitlabProvider, ProviderId, ReviewRef, StaticToken};
+use argus_core::provider::{GitlabProvider, ProviderId, ReviewRef};
 use serde_json::{json, Value};
 
-pub const TOKEN: &str = "glpat-fixture-not-a-real-token";
+pub use super::glab::{FakeGlab, TOKEN};
 pub const BASE_SHA: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
 pub const HEAD_SHA: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
 pub const MR21: &str = "/api/v4/projects/grp%2Fapp/merge_requests/21";
@@ -31,10 +33,8 @@ pub struct Request {
     pub method: String,
     /// Path and query.
     pub path: String,
-    /// The token came as `PRIVATE-TOKEN` (REST).
+    /// glab's token came as `PRIVATE-TOKEN` (REST and GraphQL alike).
     pub token: bool,
-    /// The token came as `Authorization: Bearer` (GraphQL).
-    pub bearer: bool,
     pub content_type: Option<String>,
     pub body: String,
 }
@@ -105,7 +105,6 @@ pub fn serve(route: impl Fn(&Request) -> Reply + Send + 'static) -> (String, Log
                 method: words.next().unwrap_or("").to_string(),
                 path: words.next().unwrap_or("").to_string(),
                 token: header("private-token").as_deref() == Some(TOKEN),
-                bearer: header("authorization").as_deref() == Some(&format!("Bearer {TOKEN}")),
                 content_type: header("content-type"),
                 body: String::from_utf8_lossy(&raw[head_end..]).into_owned(),
             };
@@ -189,8 +188,9 @@ pub fn instance(req: &Request) -> Reply {
     }
 }
 
+/// A provider for the double at `base`, through the shared fake glab.
 pub fn provider(base: &str) -> GitlabProvider {
-    GitlabProvider::new(base, StaticToken(TOKEN.into())).unwrap()
+    FakeGlab::shared().provider(base)
 }
 
 pub fn mr(base: &str) -> ReviewRef {
