@@ -21,9 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use argus_core::post::{DiffLine, LineKind, PlacedComment};
+#[cfg(unix)]
+use argus_core::provider::GitlabProvider;
 use argus_core::provider::{
-    DiffRange, GithubProvider, GitlabProvider, ProviderId, ReviewProvider, ReviewRef,
-    ReviewVerdict, Side,
+    DiffRange, GithubProvider, ProviderId, ReviewProvider, ReviewRef, ReviewVerdict, Side,
 };
 use argus_core::store::Store;
 use argus_core::Core;
@@ -31,6 +32,8 @@ use argus_core::Core;
 mod support;
 
 use support::glab::FakeGlab;
+// The fake CLIs are shell scripts: only the Unix tests write them.
+#[cfg(unix)]
 use support::script;
 
 const GH_TOKEN: &str = "ghp_fixtureTOKENnotreal0123456789";
