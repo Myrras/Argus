@@ -537,25 +537,29 @@ colors/durations/easings.
 `just` lists recipes. The Tauri CLI is the local dev-dependency (`pnpm tauri …`).
 
 ```
-just dev              # Vite + Tauri, hot reload
-just build            # .app + APFS .dmg (shared make-dmg.sh)
-just dev-signed       # debug .app, stable signing identity (no hot reload)
+just dev              # Vite + Tauri, hot reload (common.just)
+just build            # .app + APFS .dmg (common.just)
+just dev-signed       # debug .app, stable signing identity, no hot reload (common.just)
 just build-signed     # release .app, stable signing identity (common.just)
-just install-signed   # build-signed + copy to /Applications
+just install-signed   # signed release into /Applications, no Finder window (common.just)
 just ci               # what CI runs: rust, then frontend (common.just)
 just rust             # rustfmt, clippy -D warnings, cargo test (common.just)
 just frontend         # prettier, eslint, vitest, build (common.just)
-just test-core        # argus-core only
+just check            # cargo check --workspace (common.just)
+just test-core        # argus-core only (common.just)
+just format           # rustfmt + prettier (common.just)
+just version NEW      # set the version across the manifests (common.just)
+just version-check    # versions in sync across manifests (common.just)
 just test-integration # real GitHub API, read-only; needs gh + INTEGRATION_TOKEN
-just format           # rustfmt + prettier
-just version-check    # versions in sync across manifests
 just coverage         # cargo-llvm-cov + Vitest v8 (not in `just ci`)
+just icons            # regenerate app icons from the SVG (needs rsvg-convert)
 ```
 
-`ci`, `rust`, `frontend`, `build-signed` and `sweep` come from the shared
-`common.just`, imported from `~/.ci-workflows/common.just`: symlink a clone of
-ci-workflows there (`ln -s /path/to/ci-workflows ~/.ci-workflows`). Don't define
-recipes with those names here. `test-integration` must not depend on
+All recipes marked `common.just` are shared, imported from
+`~/.ci-workflows/common.just`: symlink a clone of ci-workflows there
+(`ln -s /path/to/ci-workflows ~/.ci-workflows`). Don't define recipes with
+those names here, and don't add `allow-duplicate-*` settings: change the shared
+recipe in ci-workflows instead (`sweep` and the `_` helpers are shared too). `test-integration` must not depend on
 `common.just` recipes: in CI the import resolves to nothing.
 
 ### macOS keychain prompt during development
