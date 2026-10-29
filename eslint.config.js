@@ -13,10 +13,13 @@ export default tseslint.config(
       "src-tauri",
       "crates",
       "target",
-      ".claude",
-      ".podium",
       "**/*.config.js",
       "**/*.config.ts",
+      // Sibling agent worktrees (with their own node_modules) can live
+      // under here — never part of this repo's own lint scope.
+      "**/.claude/worktrees/**",
+      ".claude",
+      ".podium",
     ],
   },
   js.configs.recommended,
