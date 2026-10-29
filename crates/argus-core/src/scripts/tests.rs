@@ -604,6 +604,55 @@ fn a_bare_name_and_a_home_path_are_found() {
     assert_eq!((r.status, r.stdout.as_str()), (ScriptStatus::Ok, "found\n"));
 }
 
+#[test]
+fn the_home_folder_is_home_else_the_windows_user_profile() {
+    let env = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    };
+    assert_eq!(
+        run::home_of(&env(&[("HOME", "/h"), ("USERPROFILE", "/u")])),
+        Some(PathBuf::from("/h"))
+    );
+    assert_eq!(run::home_of(&env(&[("HOME", "")])), None);
+    // Windows names have any case, and `HOME` is usually unset there.
+    let profile = run::home_of(&env(&[("UserProfile", "/u")]));
+    if cfg!(windows) {
+        assert_eq!(profile, Some(PathBuf::from("/u")));
+    } else {
+        assert_eq!(profile, None);
+    }
+}
+
+/// The Windows side of `a_bare_name_and_a_home_path_are_found`: a bare
+/// name takes a `PATHEXT` extension, and a file without one (which Windows
+/// cannot start) is never picked.
+#[test]
+#[cfg(windows)]
+fn a_bare_name_is_found_with_its_pathext_extension_on_windows() {
+    let s = Scripts::new();
+    let path_var = s.path().to_string_lossy().into_owned();
+    std::fs::write(s.path().join("argus-fixture-tick"), "#!/bin/sh\n").unwrap();
+    assert_eq!(
+        run::resolve_command("argus-fixture-tick", Some(&path_var), None)
+            .unwrap_err()
+            .0,
+        ScriptStatus::NotFound
+    );
+    let cmd = s.path().join("argus-fixture-tick.cmd");
+    std::fs::write(&cmd, "@echo found\r\n").unwrap();
+    assert_eq!(
+        run::resolve_command("argus-fixture-tick", Some(&path_var), None).unwrap(),
+        cmd
+    );
+    assert_eq!(
+        run::resolve_command("~\\argus-fixture-tick.cmd", None, Some(s.path())).unwrap(),
+        cmd
+    );
+}
+
 // ------------------------------------------------------------ through Core
 
 /// One GitHub review; `submit_review` succeeds unless refused; every write

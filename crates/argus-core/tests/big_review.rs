@@ -124,8 +124,9 @@ fn ms(t: Instant) -> u128 {
 }
 
 #[test]
-#[ignore = "a measurement: run with --ignored --nocapture"]
-#[cfg_attr(windows, ignore)]
+// Ignored everywhere already, so no `cfg_attr(windows, ignore)` (a second
+// `ignore` fails clippy on Windows); Unix only, like the fake glab.
+#[ignore = "a measurement (Unix): run with --ignored --nocapture"]
 fn big_review_timings() {
     let (base, log, raws) = huge();
     let (core, id) = core_over(&base);

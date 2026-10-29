@@ -201,6 +201,12 @@ when it merges.
   "has no text diff to comment on" although the diff was on screen. Argus now
   reads those diffs again in full. When a file really has no diff (binary, or
   only renamed), the refusal says so and what to do instead.
+- Windows: submit scripts start as Windows starts commands. A bare name finds
+  `tick.cmd` or `tick.exe` on your PATH, `~\…` and `~/…` use your user
+  profile folder, a script that can't run there (a `.sh` file) says so, and a
+  script that runs past its timeout is stopped together with everything it
+  started. A script run without a local clone now starts in its own temporary
+  folder instead of the Windows folder.
 
 ## [1.0.0] - 2026-10-28
 
