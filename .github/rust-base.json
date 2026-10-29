@@ -1,0 +1,8 @@
+{
+  "ci": {
+    "windows-test-scope": "-p argus-core"
+  },
+  "integration": {
+    "apt-packages": "libdbus-1-dev pkg-config"
+  }
+}
