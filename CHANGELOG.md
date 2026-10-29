@@ -11,6 +11,8 @@ when it merges.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-10-29
+
 ### Security
 
 - **Dependency security updates.** Updated vite to 7.3.7 and dependencies to
