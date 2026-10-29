@@ -2,16 +2,18 @@
 //! hunks, so every rule is testable without a platform.
 //!
 //! A comment targets `(path, line, side)` at some head. Before it is posted
-//! it is moved to the current head (when the head moved since) and checked
-//! against the current diff: a platform only accepts a line comment on a row
-//! of a hunk (GitHub refuses anything else; GitLab would accept expanded
-//! context, but Argus keeps to what both show).
+//! it is moved to the current head (when the head moved since) and placed on
+//! the current diff: on a row of a hunk, or, where the provider allows it
+//! ([`OutsideDiff`]), on an unchanged line outside every hunk. GitLab takes
+//! such a line natively (both `old_line` and `new_line`; it unfolds the
+//! diff around the position); GitHub refuses a line comment outside the
+//! diff, so there Argus posts a file comment that quotes the lines.
 
 use serde::Serialize;
 
 use crate::provider::{ChangedFile, FileDiff, FileStatus, Side};
 
-use super::{NewComment, PlacedComment, PostError, PostErrorKind};
+use super::{NewComment, OutsideDiff, PlacedComment, PostError, PostErrorKind};
 
 /// How a diff row changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -61,6 +63,7 @@ impl DiffLine {
 pub(crate) struct Hunk {
     pub old_start: u32,
     pub old_count: u32,
+    pub new_start: u32,
     pub new_count: u32,
     pub rows: Vec<DiffLine>,
 }
@@ -79,6 +82,7 @@ fn header(line: &str) -> Option<(Hunk, u32)> {
     let hunk = Hunk {
         old_start,
         old_count,
+        new_start,
         new_count,
         rows: Vec::new(),
     };
@@ -170,34 +174,157 @@ pub fn commentable_hunks(patch: &str) -> Vec<CommentableHunk> {
 pub struct Placement {
     pub line: DiffLine,
     pub start: Option<DiffLine>,
+    /// On rows of a hunk; `false` for unchanged lines outside the diff
+    /// (their rows are [`LineKind::Context`] with both real line numbers).
+    pub in_diff: bool,
+}
+
+/// Where a line of one side sits relative to a patch's hunks. A comment's
+/// range stays inside one region: one hunk (GitHub's rule; GitLab's
+/// `line_range` needs both ends in the same diff), or one stretch of
+/// unchanged code between two hunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    /// On a row of hunk `n` (0-based).
+    Hunk(usize),
+    /// Outside the hunks, after `n` of them (0: above the first).
+    Outside(usize),
+}
+
+impl Region {
+    pub fn is_outside(self) -> bool {
+        matches!(self, Region::Outside(_))
+    }
+}
+
+/// The region of line `n` on `side`. The gap index counts the hunks whose
+/// lines on that side all lie above `n`, as the code view counts them
+/// (`lib/commentRanges`), so both sides agree on what one range may span.
+pub(crate) fn region_of(hunks: &[Hunk], side: Side, n: u32) -> Region {
+    if let Some(i) = hunks
+        .iter()
+        .position(|h| h.rows.iter().any(|r| r.line_on(side) == Some(n)))
+    {
+        return Region::Hunk(i);
+    }
+    let above = hunks
+        .iter()
+        .filter(|h| {
+            h.rows
+                .iter()
+                .filter_map(|r| r.line_on(side))
+                .max()
+                .is_some_and(|m| m < n)
+        })
+        .count();
+    Region::Outside(above)
+}
+
+/// The row of line `n` of `side` when it is unchanged code outside every
+/// hunk: its number on the other side is shifted by what the hunks above it
+/// added or removed. `None` when `n` is in a hunk, or would map below 1.
+pub(crate) fn outside_row(hunks: &[Hunk], side: Side, n: u32) -> Option<DiffLine> {
+    if n == 0 {
+        return None;
+    }
+    // new - old, over the hunks that end above `n`.
+    let mut delta: i64 = 0;
+    for h in hunks {
+        let (start, count) = match side {
+            Side::Old => (h.old_start, h.old_count),
+            Side::New => (h.new_start, h.new_count),
+        };
+        if count > 0 && n >= start && n < start + count {
+            return None;
+        }
+        // A hunk with no lines on this side (`-a,0`: a pure insertion after
+        // line `a`) is above `n` once `n` is past `a`.
+        if n < start + count.max(1) {
+            break;
+        }
+        delta += i64::from(h.new_count) - i64::from(h.old_count);
+    }
+    let other = match side {
+        Side::Old => i64::from(n) + delta,
+        Side::New => i64::from(n) - delta,
+    };
+    let other = u32::try_from(other).ok().filter(|o| *o >= 1)?;
+    let (old_pos, new_pos) = match side {
+        Side::Old => (n, other),
+        Side::New => (other, n),
+    };
+    Some(DiffLine {
+        kind: LineKind::Context,
+        old_pos,
+        new_pos,
+    })
+}
+
+/// Why a line or range could not be placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceError {
+    /// Not on a hunk row of that side (and outside lines are not allowed,
+    /// or the line maps nowhere).
+    NotOnSide,
+    /// The range starts after it ends.
+    Backwards,
+    /// The range's ends lie in different regions.
+    Crosses { start: Region, end: Region },
 }
 
 /// Place `line` (and `start..=line` for a range) on `side` of `patch`.
 /// `None` when the line is not on a hunk row of that side, or a range does
 /// not lie inside one hunk.
 pub fn place(patch: &str, side: Side, line: u32, start: Option<u32>) -> Option<Placement> {
+    place_in(patch, side, line, start, false).ok()
+}
+
+/// [`place`], and with `outside` also on unchanged lines outside every
+/// hunk; a range must stay inside one [`Region`].
+pub fn place_in(
+    patch: &str,
+    side: Side,
+    line: u32,
+    start: Option<u32>,
+    outside: bool,
+) -> Result<Placement, PlaceError> {
     let hunks = parse_hunks(patch);
-    let find = |n: u32| {
-        hunks.iter().enumerate().find_map(|(i, h)| {
-            h.rows
+    let row = |n: u32| -> Result<(Region, DiffLine), PlaceError> {
+        match region_of(&hunks, side, n) {
+            Region::Hunk(i) => hunks[i]
+                .rows
                 .iter()
                 .find(|r| r.line_on(side) == Some(n))
-                .map(|r| (i, *r))
-        })
-    };
-    let (hunk, end) = find(line)?;
-    let start = match start.filter(|s| *s != line) {
-        None => None,
-        Some(s) if s > line => return None,
-        Some(s) => {
-            let (h, row) = find(s)?;
-            if h != hunk {
-                return None;
-            }
-            Some(row)
+                .map(|r| (Region::Hunk(i), *r))
+                .ok_or(PlaceError::NotOnSide),
+            r @ Region::Outside(_) if outside => outside_row(&hunks, side, n)
+                .map(|row| (r, row))
+                .ok_or(PlaceError::NotOnSide),
+            Region::Outside(_) => Err(PlaceError::NotOnSide),
         }
     };
-    Some(Placement { line: end, start })
+    let (region, end) = row(line)?;
+    let start = match start.filter(|s| *s != line) {
+        None => None,
+        Some(s) if s > line => return Err(PlaceError::Backwards),
+        Some(s) => {
+            // The region first: a start in another hunk or outside the
+            // diff is a crossing, not a missing line.
+            let first = region_of(&hunks, side, s);
+            if first != region {
+                return Err(PlaceError::Crosses {
+                    start: first,
+                    end: region,
+                });
+            }
+            Some(row(s)?.1)
+        }
+    };
+    Ok(Placement {
+        line: end,
+        start,
+        in_diff: !region.is_outside(),
+    })
 }
 
 /// Map a new-side `line` of the file before `patch` (a diff from an older
@@ -291,6 +418,24 @@ pub fn resolve(
     current: &FileDiff,
     since: Option<&FileDiff>,
 ) -> Result<PlacedComment, PostError> {
+    resolve_in(c, written_at, current, since, OutsideDiff::None)
+}
+
+/// [`resolve`], where `outside` says whether the provider takes comments on
+/// unchanged lines outside the hunks ([`OutsideDiff::Native`] or
+/// [`OutsideDiff::Fallback`]): then such a line (of a modified or renamed
+/// file with a text patch; an added or removed file is all hunk) is placed
+/// as a [`LineKind::Context`] row with both line numbers and
+/// [`PlacedComment::in_diff`] `false`. A range must stay in one
+/// [`Region`]: a range across a hunk's edge or two hunks fails with
+/// [`PostErrorKind::InvalidInput`] and a message that says so.
+pub fn resolve_in(
+    c: &NewComment,
+    written_at: &str,
+    current: &FileDiff,
+    since: Option<&FileDiff>,
+    outside: OutsideDiff,
+) -> Result<PlacedComment, PostError> {
     validate(c)?;
     let label = lines_label(&c.path, c.line, c.start_line);
     let mut path = c.path.clone();
@@ -378,18 +523,48 @@ pub fn resolve(
     let file = file_for(current, &path).ok_or_else(gone)?;
     let patch = file.patch.as_deref().ok_or_else(|| {
         not_in_diff(format!(
-            "{path} has no text diff to comment on (binary or too large)"
+            "{path} has no text diff to comment on: the platform sent no patch for it (it is binary, too large, or only renamed). Leave the remark on the review itself instead."
         ))
     })?;
-    let placement = place(patch, c.side, line, start).ok_or_else(gone)?;
+    let allow_outside = outside != OutsideDiff::None
+        && matches!(file.status, FileStatus::Modified | FileStatus::Renamed);
+    let placement = match place_in(patch, c.side, line, start, allow_outside) {
+        Ok(p) => p,
+        Err(PlaceError::Crosses { start: s, end: e }) if allow_outside => {
+            return Err(crossing(&lines_label(&path, line, start), s, e));
+        }
+        Err(_) => return Err(gone()),
+    };
     Ok(PlacedComment {
         path: file.path.clone(),
         old_path: file.old_path.clone().unwrap_or_else(|| file.path.clone()),
         side: c.side,
         line: placement.line,
         start: placement.start,
+        in_diff: placement.in_diff,
+        excerpt: None,
         head_sha: current.head_sha.clone(),
         base_sha: current.base_sha.clone(),
         body: c.body.clone(),
     })
+}
+
+/// A range whose ends lie in different regions: why it can't be one
+/// comment, in words.
+fn crossing(label: &str, start: Region, end: Region) -> PostError {
+    let why = if start.is_outside() == end.is_outside() {
+        if start.is_outside() {
+            "it spans a changed part of the file"
+        } else {
+            "it spans two parts of the diff"
+        }
+    } else {
+        "it mixes changed lines with unchanged code outside the diff"
+    };
+    PostError::new(
+        PostErrorKind::InvalidInput,
+        format!(
+            "{label} can't be one comment: {why}. A comment's lines stay inside one diff hunk, or all in one stretch of unchanged code."
+        ),
+    )
 }

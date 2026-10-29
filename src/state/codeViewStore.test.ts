@@ -11,6 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import {
   clearContentsCache,
@@ -19,7 +20,7 @@ import {
   useCodeViewStore,
 } from "./codeViewStore";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const initial = useCodeViewStore.getState();
 const ID = "00000000-0000-4000-8000-0000000000aa";
 

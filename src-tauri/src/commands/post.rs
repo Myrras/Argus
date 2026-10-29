@@ -143,6 +143,18 @@ pub async fn commentable_lines(
     blocking(state, move |core| core.commentable_lines(id, &path)).await
 }
 
+/// [`commentable_lines`] of several files of one review, in order.
+#[tauri::command]
+pub async fn commentable_lines_batch(
+    state: State<'_, AppState>,
+    review_id: String,
+    paths: Vec<String>,
+) -> Result<Vec<super::files::Batched<CommentableLines>>, IpcError> {
+    let id = parse_review_id(&review_id)?;
+    let lines = blocking(state, move |core| Ok(core.commentable_lines_of(id, &paths))).await?;
+    Ok(lines.into_iter().map(Into::into).collect())
+}
+
 // --- Submit review ---------------------------------------------------------
 
 /// Submit the user's review: `verdict` (approve, request changes, or on
@@ -151,6 +163,9 @@ pub async fn commentable_lines(
 /// the platform (plus the summary note on GitLab); `headMoved` when the
 /// review got new commits since, `unsupported` when the platform cannot.
 /// The pending comments are posted before it by `post_comments`.
+///
+/// `scriptIds` are the submit scripts the user ticked: they run (in the
+/// background, reported by `scripts:done`) only once the submit succeeded.
 #[tauri::command]
 pub async fn submit_review(
     app: AppHandle,
@@ -159,10 +174,12 @@ pub async fn submit_review(
     head_sha: String,
     verdict: ReviewVerdict,
     summary: Option<String>,
+    script_ids: Option<Vec<String>>,
 ) -> Result<ReviewRecord, IpcError> {
     let id = parse_review_id(&review_id)?;
+    let script_ids = script_ids.unwrap_or_default();
     let record = blocking_post(state, move |core| {
-        core.submit_review(id, verdict, &head_sha, summary.as_deref())
+        core.submit_review_with_scripts(id, verdict, &head_sha, summary.as_deref(), &script_ids)
     })
     .await;
     emit_if_head_moved(&app, id, &record);

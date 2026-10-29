@@ -1,13 +1,58 @@
 /* ── Tabs ────────────────────────────────────────────────────────────────── */
 
+/* Fixed above the pane; too many tabs scroll sideways inside the strip,
+   they never widen the dialog. */
 .tabs {
+  flex: none;
   display: flex;
   gap: var(--sp-1);
-  margin-bottom: var(--sp-4);
+  padding: 0 var(--sp-4);
   border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+/* The one scrolling part of the dialog. `min-height: 0` lets the flex item
+   shrink below its content, so it scrolls instead of growing the card. */
+.pane {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  padding: var(--sp-4);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Nothing in a tab may push the pane wider: long words wrap, code scrolls
+   inside its own block. */
+.pane > *,
+.pane section,
+.pane form {
+  min-width: 0;
+}
+
+.pane {
+  overflow-wrap: anywhere;
+}
+
+.pane pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-wrap: normal;
+}
+
+.pane input,
+.pane select,
+.pane textarea {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .tab {
+  flex: none;
+  white-space: nowrap;
   padding: var(--sp-2) var(--sp-3);
   background: none;
   border: none;
@@ -24,6 +69,11 @@
 
 .tab:hover {
   color: var(--text);
+}
+
+.tabBusy {
+  margin-left: var(--sp-1);
+  font-size: var(--fs-xs);
 }
 
 .tab[data-active="true"] {
@@ -121,13 +171,14 @@
 
 .row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-1) 0;
 }
 
 .rowLabel {
+  min-width: 0;
   font-size: var(--fs-sm);
   color: var(--text);
 }
@@ -194,6 +245,7 @@
 /* ── Cards (provider forms, clones; Podium's client/issue setup cards) ───── */
 
 .card {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
@@ -211,6 +263,11 @@
 }
 
 .cardName {
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text);
@@ -225,6 +282,14 @@
   white-space: nowrap;
   font-size: var(--fs-sm);
   color: var(--text-muted);
+}
+
+/* A card detail that wraps instead of truncating. */
+.cardDetailWrap {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .cardActions {
@@ -267,16 +332,21 @@
   gap: var(--sp-2);
 }
 
-.tokenState {
+.loginState {
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
 
-.tokenState[data-set="true"] {
+.loginState[data-tone="ok"] {
   color: var(--success);
 }
 
+.loginState[data-tone="warning"] {
+  color: var(--warning);
+}
+
 .fieldRow {
+  min-width: 0;
   display: flex;
   gap: var(--sp-2);
 }
@@ -322,6 +392,7 @@
 }
 
 .keys {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: var(--sp-1);
@@ -348,4 +419,12 @@
 .inlineButton {
   margin-left: var(--sp-1);
   padding: 0 var(--sp-2);
+}
+
+/* A link-styled button inside help text (AI → Repositories). */
+.inlineLink {
+  height: auto;
+  padding: 0;
+  font-size: inherit;
+  color: var(--accent);
 }

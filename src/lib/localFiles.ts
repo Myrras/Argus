@@ -5,7 +5,7 @@
  * has no line support, so a focused line or thread opens its file.
  */
 
-import type { LocalFile, ReviewId } from "../ipc/types";
+import type { LocalFile, ReviewId, Settings } from "../ipc/types";
 import type { ContextMenuItem } from "../components/ContextMenu";
 import { CONVERSATION, useCodeViewStore } from "../state/codeViewStore";
 import { useFocusStore } from "../state/focusStore";
@@ -28,10 +28,37 @@ export function headHint(file: LocalFile): string | null {
 }
 
 /** The editor button's tooltip; `action` is "Open in editor (O)". */
-export function openTitle(file: LocalFile, action: string): string {
+export function openTitle(
+  file: LocalFile,
+  action: string,
+  withRepository = false,
+): string {
+  const lines = [file.exists ? action : NOT_IN_WORKING_TREE];
+  if (file.exists && withRepository) {
+    lines.push("Opens the repository with the file");
+  }
   const head = headHint(file);
-  const first = file.exists ? action : NOT_IN_WORKING_TREE;
-  return head ? `${first}\n${head}` : first;
+  if (head) lines.push(head);
+  return lines.join("\n");
+}
+
+/**
+ * Whether Open in editor hands the repository over with this file: an
+ * editor is set for it (its extension, else the default) and the switch in
+ * Settings → Editors is on. Mirrors the core's `open_in_editor`.
+ */
+export function opensRepository(
+  settings: Settings | null,
+  path: string,
+): boolean {
+  if (!settings || settings.openWithRepository === false) return false;
+  const ext = path.includes(".") ? path.split(".").pop()?.toLowerCase() : "";
+  const name = path.split("/").pop() ?? "";
+  const hasExt = !!ext && !name.startsWith(".") && name.lastIndexOf(".") > 0;
+  return !!(
+    (hasExt && ext && settings.editorOverrides?.[ext]) ||
+    settings.defaultEditor
+  );
 }
 
 /** The file menu's items (Iris's Local pane menu), or none without a clone. */

@@ -13,17 +13,18 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { useEffect, useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { StoredThread } from "../ipc/types";
 import type { Placement } from "../lib/diffThreads";
 
-import { EditorView, type WidgetType } from "@codemirror/view";
+import { BlockType, EditorView, type WidgetType } from "@codemirror/view";
 
 import { diffEditorFor, threadBlockKey } from "../lib/diffEditors";
 import { useLayoutStore } from "../state/layoutStore";
 import { thread } from "../test/fixtures";
-import { DiffEditor } from "./DiffEditor";
+import { dragLabel, dragReach, dragStop } from "../lib/commentDrag";
+import { DiffEditor, type CommentGutter } from "./DiffEditor";
 
 // jsdom has no layout: CodeMirror asks ranges for their rectangles.
 if (!Range.prototype.getClientRects) {
@@ -38,6 +39,10 @@ if (!Range.prototype.getClientRects) {
 
 const original = "fn a() {}\nfn b() {}\nfn c() {}\n";
 const modified = "fn a() {}\nfn b2() {}\nfn c() {}\n";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("DiffEditor", () => {
   it.each(["unified", "split"] as const)(
@@ -86,15 +91,39 @@ describe("DiffEditor", () => {
     expect(await screen.findByText("pending draft")).toBeInTheDocument();
   });
 
-  it("puts the + on commentable lines only and reports clicks", async () => {
-    const onComment = vi.fn();
-    const comment = {
+  /**
+   * jsdom has no layout: the line under the pointer comes from
+   * `elementAtHeight`, pointed at a line here.
+   */
+  function pointAt(line: number | "widget") {
+    return vi
+      .spyOn(EditorView.prototype, "elementAtHeight")
+      .mockImplementation(function (this: EditorView) {
+        if (line === "widget") {
+          return { from: 0, type: BlockType.WidgetAfter } as never;
+        }
+        return {
+          from: this.state.doc.line(line).from,
+          type: BlockType.Text,
+        } as never;
+      });
+  }
+
+  function commentable(
+    onComment = vi.fn(),
+    regionOf?: CommentGutter["regionOf"],
+  ) {
+    return {
       lines: { a: new Set<number>(), b: new Set([2, 3]) },
       selection: null,
       focus: null,
       onComment,
       onFocusLine: vi.fn(),
+      regionOf,
     };
+  }
+
+  it("shows one + beside the commentable line under the pointer", async () => {
     const { container } = render(
       <DiffEditor
         path="src/lib.rs"
@@ -103,32 +132,159 @@ describe("DiffEditor", () => {
         layout="unified"
         placements={[]}
         renderThread={() => null}
-        comment={comment}
+        comment={commentable()}
       />,
     );
+    const editor = container.querySelector<HTMLElement>(".cm-editor")!;
+    const plus = () =>
+      container.querySelectorAll<HTMLElement>(".cm-argusCommentPlus");
+    // Nothing until the pointer is over a line.
+    await act(async () => {});
+    expect(plus()).toHaveLength(0);
+    const spy = pointAt(2);
+    fireEvent.mouseMove(editor, { clientY: 10 });
+    await waitFor(() => expect(plus()).toHaveLength(1));
+    expect(plus()[0].dataset.commentLine).toBe("2");
+    expect(plus()[0]).toHaveAccessibleName("Comment on line 2");
+    expect(plus()[0].title).toContain("Click to comment, drag to select lines");
+    // It follows the pointer.
+    spy.mockRestore();
+    const at3 = pointAt(3);
+    fireEvent.mouseMove(editor, { clientY: 20 });
+    await waitFor(() => expect(plus()[0]?.dataset.commentLine).toBe("3"));
+    expect(plus()).toHaveLength(1);
+    at3.mockRestore();
+    // Line 1 takes no comment; a block widget is no line.
+    const at1 = pointAt(1);
+    fireEvent.mouseMove(editor, { clientY: 0 });
+    await waitFor(() => expect(plus()).toHaveLength(0));
+    at1.mockRestore();
+    const widget = pointAt("widget");
+    fireEvent.mouseMove(editor, { clientY: 0 });
+    await waitFor(() => expect(plus()).toHaveLength(0));
+    widget.mockRestore();
+    // Gone when the pointer leaves the editor.
+    const again = pointAt(2);
+    fireEvent.mouseMove(editor, { clientY: 10 });
+    await waitFor(() => expect(plus()).toHaveLength(1));
+    fireEvent.mouseLeave(editor);
+    await waitFor(() => expect(plus()).toHaveLength(0));
+    again.mockRestore();
+  });
+
+  it("clicks, drags and shift-clicks from the +", async () => {
+    const onComment = vi.fn();
+    const { container } = render(
+      <DiffEditor
+        path="src/lib.rs"
+        original={original}
+        modified={modified}
+        layout="unified"
+        placements={[]}
+        renderThread={() => null}
+        comment={commentable(onComment)}
+      />,
+    );
+    const editor = container.querySelector<HTMLElement>(".cm-editor")!;
+    const spy = pointAt(2);
+    fireEvent.mouseMove(editor, { clientY: 10 });
+    const plus = await waitFor(() => {
+      const el = container.querySelector<HTMLElement>(".cm-argusCommentPlus");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    // A click: mousedown and mouseup without a move.
+    fireEvent.mouseDown(plus, { button: 0 });
+    fireEvent.mouseUp(window, { button: 0 });
+    expect(onComment).toHaveBeenLastCalledWith("b", 2, 2, false);
+    // A drag from line 2 to line 3: the range shows with a label.
+    fireEvent.mouseDown(plus, { button: 0, clientX: 5, clientY: 10 });
+    spy.mockRestore();
+    const at3 = pointAt(3);
+    fireEvent.mouseMove(window, { clientX: 5, clientY: 20 });
     await waitFor(() =>
-      expect(container.querySelectorAll(".cm-argusCommentPlus")).toHaveLength(
-        2,
+      expect(container.querySelectorAll(".cm-argusDragLine")).toHaveLength(2),
+    );
+    expect(container.querySelector(".cm-argusDragStart")?.textContent).toBe(
+      "fn b2() {}",
+    );
+    expect(container.querySelector(".cm-argusDragEnd")?.textContent).toBe(
+      "fn c() {}",
+    );
+    const label = document.querySelector(".argus-comment-drag-label");
+    expect(label?.textContent).toBe("Comment on lines 2–3");
+    expect(label).toHaveAttribute("role", "status");
+    expect(document.documentElement.dataset.commentDrag).toBe("ok");
+    fireEvent.mouseUp(window, { button: 0 });
+    expect(onComment).toHaveBeenLastCalledWith("b", 2, 3, false);
+    // The drag's traces are gone.
+    expect(document.querySelector(".argus-comment-drag-label")).toBeNull();
+    expect(document.documentElement.dataset.commentDrag).toBeUndefined();
+    await waitFor(() =>
+      expect(container.querySelector(".cm-argusDragLine")).toBeNull(),
+    );
+    at3.mockRestore();
+    // Shift-click extends.
+    pointAt(2);
+    fireEvent.mouseMove(editor, { clientY: 10 });
+    const again = await waitFor(() => {
+      const el = container.querySelector<HTMLElement>(".cm-argusCommentPlus");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    fireEvent.mouseDown(again, { button: 0, shiftKey: true });
+    expect(onComment).toHaveBeenLastCalledWith("b", 2, 2, true);
+    expect(onComment).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops a drag at its region's edge and cancels it with Escape", async () => {
+    const onComment = vi.fn();
+    // Lines 2 and 3 are two regions (say a hunk and code outside it).
+    const regionOf = (_side: "a" | "b", line: number) =>
+      line === 2
+        ? { key: "h0", outside: false }
+        : line === 3
+          ? { key: "g1", outside: true }
+          : null;
+    const { container } = render(
+      <DiffEditor
+        path="src/lib.rs"
+        original={original}
+        modified={modified}
+        layout="unified"
+        placements={[]}
+        renderThread={() => null}
+        comment={commentable(onComment, regionOf)}
+      />,
+    );
+    const editor = container.querySelector<HTMLElement>(".cm-editor")!;
+    const spy = pointAt(2);
+    fireEvent.mouseMove(editor, { clientY: 10 });
+    const plus = await waitFor(() => {
+      const el = container.querySelector<HTMLElement>(".cm-argusCommentPlus");
+      expect(el).not.toBeNull();
+      return el!;
+    });
+    fireEvent.mouseDown(plus, { button: 0 });
+    spy.mockRestore();
+    pointAt(3);
+    fireEvent.mouseMove(window, { clientY: 20 });
+    await waitFor(() =>
+      expect(container.querySelector(".cm-argusDragBlocked")?.textContent).toBe(
+        "fn c() {}",
       ),
     );
-    // The gutter is aria-hidden (CodeMirror's); the keyboard path is the
-    // code's own ↑/↓ + Enter and the Comment-on-line key.
-    const at = (n: number) =>
-      container.querySelector<HTMLElement>(`[data-comment-line="${n}"]`)!;
-    expect(at(1)).toBeNull();
-    const plus = at(2);
-    // A click: mousedown and mouseup on the same "+".
-    fireEvent.mouseDown(plus, { button: 0 });
-    fireEvent.mouseUp(plus, { button: 0 });
-    expect(onComment).toHaveBeenLastCalledWith("b", 2, 2, false);
-    // A drag from line 2 to line 3.
-    fireEvent.mouseDown(plus, { button: 0 });
-    fireEvent.mouseUp(at(3), { button: 0 });
-    expect(onComment).toHaveBeenLastCalledWith("b", 2, 3, false);
-    // Shift-click extends.
-    fireEvent.mouseDown(at(3), { button: 0, shiftKey: true });
-    expect(onComment).toHaveBeenLastCalledWith("b", 3, 3, true);
-    expect(onComment).toHaveBeenCalledTimes(3);
+    expect(container.querySelectorAll(".cm-argusDragLine")).toHaveLength(1);
+    expect(document.documentElement.dataset.commentDrag).toBe("blocked");
+    expect(
+      document.querySelector(".argus-comment-drag-label")?.textContent,
+    ).toBe("Comment on line 2 · a range in the diff can't leave its hunk");
+    // Escape: nothing is commented on, and a later mouseup does nothing.
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.mouseUp(window, { button: 0 });
+    expect(onComment).not.toHaveBeenCalled();
+    expect(document.querySelector(".argus-comment-drag-label")).toBeNull();
+    expect(document.documentElement.dataset.commentDrag).toBeUndefined();
   });
 
   it("marks the selected lines", async () => {
@@ -618,4 +774,151 @@ describe("DiffEditor: switching the layout", () => {
     rerender(<DiffEditor {...props} modified={`${modified}fn d() {}\n`} />);
     expect(scroll).not.toHaveBeenCalled();
   });
+});
+
+describe("DiffEditor: drag rules", () => {
+  const region = (line: number) =>
+    line >= 1 && line <= 4
+      ? { key: "h0", outside: false }
+      : line >= 5 && line <= 20
+        ? { key: "g1", outside: true }
+        : null;
+
+  it("reaches toward the pointer within the anchor's region", () => {
+    expect(dragReach(region, 2, 4)).toEqual({ to: 4, blocked: null });
+    expect(dragReach(region, 3, 1)).toEqual({ to: 1, blocked: null });
+    expect(dragReach(region, 3, 9)).toEqual({ to: 4, blocked: 9 });
+    expect(dragReach(region, 8, 2)).toEqual({ to: 5, blocked: 2 });
+    expect(dragReach(region, 30, 2)).toEqual({ to: 30, blocked: null });
+  });
+
+  it("names the lines and why a range stops", () => {
+    expect(dragLabel(4, 2, null)).toBe("Comment on lines 2–4");
+    expect(dragLabel(4, 4, null)).toBe("Comment on line 4");
+    expect(dragStop(region, 8, 2)).toBe("enterDiff");
+    expect(dragStop(region, 2, 8)).toBe("leaveHunk");
+    expect(dragStop(region, 2, 30)).toBe("leaveHunk");
+    // Same region: only folded lines in between stopped it.
+    expect(dragStop(region, 6, 19)).toBe("folded");
+    expect(dragLabel(8, 5, "enterDiff")).toBe(
+      "Comment on lines 5–8 · a range outside the diff can't enter it",
+    );
+    expect(dragLabel(6, 9, "folded")).toBe(
+      "Comment on lines 6–9 · unfold the lines in between first",
+    );
+  });
+});
+
+describe("DiffEditor: side by side stays aligned", () => {
+  const long = (changed: string) =>
+    Array.from({ length: 30 }, (_, i) =>
+      i === 1 ? changed : `fn line${i + 1}() {}`,
+    ).join("\n") + "\n";
+
+  it("opens a collapsed stretch on both sides when one side opens it", async () => {
+    const t = thread({ author: "rev-fixture" });
+    const { container, rerender } = render(
+      <DiffEditor
+        path="src/long.rs"
+        original={long("fn old() {}")}
+        modified={long("fn new() {}")}
+        layout="split"
+        placements={[]}
+        renderThread={() => <p>thread</p>}
+      />,
+    );
+    const editors = () => [...container.querySelectorAll(".cm-editor")];
+    const collapsed = () =>
+      editors().map((e) => e.querySelectorAll(".cm-collapsedLines").length);
+    await waitFor(() => expect(collapsed()).toEqual([1, 1]));
+    // A thread on a base-side line inside the stretch: Argus opens that
+    // side, and the head side follows.
+    rerender(
+      <DiffEditor
+        path="src/long.rs"
+        original={long("fn old() {}")}
+        modified={long("fn new() {}")}
+        layout="split"
+        placements={[{ thread: t, side: "a", line: 20 }]}
+        renderThread={() => <p>thread</p>}
+      />,
+    );
+    await screen.findByText("thread");
+    await waitFor(() => expect(collapsed()).toEqual([0, 0]));
+  });
+
+  it("follows the library's own click on the stretch", async () => {
+    const { container } = render(
+      <DiffEditor
+        path="src/long2.rs"
+        original={long("fn old() {}")}
+        modified={long("fn new() {}")}
+        layout="split"
+        placements={[]}
+        renderThread={() => null}
+      />,
+    );
+    const editors = () => [...container.querySelectorAll(".cm-editor")];
+    const collapsed = () =>
+      editors().map((e) => e.querySelectorAll(".cm-collapsedLines").length);
+    await waitFor(() => expect(collapsed()).toEqual([1, 1]));
+    fireEvent.click(editors()[1].querySelector(".cm-collapsedLines")!);
+    await waitFor(() => expect(collapsed()).toEqual([0, 0]));
+  });
+});
+
+describe("DiffEditor: mounted again", () => {
+  const long = (changed: string) =>
+    Array.from({ length: 30 }, (_, i) =>
+      i === 1 ? changed : `fn line${i + 1}() {}`,
+    ).join("\n") + "\n";
+
+  it.each(["unified", "split"] as const)(
+    "opens again the stretches the %s diff had open when it unmounted",
+    async (layout) => {
+      const path = `src/remount-${layout}.rs`;
+      const diff = () => (
+        <DiffEditor
+          path={path}
+          original={long("fn old() {}")}
+          modified={long("fn new() {}")}
+          layout={layout}
+          placements={[]}
+          renderThread={() => null}
+        />
+      );
+      const first = render(diff());
+      const stretches = (root: HTMLElement) =>
+        root.querySelectorAll(".cm-collapsedLines").length;
+      await waitFor(() =>
+        expect(stretches(first.container)).toBeGreaterThan(0),
+      );
+      const editors = first.container.querySelectorAll(".cm-editor");
+      fireEvent.click(
+        editors[editors.length - 1].querySelector(".cm-collapsedLines")!,
+      );
+      await waitFor(() => expect(stretches(first.container)).toBe(0));
+      // Scrolled far away: the page unmounts the diff; back again.
+      first.unmount();
+      const again = render(diff());
+      await waitFor(() =>
+        expect(again.container.querySelector(".cm-editor")).not.toBeNull(),
+      );
+      expect(stretches(again.container)).toBe(0);
+      // Another file folds as usual.
+      const other = render(
+        <DiffEditor
+          path="src/other-remount.rs"
+          original={long("fn old() {}")}
+          modified={long("fn new() {}")}
+          layout={layout}
+          placements={[]}
+          renderThread={() => null}
+        />,
+      );
+      await waitFor(() =>
+        expect(stretches(other.container)).toBeGreaterThan(0),
+      );
+    },
+  );
 });

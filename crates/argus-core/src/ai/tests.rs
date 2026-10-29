@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::adapter::{self, AgentError, Invocation, OutputKind};
+use super::auggie;
 use super::dedupe::RaisedRef;
 use super::job::{self, JobContext};
 use super::model::{AiRunStatus, RepeatOf, RepeatReason, Severity, VerdictLabel};
@@ -1491,6 +1492,49 @@ fn claude_run_in_a_snapshot_dir() {
     assert_eq!(read("count").trim(), "1");
 }
 
+/// The run asks for the repository's language, else the global one, and
+/// records which in its context.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_run_asks_for_the_repositorys_language_and_records_it() {
+    use crate::settings::ReviewLanguage;
+    let bin = tempfile::tempdir().unwrap();
+    let script = write_script(bin.path(), "claude", FAKE_CLAUDE);
+    std::fs::write(bin.path().join("out.jsonl"), result_line(GOOD_ANSWER)).unwrap();
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let mut settings = fake_settings(&script, "claude");
+    settings.ai.review_language = ReviewLanguage::English;
+    settings.review_languages.insert(
+        "github.com/acme-fixture/widgets".into(),
+        ReviewLanguage::Dutch,
+    );
+    let mut c = ctx(settings.clone(), FakeProvider::new(&["src/a.rs"]));
+    let read = |name: &str| std::fs::read_to_string(bin.path().join(name)).unwrap();
+
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert!(read("stdin1.txt").contains(&prompt::language_instruction(&ReviewLanguage::Dutch)));
+    assert_eq!(out.context.language, Some(ReviewLanguage::Dutch));
+
+    // No entry of its own: the global default.
+    settings.review_languages.clear();
+    c.settings = settings.clone();
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    let stdin = read("stdin2.txt");
+    assert!(
+        stdin.contains("verdict reasons, and the prose around any code you suggest) in English.")
+    );
+    assert!(!stdin.contains("Dutch"));
+    assert_eq!(out.context.language, Some(ReviewLanguage::English));
+
+    // Nothing set at all: Auto, the merge request's own language.
+    c.settings = fake_settings(&script, "claude");
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert!(read("stdin3.txt").contains(prompt::AUTO_LANGUAGE));
+    assert_eq!(out.context.language, Some(ReviewLanguage::Auto));
+}
+
 #[test]
 #[cfg_attr(windows, ignore)]
 fn claude_runs_in_a_plain_clone_folder_in_a_later_round() {
@@ -2192,6 +2236,10 @@ fn invalid_answer_is_retried_once_then_fails() {
         RunOutput {
             head_sha: Some("h1".into()),
             base_sha: Some("base".into()),
+            context: super::model::RunContext {
+                language: Some(crate::settings::ReviewLanguage::Auto),
+                ..Default::default()
+            },
             ..RunOutput::default()
         }
     );
@@ -2223,16 +2271,24 @@ fn invalid_answer_is_retried_once_then_fails() {
     );
 }
 
+/// The shell lines of a fake auggie that answer `--help` with `help`.
+fn auggie_help(help: &str) -> String {
+    format!("if [ \"$1\" = \"--help\" ]; then\ncat <<'ARGUS_HELP'\n{help}ARGUS_HELP\nexit 0\nfi\n")
+}
+
 #[test]
 #[cfg_attr(windows, ignore)]
-fn auggie_takes_an_instruction_file_and_answers_in_text() {
+fn a_legacy_auggie_takes_an_instruction_file_and_answers_in_text() {
     let bin = tempfile::tempdir().unwrap();
     let script = write_script(
         bin.path(),
         "auggie",
-        r#"#!/bin/sh
+        &(r#"#!/bin/sh
 dir="$(dirname "$0")"
-if [ "$1" = "tools" ]; then
+"#
+        .to_string()
+            + &auggie_help(auggie::fixtures::LEGACY_HELP)
+            + r#"if [ "$1" = "tools" ]; then
   pwd -P > "$dir/tools-cwd.txt"
   printf 'Integration Tools:\n  \342\234\223 add_todo_fixture   enabled\n  \342\234\223 view   enabled\n'
   exit 0
@@ -2243,7 +2299,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 printf 'Sure.\n```json\n{"findings":[],"checklist":[{"text":"Check the rollout"}],"verdicts":[]}\n```\n'
-"#,
+"#),
     );
     let store = Store::in_memory().unwrap();
     let r = record(12);
@@ -2279,12 +2335,13 @@ fn auggie_with_tool_listing(tools: &str, timeout: Duration) -> (Result<RunOutput
         &format!(
             r#"#!/bin/sh
 dir="$(dirname "$0")"
-if [ "$1" = "tools" ]; then
+{help}if [ "$1" = "tools" ]; then
   {tools}
 fi
 touch "$dir/agent-started"
 printf '```json\n{{"findings":[],"checklist":[],"verdicts":[]}}\n```\n'
-"#
+"#,
+            help = auggie_help(auggie::fixtures::LEGACY_HELP)
         ),
     );
     let store = Store::in_memory().unwrap();
@@ -2317,6 +2374,114 @@ fn auggie_does_not_run_when_its_tools_cannot_be_listed() {
         assert_eq!(out.err().as_deref(), Some(refused), "{case}");
         assert!(!started, "{case}: the agent was started");
     }
+}
+
+/// A fake current auggie: `--help` from `help`; any other call records its
+/// argv and stdin (`argv<n>.txt`, `stdin<n>.txt`) and prints the JSON
+/// lines of a run whose answer is `answer<n>.txt` (else `answer.txt`).
+fn current_auggie(dir: &Path, help: &str) -> PathBuf {
+    let event = |e: serde_json::Value| e.to_string().replace('\'', "");
+    let delta = event(serde_json::json!({
+        "type": "message_update",
+        "assistantMessageEvent": {"type": "thinking_delta", "contentIndex": 0, "delta": "Reading the diff."}
+    }));
+    let body = format!(
+        r#"#!/bin/sh
+dir="$(dirname "$0")"
+{help}n=$(cat "$dir/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "$dir/count"
+printf '%s\n' "$@" > "$dir/argv$n.txt"
+cat > "$dir/stdin$n.txt"
+answer="$dir/answer$n.txt"
+[ -f "$answer" ] || answer="$dir/answer.txt"
+printf '%s\n' '{{"type":"session","version":3,"id":"fixture","cwd":"/tmp"}}' '{{"type":"agent_start"}}' '{delta}'
+t=$(sed 's/\\/\\\\/g; s/"/\\"/g' "$answer" | tr -d '\n')
+printf '{{"type":"agent_end","messages":[{{"role":"assistant","content":[{{"type":"text","text":"%s"}}],"stopReason":"stop"}}]}}\n' "$t"
+"#,
+        help = auggie_help(help),
+    );
+    write_script(dir, "auggie", &body)
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_current_auggie_reads_the_prompt_on_stdin_with_read_tools_only() {
+    let bin = tempfile::tempdir().unwrap();
+    let script = current_auggie(bin.path(), auggie::fixtures::CURRENT_HELP);
+    // Invalid first (prose only), then valid: the same repair retry as
+    // Claude's.
+    std::fs::write(bin.path().join("answer1.txt"), "Looks fine to me.").unwrap();
+    std::fs::write(
+        bin.path().join("answer.txt"),
+        r#"{"findings":[],"checklist":[{"text":"Check the rollout"}],"verdicts":[]}"#,
+    )
+    .unwrap();
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let c = ctx(
+        fake_settings(&script, "auggie"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+    let out = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap();
+    assert_eq!(out.checklist, vec!["Check the rollout"]);
+    let argv = std::fs::read_to_string(bin.path().join("argv1.txt")).unwrap();
+    assert!(
+        argv.starts_with("--print\n--mode\njson\n--no-session\n--workspace-root\n"),
+        "{argv}"
+    );
+    assert!(argv.contains("\n--tools\nread,grep,find,ls\n"), "{argv}");
+    assert!(
+        argv.contains("\n--mcp-config\n{\"mcpServers\":{}}\n"),
+        "{argv}"
+    );
+    assert!(argv.contains("--remove-tool=web-search\n"), "{argv}");
+    assert!(!argv.contains("--remove-tool=read\n"), "{argv}");
+    assert!(
+        !argv.contains("--instruction-file") && !argv.contains("--quiet"),
+        "{argv}"
+    );
+    // Never `tools list`: to this auggie that is a prompt, run with every
+    // tool.
+    assert!(!argv.contains("tools\nlist"), "{argv}");
+    assert_eq!(
+        std::fs::read_to_string(bin.path().join("count"))
+            .unwrap()
+            .trim(),
+        "2"
+    );
+    let stdin = std::fs::read_to_string(bin.path().join("stdin1.txt")).unwrap();
+    assert!(stdin.contains(prompt::OUTPUT_CONTRACT));
+    let repair = std::fs::read_to_string(bin.path().join("stdin2.txt")).unwrap();
+    assert!(
+        repair.contains("Your previous answer could not be used"),
+        "{repair}"
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn an_auggie_that_fits_no_known_shape_is_not_run() {
+    let bin = tempfile::tempdir().unwrap();
+    // A future auggie that dropped the MCP override: the user's MCP
+    // servers (some write) would stay on.
+    let help = auggie::fixtures::CURRENT_HELP.replace("--mcp-config", "--mcp-file");
+    let script = current_auggie(bin.path(), &help);
+    std::fs::write(bin.path().join("answer.txt"), "{}").unwrap();
+    let store = Store::in_memory().unwrap();
+    let r = record(12);
+    store.upsert_review(&r).unwrap();
+    let c = ctx(
+        fake_settings(&script, "auggie"),
+        FakeProvider::new(&["src/a.rs"]),
+    );
+    let err = job::execute(&store, &r, &c, &AtomicBool::new(false)).unwrap_err();
+    assert_eq!(
+        err,
+        "this auggie version can't run read-only: its --help lists no `--mcp-config`"
+    );
+    assert!(!bin.path().join("count").exists(), "the agent was started");
 }
 
 fn invocation(program: PathBuf, env: Vec<(std::ffi::OsString, std::ffi::OsString)>) -> Invocation {
@@ -2720,6 +2885,7 @@ fn a_run_reads_a_worktree_at_the_head_with_the_target_branchs_rules_and_skill() 
                 source: crate::settings::SkillSource::Project,
             }),
             worktree: true,
+            language: Some(crate::settings::ReviewLanguage::Auto),
             notes: vec![
                 "This merge request changes review rules or skills (CLAUDE.md); the target branch's versions were used"
                     .into()
@@ -2941,6 +3107,7 @@ fn the_run_context_is_stored_with_the_run_and_kept_while_the_next_one_runs() {
             source: crate::settings::SkillSource::Project,
         }),
         worktree: true,
+        language: Some(crate::settings::ReviewLanguage::Dutch),
         notes: vec!["a note".into()],
     };
     ai_store::mark_running(&store, r.id, 1, "h1", "claude", at(10, 11)).unwrap();

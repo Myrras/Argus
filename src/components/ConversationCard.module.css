@@ -6,7 +6,9 @@
   border-radius: var(--radius-md);
   background: var(--bg);
   overflow: clip;
-  scroll-margin-top: calc(var(--tabbar-h) + var(--sp-2));
+  scroll-margin-top: calc(
+    var(--page-sticky-top, var(--tabbar-h)) + var(--sp-2)
+  );
 }
 
 .card[data-selected="true"] {
@@ -15,7 +17,7 @@
 
 .header {
   position: sticky;
-  top: var(--tabbar-h);
+  top: var(--page-sticky-top, var(--tabbar-h));
   z-index: 2;
   display: flex;
   align-items: center;

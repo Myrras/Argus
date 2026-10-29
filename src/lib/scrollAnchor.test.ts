@@ -126,3 +126,27 @@ describe("createScrollAnchor", () => {
     expect(page.scrollTop).toBe(1000);
   });
 });
+
+describe("createScrollAnchor's scroll handling", () => {
+  it("notes the anchors once after a scrolled frame, not in every scroll event", () => {
+    const column = document.createElement("div");
+    document.body.appendChild(column);
+    const frames: (() => void)[] = [];
+    let picks = 0;
+    createScrollAnchor(column, {
+      pick: () => {
+        picks++;
+        return [];
+      },
+      observe: () => () => undefined,
+      now: () => 0,
+      afterFrame: (fn) => frames.push(fn),
+    });
+    const atStart = picks;
+    for (let i = 0; i < 5; i++) column.dispatchEvent(new Event("scroll"));
+    expect(picks).toBe(atStart);
+    expect(frames).toHaveLength(1);
+    frames[0]();
+    expect(picks).toBe(atStart + 1);
+  });
+});

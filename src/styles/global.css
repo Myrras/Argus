@@ -256,6 +256,40 @@ label {
   }
 }
 
+/*
+ * Dragging a comment range from the diff's "+" (DiffEditor): the cursor says
+ * "drag lines" everywhere while it lasts, or "not allowed" when the pointer
+ * is past where the range can go; a floating label by the pointer names the
+ * lines. Set on <html> by the drag (`data-comment-drag`), removed when it
+ * ends.
+ */
+html[data-comment-drag],
+html[data-comment-drag] * {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}
+html[data-comment-drag="blocked"],
+html[data-comment-drag="blocked"] * {
+  cursor: not-allowed !important;
+}
+.argus-comment-drag-label {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  padding: 2px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+}
+.argus-comment-drag-label[data-blocked="true"] {
+  background: var(--danger);
+  color: var(--on-danger);
+}
+
 /**
  * Reduced-motion guard. When the user (or OS) asks for less motion, neutralize
  * animations and transitions globally rather than auditing every component:
@@ -307,4 +341,26 @@ select,
 pre {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* Find in the review (Cmd+F): the matches in comment text (`<mark>` from
+   `lib/markdownText`, `FindText`) and in the unified view's removed lines
+   (CSS highlights from `lib/findHighlight`). */
+mark.argus-find-match {
+  color: inherit;
+  background: var(--find-match);
+  border-radius: 2px;
+}
+
+mark.argus-find-match[data-find-current="true"] {
+  background: var(--find-current);
+  box-shadow: 0 0 0 1px var(--find-current-ring);
+}
+
+::highlight(argus-find) {
+  background-color: var(--find-match);
+}
+
+::highlight(argus-find-current) {
+  background-color: var(--find-current);
 }

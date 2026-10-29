@@ -1,35 +1,37 @@
 /**
- * The core's persisted settings (`settings.json`: GitHub, GitLab, the
- * refresh interval, AI, local clones), the provider status and whether a
- * GitLab token is stored — mirrored for the Settings dialog and the
- * sidebar's Providers section (Iris's `backendSettingsStore`).
+ * The core's persisted settings (`settings.json`: the account choices, the
+ * refresh interval, AI, local clones) and the user's accounts (what gh and
+ * glab are logged in to) — mirrored for the Settings dialog and the
+ * sidebar's Providers section (Iris's `backendSettingsStore`). No token
+ * passes here: GitHub's stays with `gh`, GitLab's with `glab`.
  *
  * `load` re-reads them (on start); `save` writes a patch over what is stored
  * and keeps what the core stored (it normalizes). Saves run one at a time,
  * each over the last one's result, and show at once (a stepper clicked
- * three times saves all three steps). The GitLab token is
- * write-only from here: `setGitlabToken` (queued behind the saves) hands it
- * to `set_gitlab_token` and nowhere else (never into `Settings`), and only whether one is stored ever
- * comes back. Failures are error toasts. UI-only preferences live in
- * `settingsStore` instead.
+ * three times saves all three steps). Failures are error toasts. UI-only
+ * preferences live in `settingsStore` instead.
  *
- * `setupChanged` notes when a provider's settings or token last changed
- * (when the change was asked for), so the sidebar can drop errors of a
- * refresh that began before it (`lib/banner`'s `currentErrors`).
+ * `setupChanged` notes when a provider's accounts last changed (when the
+ * change was asked for), so the sidebar can drop errors of a refresh that
+ * began before it (`lib/banner`'s `currentErrors`).
  */
 
 import { create } from "zustand";
 
 import {
   getSettings,
-  gitlabTokenPresent,
-  providerStatus,
-  setGitlabToken,
+  listAccounts,
   toIpcError,
   updateSettings,
 } from "../ipc/commands";
 import { onReviewsRefreshed } from "../ipc/events";
-import type { ProviderId, ProviderStatus, Settings } from "../ipc/types";
+import type {
+  Account,
+  AccountChoice,
+  ProviderId,
+  Settings,
+} from "../ipc/types";
+import { changedProviders, withChoice } from "../lib/accounts";
 import type { SetupChanges } from "../lib/banner";
 import { toastError } from "./toastStore";
 
@@ -40,32 +42,34 @@ export const POLL_MINUTES_MAX = 120;
 interface BackendSettingsState {
   /** `null` until the first load arrived. */
   settings: Settings | null;
-  tokenPresent: boolean;
-  status: ProviderStatus | null;
-  /** When each provider's settings or token last changed (ms). */
+  /** `null` until the first read arrived. */
+  accounts: Account[] | null;
+  /** When each provider's accounts last changed (ms). */
   setupChanged: SetupChanges;
   load: () => Promise<void>;
-  /** Re-read the provider status and whether a token is stored. */
-  refreshStatus: () => Promise<void>;
+  /**
+   * Re-read the accounts (the core asks gh and glab only when its answer
+   * is not current).
+   */
+  refreshAccounts: () => Promise<void>;
+  /** Re-read them, asking gh and glab in any case (Check again). */
+  checkAccounts: () => Promise<void>;
   /** Save a patch over the stored settings; resolves true on success. */
   save: (patch: Partial<Settings>) => Promise<boolean>;
-  /** Store the GitLab token in the keychain (blank deletes it). */
-  setGitlabToken: (token: string) => Promise<boolean>;
+  /** Save one host's choice (its switch, the gh account picker). */
+  setAccount: (key: string, choice: AccountChoice) => Promise<boolean>;
 }
 
 /** The running saves, in order, and their patches not yet stored. */
 let saving: Promise<unknown> = Promise.resolve();
 const queued: Partial<Settings>[] = [];
 
-/** The providers whose setup a settings patch changes. */
-const PROVIDER_KEYS: readonly ProviderId[] = ["github", "gitlab"];
-
+/** `before` with `touched` (providers whose accounts changed) at `at`. */
 function changedBy(
-  patch: Partial<Settings>,
+  touched: readonly ProviderId[],
   at: number,
   before: SetupChanges,
 ): SetupChanges {
-  const touched = PROVIDER_KEYS.filter((p) => p in patch);
   if (touched.length === 0) return before;
   return { ...before, ...Object.fromEntries(touched.map((p) => [p, at])) };
 }
@@ -78,8 +82,7 @@ function withQueued(base: Settings): Settings {
 export const useBackendSettingsStore = create<BackendSettingsState>(
   (set, get) => ({
     settings: null,
-    tokenPresent: false,
-    status: null,
+    accounts: null,
     setupChanged: {},
 
     load: async () => {
@@ -88,23 +91,50 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
       } catch (e) {
         toastError("Could not load the settings", toIpcError(e).message);
       }
-      await get().refreshStatus();
+      await get().refreshAccounts();
     },
 
-    refreshStatus: async () => {
+    refreshAccounts: async () => {
       try {
-        const [status, tokenPresent] = await Promise.all([
-          providerStatus(),
-          gitlabTokenPresent(),
-        ]);
-        set({ status, tokenPresent });
+        set({ accounts: await listAccounts(false) });
       } catch (e) {
-        toastError("Could not check the providers", toIpcError(e).message);
+        toastError("Could not list the accounts", toIpcError(e).message);
       }
     },
 
+    checkAccounts: async () => {
+      try {
+        set({ accounts: await listAccounts(true) });
+      } catch (e) {
+        toastError("Could not list the accounts", toIpcError(e).message);
+      }
+    },
+
+    setAccount: (key, choice) => {
+      const current = get().settings;
+      if (!current) return Promise.resolve(false);
+      // Shown at once, before the save: the switch moves on click.
+      set((s) => ({
+        accounts:
+          s.accounts?.map((a) =>
+            a.key === key
+              ? { ...a, enabled: choice.enabled, account: choice.account }
+              : a,
+          ) ?? null,
+      }));
+      return get().save({
+        accounts: withChoice(current.accounts, key, choice),
+      });
+    },
+
     save: (patch) => {
-      if (!get().settings) return Promise.resolve(false);
+      const shown = get().settings;
+      if (!shown) return Promise.resolve(false);
+      // Against what the user saw before this change (the store shows it
+      // at once, below).
+      const touched = patch.accounts
+        ? changedProviders(shown.accounts, patch.accounts)
+        : [];
       queued.push(patch);
       set((s) => ({ settings: s.settings && { ...s.settings, ...patch } }));
       const run = async (): Promise<boolean> => {
@@ -119,7 +149,7 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
           queued.shift();
           set((s) => ({
             settings: withQueued(stored),
-            setupChanged: changedBy(patch, asked, s.setupChanged),
+            setupChanged: changedBy(touched, asked, s.setupChanged),
           }));
         } catch (e) {
           queued.shift();
@@ -129,33 +159,8 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
           if (loaded) set({ settings: withQueued(loaded) });
           return false;
         }
-        await get().refreshStatus();
+        await get().refreshAccounts();
         return true;
-      };
-      const p = saving.then(run);
-      saving = p.catch(() => undefined);
-      return p;
-    },
-
-    setGitlabToken: (token) => {
-      // On the saves' chain: the token is stored for the URL a save before
-      // it stores, and a removal never overtakes a queued URL save.
-      const run = async (): Promise<boolean> => {
-        const asked = Date.now();
-        let ok = true;
-        try {
-          await setGitlabToken(token);
-          set((s) => ({ setupChanged: { ...s.setupChanged, gitlab: asked } }));
-        } catch (e) {
-          toastError(
-            token ? "Could not store the token" : "Could not remove the token",
-            toIpcError(e).message,
-          );
-          ok = false;
-        }
-        // Either way: a failure can come after the token was stored.
-        await get().refreshStatus();
-        return ok;
       };
       const p = saving.then(run);
       saving = p.catch(() => undefined);
@@ -165,11 +170,12 @@ export const useBackendSettingsStore = create<BackendSettingsState>(
 );
 
 /**
- * After every refresh, re-check the providers (a `gh auth login` or a new
- * token shows up without reopening Settings). Resolves to an unsubscribe.
+ * After every refresh, re-read the accounts (as the refresh's calls left
+ * them; gh and glab asked again only after a call was refused for the
+ * login). Resolves to an unsubscribe.
  */
 export function subscribeBackendSettingsEvents(): Promise<() => void> {
   return onReviewsRefreshed(
-    () => void useBackendSettingsStore.getState().refreshStatus(),
+    () => void useBackendSettingsStore.getState().refreshAccounts(),
   );
 }

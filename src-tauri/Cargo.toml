@@ -26,7 +26,7 @@ tauri-plugin-window-state = "2"
 # webview (a bare target="_blank" does nothing in WKWebView/WebView2), and,
 # from Rust only (`opener.rs`), a clone's file in the user's editor.
 tauri-plugin-opener = "2"
-# Native folder picker for a repository's local clone (Settings → AI), and
+# Native folder picker for a repository's local clone (Settings → Repositories), and
 # the startup error dialog.
 tauri-plugin-dialog = "2"
 # One Argus at a time: a second launch focuses the running window instead of

@@ -84,6 +84,7 @@ vi.mock("./components/DiffEditor", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "./test/batches";
 
 import App from "./App";
 import type {
@@ -93,6 +94,8 @@ import type {
   PostResult,
   ReviewRecord,
   StoredThread,
+  ScriptDraft,
+  SubmitScript,
 } from "./ipc/types";
 import { useAiStore } from "./state/aiStore";
 import { useBackendSettingsStore } from "./state/backendSettingsStore";
@@ -103,20 +106,23 @@ import { useLayoutStore } from "./state/layoutStore";
 import { useOverlayStore } from "./state/overlayStore";
 import { APPROVED_LINGER_MS, useReviewStore } from "./state/reviewStore";
 import { useSettingsRequestStore } from "./state/settingsRequestStore";
+import { useSubmitScriptsStore } from "./state/submitScriptsStore";
 import { useThreadStore } from "./state/threadStore";
 import { useToastStore } from "./state/toastStore";
+import { newScript } from "./lib/submitScripts";
 import { aiRun, finding } from "./test/aiFixtures";
 import {
   file,
   review,
   reviewFiles,
+  scriptDraft,
   settings,
-  status,
+  accounts,
   thread,
 } from "./test/fixtures";
 import { historyFor } from "./test/historyFixtures";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const initial = {
   reviews: useReviewStore.getState(),
   threads: useThreadStore.getState(),
@@ -138,7 +144,11 @@ const WRITES = [
 ];
 
 /** A backend with two reviews; `A` has a conversation and one file. */
-function makeBackend(opts: { ai: boolean }) {
+function makeBackend(opts: {
+  ai: boolean;
+  scripts?: SubmitScript[];
+  drafts?: ScriptDraft[];
+}) {
   const A = review({ title: "Fixture A" });
   const B = review({
     title: "Fixture B",
@@ -221,6 +231,9 @@ function makeBackend(opts: { ai: boolean }) {
   ];
   const run: AiRunState = aiRun({ reviewId: A.id, enabled: opts.ai });
   const posted: NewComment[][] = [];
+  // `hold`: the histories' read never answers (after a push the core walks
+  // every thread again at the new head, which takes its time).
+  const histories = { hold: false };
 
   const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     list_reviews: () => reviews.filter((r) => r.status !== "approved"),
@@ -234,9 +247,18 @@ function makeBackend(opts: { ai: boolean }) {
     get_settings: () =>
       settings({
         ai: { enabled: opts.ai, adapter: "claude", args: [], binary: null },
+        submitScripts: opts.scripts ?? [],
       }),
-    provider_status: () => status(),
-    gitlab_token_present: () => true,
+    submit_scripts_dir: () => "/Users/fixture/Library/Argus/scripts",
+    list_script_drafts: () => opts.drafts ?? [],
+    script_generation_status: () => ({
+      available: opts.ai,
+      adapter: "claude",
+      reason: opts.ai
+        ? null
+        : "The AI pass is off: turn it on in Settings → AI.",
+    }),
+    list_accounts: () => accounts(),
     list_threads: (a) => threads[a.reviewId as string] ?? [],
     list_files: (a) =>
       a.reviewId === A.id ? files : reviewFiles({ files: [] }),
@@ -249,7 +271,9 @@ function makeBackend(opts: { ai: boolean }) {
       hunks: [{ old: [1, 2], new: [1, 2, 3] }],
     }),
     review_histories: (a) =>
-      (threads[a.reviewId as string] ?? []).map((t) => historyFor(t)),
+      histories.hold
+        ? new Promise(() => {})
+        : (threads[a.reviewId as string] ?? []).map((t) => historyFor(t)),
     thread_history: (a) =>
       historyFor(
         Object.values(threads)
@@ -314,6 +338,22 @@ function makeBackend(opts: { ai: boolean }) {
       setTimeout(() => events.emit("review:changed", { reviewId: A.id }));
       return reviews[i];
     },
+    reply_to_thread: (a) => {
+      const note = {
+        id: `r${Date.now()}`,
+        author: "rev-fixture",
+        body: a.body as string,
+        createdAt: "2026-10-16T12:00:00Z",
+        system: false,
+      };
+      threads[A.id] = threads[A.id].map((t) =>
+        t.threadId === a.threadId
+          ? { ...t, mine: true, notes: [...t.notes, note] }
+          : t,
+      );
+      setTimeout(() => events.emit("review:changed", { reviewId: A.id }));
+      return { providerNoteId: note.id, url: `${A.url}#note_1` };
+    },
     resolve_thread: (a) => {
       threads[A.id] = threads[A.id].map((t) =>
         t.threadId === a.threadId
@@ -345,7 +385,7 @@ function makeBackend(opts: { ai: boolean }) {
     }
   }) as typeof invoke);
 
-  return { A, B, handlers, posted };
+  return { A, B, handlers, posted, histories, current };
 }
 
 const writes = () =>
@@ -383,6 +423,7 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     useBackendSettingsStore.setState({ ...initial.settings }, true);
     useLayoutStore.setState({ ...initial.layout, aiPanelOpen: true }, true);
     useSettingsRequestStore.getState().clear();
+    useSubmitScriptsStore.setState({ drafts: [], writer: null });
     useToastStore.setState({ toasts: [] });
   });
 
@@ -436,6 +477,102 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
       ["resolve_thread", true],
       ["resolve_thread", false],
     ]);
+  });
+
+  it("shows a posted reply at once, before the histories are read again", async () => {
+    const { histories, current } = makeBackend({ ai: false });
+    render(<App />);
+    await openReview("Fixture A");
+    const diff = await screen.findByRole("region", {
+      name: "Diff of src/cache.rs",
+    });
+    const bob = await within(diff).findByRole("article", {
+      name: "Thread by bob-fixture",
+    });
+    fireEvent.click(
+      within(bob).getByRole("button", {
+        name: "Reply to bob-fixture's thread",
+      }),
+    );
+    // Its history is in: the notes show as the thread's timeline.
+    await waitFor(() =>
+      expect(
+        useHistoryStore.getState().byThread[current.threadId]?.history,
+      ).toBeTruthy(),
+    );
+    expect(within(bob).getByRole("list", { name: "Timeline" })).toBeVisible();
+    histories.hold = true;
+    fireEvent.change(within(bob).getByPlaceholderText("Reply (markdown)"), {
+      target: { value: "Yes, it is." },
+    });
+    fireEvent.click(within(bob).getByRole("button", { name: "Reply" }));
+    await waitFor(() =>
+      expect(within(bob).queryByPlaceholderText("Reply (markdown)")).toBeNull(),
+    );
+    // The thread's re-read has it; the histories' read is still out.
+    expect(
+      await within(bob).findByText("Yes, it is.", { selector: "p" }),
+    ).toBeVisible();
+    expect(within(bob).getByText("Is the second line needed?")).toBeVisible();
+    expect(writes().map(([cmd, args]) => [cmd, args])).toEqual([
+      [
+        "reply_to_thread",
+        {
+          reviewId: current.reviewId,
+          threadId: current.threadId,
+          body: "Yes, it is.",
+        },
+      ],
+    ]);
+  });
+
+  it("drops a resolved thread from every count and brings it back on reopen", async () => {
+    makeBackend({ ai: false });
+    render(<App />);
+    await openReview("Fixture A");
+    const diff = await screen.findByRole("region", {
+      name: "Diff of src/cache.rs",
+    });
+    const tree = screen.getByRole("complementary", {
+      name: "Review navigation",
+    });
+    const counts = () => ({
+      card: within(diff).queryAllByLabelText(/open threads?(, \d+ yours)?$/),
+      tree: within(tree).queryAllByLabelText(/open threads? of yours$/),
+      header: screen.queryByText(/unresolved threads?$|All threads resolved/),
+    });
+    // The outdated thread of yours is the file's one open thread.
+    await within(diff).findByText("Outdated");
+    expect(counts().card.map((e) => e.getAttribute("aria-label"))).toEqual([
+      "1 open thread, 1 yours",
+    ]);
+    expect(counts().tree).toHaveLength(1);
+    expect(counts().header).toHaveTextContent("1 unresolved thread");
+
+    fireEvent.click(
+      within(diff).getByRole("button", {
+        name: "Resolve rev-fixture's thread",
+      }),
+    );
+    await within(diff).findByRole("button", {
+      name: "Unresolve rev-fixture's thread",
+    });
+    expect(counts().card).toHaveLength(0);
+    expect(counts().tree).toHaveLength(0);
+    expect(counts().header).toHaveTextContent("All threads resolved");
+
+    fireEvent.click(
+      within(diff).getByRole("button", {
+        name: "Unresolve rev-fixture's thread",
+      }),
+    );
+    await within(diff).findByRole("button", {
+      name: "Resolve rev-fixture's thread",
+    });
+    expect(counts().card.map((e) => e.getAttribute("aria-label"))).toEqual([
+      "1 open thread, 1 yours",
+    ]);
+    expect(counts().tree).toHaveLength(1);
   });
 
   it("walks from the list to posted comments and an approval", async () => {
@@ -556,6 +693,7 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
       headSha: A.headSha,
       verdict: "approve",
       summary: null,
+      scriptIds: [],
     });
   });
 
@@ -605,6 +743,131 @@ describe("App, end to end over a fake backend", { timeout: 30_000 }, () => {
     await waitFor(() => expect(writes()).toHaveLength(1));
     expect(writes()[0][0]).toBe("post_findings");
     expect(writes()[0][1]).toMatchObject({ reviewId: A.id });
+  });
+
+  it("runs the ticked submit scripts only with a successful submit", async () => {
+    const tick = newScript("s-tick", {
+      name: "Tick the checklist",
+      command: "/Users/fixture/bin/tick.sh",
+      defaultOn: true,
+    });
+    const notify = newScript("s-notify", {
+      name: "Notify chat",
+      command: "/Users/fixture/bin/notify.sh",
+    });
+    const other = newScript("s-other", {
+      name: "Elsewhere",
+      command: "/Users/fixture/bin/other.sh",
+      repos: ["gitlab.example.test/acme-fixture/api"],
+      defaultOn: true,
+    });
+    const { A } = makeBackend({ ai: false, scripts: [tick, notify, other] });
+    render(<App />);
+    await openReview("Fixture A");
+    fireEvent.click(screen.getByRole("button", { name: "Submit review…" }));
+    const dialog = screen.getByRole("dialog", {
+      name: `Submit review — acme-fixture/widgets#${A.number}`,
+    });
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Approve/ }));
+    // Only the scripts for this repository and verdict, ticked by default.
+    expect(
+      within(dialog).getByRole("checkbox", { name: "Tick the checklist" }),
+    ).toBeChecked();
+    expect(
+      within(dialog).getByRole("checkbox", { name: "Notify chat" }),
+    ).not.toBeChecked();
+    expect(within(dialog).queryByText("Elsewhere")).toBeNull();
+    expect(writes()).toEqual([]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0]).toEqual([
+      "submit_review",
+      {
+        reviewId: A.id,
+        headSha: A.headSha,
+        verdict: "approve",
+        summary: null,
+        scriptIds: ["s-tick"],
+      },
+    ]);
+    // The backend reports the run: a failure toasts with its stderr.
+    act(() =>
+      events.emit("scripts:done", {
+        reviewId: A.id,
+        results: [
+          {
+            scriptId: "s-tick",
+            name: "Tick the checklist",
+            status: "failed",
+            exitCode: 1,
+            stdout: "",
+            stderr: "glab: not logged in\n",
+            durationMs: 40,
+            message: "Exited with status 1.",
+            finishedAt: new Date().toISOString(),
+          },
+        ],
+      }),
+    );
+    const notifications = screen.getByRole("region", { name: "Notifications" });
+    expect(
+      await within(notifications).findByText(
+        'Script "Tick the checklist": failed',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(notifications).getByText(/glab: not logged in/),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a script draft that finished in the background from its toast", async () => {
+    const running = scriptDraft({ title: "Tick every checklist item" });
+    makeBackend({ ai: true, drafts: [running] });
+    render(<App />);
+    await waitFor(() =>
+      expect(useSubmitScriptsStore.getState().drafts).toHaveLength(1),
+    );
+    // The agent answers while Settings is closed.
+    act(() =>
+      events.emit("script-draft:state", {
+        ...running,
+        status: "idle",
+        title: "Tick the checklist",
+        revision: running.revision + 1,
+        turns: [
+          {
+            ...running.turns[0]!,
+            result: {
+              name: "Tick the checklist",
+              verdicts: ["approve"],
+              script: "#!/bin/sh\nset -eu\necho ticked\n",
+              explanation: "Ticks every task.",
+            },
+          },
+        ],
+      }),
+    );
+    const notifications = screen.getByRole("region", { name: "Notifications" });
+    expect(
+      await within(notifications).findByText(
+        "Script ready: Tick the checklist",
+      ),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(notifications).getByRole("button", { name: "Open" }),
+    );
+    const writer = await screen.findByRole("dialog", {
+      name: "Tick the checklist",
+    });
+    expect(writer.textContent).toContain("echo ticked");
+    expect(screen.getByRole("tab", { name: "Scripts" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(writes()).toEqual([]);
+    expect(
+      mockInvoke.mock.calls.filter(([c]) => c === "save_submit_script"),
+    ).toEqual([]);
   });
 
   it("reports backend failures as error toasts", async () => {

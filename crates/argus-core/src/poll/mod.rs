@@ -34,6 +34,8 @@ const FETCH_PARALLELISM: usize = 4;
 #[serde(rename_all = "camelCase")]
 pub struct RefreshError {
     pub provider: ProviderId,
+    /// The provider's host: one provider per host of the user's.
+    pub host: String,
     /// `None` when the provider as a whole failed (listing, auth, `gh`).
     pub review: Option<ReviewId>,
     pub message: String,
@@ -46,9 +48,10 @@ pub struct RefreshError {
 }
 
 impl RefreshError {
-    fn new(provider: ProviderId, review: Option<ReviewId>, e: &CoreError) -> Self {
+    fn new(provider: ProviderId, host: &str, review: Option<ReviewId>, e: &CoreError) -> Self {
         Self {
             provider,
+            host: host.to_string(),
             review,
             message: e.to_string(),
             unavailable: e.is_unavailable(),
@@ -59,7 +62,7 @@ impl RefreshError {
     /// `e` as a provider-level error; a rate limit also carries the time
     /// the provider names as its reset.
     fn for_provider(provider: &dyn ReviewProvider, e: &CoreError) -> Self {
-        let mut err = Self::new(provider.id(), None, e);
+        let mut err = Self::new(provider.id(), provider.host(), None, e);
         if is_rate_limited(e) {
             err.rate_limited_until = provider.rate_limited_until();
         }
@@ -123,17 +126,17 @@ pub(crate) fn refresh_all_unless(
             .iter()
             .map(|p| {
                 (
-                    p.id(),
+                    (p.id(), p.host()),
                     s.spawn(|| refresh_provider_with(p.as_ref(), store, clock)),
                 )
             })
             .collect();
         handles
             .into_iter()
-            .map(|(id, h)| {
+            .map(|((id, host), h)| {
                 h.join().unwrap_or_else(|_| {
                     let e = CoreError::Provider("the refresh crashed".into());
-                    (Vec::new(), vec![RefreshError::new(id, None, &e)])
+                    (Vec::new(), vec![RefreshError::new(id, host, None, &e)])
                 })
             })
             .collect()
@@ -278,7 +281,7 @@ fn refresh_provider_with(
             Err(e) if is_rate_limited(&e) => {
                 limited.get_or_insert(e);
             }
-            Err(e) => errors.push(RefreshError::new(pid, Some(id), &e)),
+            Err(e) => errors.push(RefreshError::new(pid, provider.host(), Some(id), &e)),
         }
     }
     if let Some(e) = limited {

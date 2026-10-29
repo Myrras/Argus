@@ -10,6 +10,7 @@ import {
   statusLine,
   thenLocation,
   thenNowColumns,
+  threadTimeline,
 } from "./threadHistory";
 
 const t = thread();
@@ -211,5 +212,68 @@ describe("labels", () => {
     );
     expect(isLongBody("short")).toBe(false);
     expect(isLongBody("line\n".repeat(20))).toBe(true);
+  });
+});
+
+describe("threadTimeline", () => {
+  const note = (id: string, at: string, body = id) => ({
+    id,
+    author: "rev-fixture",
+    body,
+    createdAt: at,
+    system: false,
+  });
+
+  it("takes the notes from the thread, not from an older history", () => {
+    const before = thread({ notes: [note("n1", "2026-10-15T10:00:00Z")] });
+    const h = historyFor(before, {
+      timeline: [
+        ...historyFor(before).timeline,
+        commit("c".repeat(40), "Rework the cache"),
+        { at: "2026-10-15T13:00:00Z", kind: "resolved", by: "alice-fixture" },
+      ],
+    });
+    // A reply landed after the history was read.
+    const now = {
+      ...before,
+      notes: [...before.notes, note("n2", "2026-10-15T14:00:00Z", "Thanks!")],
+    };
+    expect(
+      threadTimeline(now, h).map((e) =>
+        e.kind === "note" ? `${e.noteId}:${e.root}` : e.kind,
+      ),
+    ).toEqual(["n1:true", "commit", "resolved", "n2:false"]);
+    const reply = threadTimeline(now, h)[3];
+    expect(reply).toMatchObject({ kind: "note", body: "Thanks!" });
+  });
+
+  it("drops a note the history still has but the thread no longer does", () => {
+    const h = historyFor(
+      thread({
+        notes: [
+          note("n1", "2026-10-15T10:00:00Z"),
+          note("gone", "2026-10-15T11:00:00Z"),
+        ],
+      }),
+    );
+    const now = thread({ notes: [note("n1", "2026-10-15T10:00:00Z")] });
+    expect(
+      threadTimeline(now, h).map((e) => e.kind === "note" && e.noteId),
+    ).toEqual(["n1"]);
+  });
+
+  it("puts notes first on a tie and undated commits last", () => {
+    const now = thread({ notes: [note("n1", "2026-10-15T12:00:00Z")] });
+    const h = historyFor(now, {
+      timeline: [
+        { ...commit("d".repeat(40), "Undated"), at: null },
+        commit("c".repeat(40), "Same time"),
+      ],
+    });
+    expect(
+      threadTimeline(now, h).map((e) =>
+        e.kind === "commit" ? e.title : e.kind,
+      ),
+    ).toEqual(["note", "Same time", "Undated"]);
   });
 });

@@ -14,6 +14,8 @@
  */
 
 import {
+  BellRing,
+  CaseSensitive,
   Check,
   ChevronDown,
   ChevronRight,
@@ -24,6 +26,7 @@ import {
   Columns2,
   Copy,
   ExternalLink,
+  FileDiff,
   FilePenLine,
   FileSymlink,
   FileX,
@@ -40,20 +43,25 @@ import {
   ListTree,
   ListX,
   MessageSquare,
+  MessageSquareReply,
   Minus,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Regex,
   Play,
   Plug,
   Plus,
   RotateCcw,
   RotateCw,
+  Search,
   Rows2,
   Settings,
+  Space,
   Sparkles,
   Square,
+  WholeWord,
   X,
   type LucideIcon,
   type LucideProps,
@@ -114,6 +122,8 @@ export const FlatListIcon = icon(List);
 export const FolderListIcon = icon(ListTree);
 /** "Since my last review": only what changed after the watermark. */
 export const SinceIcon = icon(History);
+/** "Hide whitespace changes" (the ␣ glyph). */
+export const WhitespaceIcon = icon(Space);
 /** Opens the shortcut help. */
 export const KeyboardIcon = icon(Keyboard, { size: 15 });
 
@@ -146,9 +156,25 @@ export const OpenThreadIcon = icon(CircleDot);
 export const NextThreadIcon = icon(ChevronDown);
 export const PrevThreadIcon = icon(ChevronUp);
 
+// Why a review is back with you (the header's reasons; new commits use
+// `CommitIcon`).
+export const AuthorRepliedIcon = icon(MessageSquareReply, { size: 13 });
+export const ReRequestedIcon = icon(BellRing, { size: 13 });
+
 // Open in editor: a review's file from the local clone.
 export const OpenInEditorIcon = icon(FilePenLine, { size: 13 });
+
+// Insert suggestion (a composer's toolbar; GitHub's glyph is a file diff).
+export const SuggestionIcon = icon(FileDiff);
 
 // The review's local clone, found or missing.
 export const CloneIcon = icon(FolderGit2, { size: 13 });
 export const CloneMissingIcon = icon(FolderX, { size: 13 });
+
+// Find in the review (Cmd+F): the bar's field and its option toggles.
+export const FindIcon = icon(Search, { size: 13 });
+export const MatchCaseIcon = icon(CaseSensitive, { size: 15 });
+export const WholeWordIcon = icon(WholeWord, { size: 15 });
+export const RegexIcon = icon(Regex, { size: 14 });
+export const PrevMatchIcon = icon(ChevronUp);
+export const NextMatchIcon = icon(ChevronDown);

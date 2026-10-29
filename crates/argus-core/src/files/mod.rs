@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::error::{CoreError, CoreResult};
 use crate::ids::ReviewId;
-use crate::provider::{ChangedFile, DiffRange, FileDiff, ReviewProvider};
+use crate::provider::{ChangedFile, DiffRange, FileDiff};
 use crate::store::{viewed_paths, ReviewRecord};
 
 /// One file of [`ReviewFiles`].
@@ -31,7 +31,8 @@ pub struct FileEntry {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewFiles {
     pub review_id: ReviewId,
-    /// The left side of every file (see [`ReviewProvider::fetch_files`]).
+    /// The left side of every file (see
+    /// [`ReviewProvider::fetch_files`](crate::provider::ReviewProvider::fetch_files)).
     pub base_sha: String,
     pub head_sha: String,
     /// The diff is `last_reviewed_sha..head`, not the whole review.
@@ -87,24 +88,28 @@ pub(crate) fn since_range(record: &ReviewRecord) -> CoreResult<DiffRange> {
 /// needed: comments go on it). `None` when the diff shown is that diff.
 pub(crate) type Fetched = (FileDiff, ContentKeys, Option<FileDiff>);
 
+/// Reads one range of a review's diff: the provider's `fetch_files`, or
+/// the core's disk-cached read of it.
+pub(crate) type DiffFetch<'a> = dyn Fn(&DiffRange) -> CoreResult<FileDiff> + Sync + 'a;
+
 /// Fetch what `list_files` shows and the review's content keys. In since
 /// mode both diffs are fetched at once: the compare for the files, the
 /// review's own for the keys and its left side.
 pub(crate) fn fetch(
-    provider: &dyn ReviewProvider,
+    fetch_files: &DiffFetch<'_>,
     record: &ReviewRecord,
     since_last_review: bool,
 ) -> CoreResult<Fetched> {
     let own = review_range(record);
     if !since_last_review {
-        let diff = provider.fetch_files(&record.review, &own)?;
+        let diff = fetch_files(&own)?;
         let keys = content_keys(&diff);
         return Ok((diff, keys, None));
     }
     let since = since_range(record)?;
     let (compare, review) = std::thread::scope(|s| {
-        let a = s.spawn(|| provider.fetch_files(&record.review, &since));
-        let b = s.spawn(|| provider.fetch_files(&record.review, &own));
+        let a = s.spawn(|| fetch_files(&since));
+        let b = s.spawn(|| fetch_files(&own));
         (join(a), join(b))
     });
     let compare = compare?;

@@ -65,10 +65,14 @@ impl From<CoreError> for IpcError {
             CoreError::InvalidInput(_) => "invalidInput",
             CoreError::GithubUnavailable => "githubUnavailable",
             CoreError::GitlabNotConfigured => "gitlabNotConfigured",
-            CoreError::GitlabAuth => "gitlabAuth",
+            CoreError::GlabMissing => "glabMissing",
+            CoreError::GitlabAuth { .. } => "gitlabAuth",
             CoreError::Provider(_) => "provider",
             CoreError::Store(_) => "store",
             CoreError::Io(_) => "io",
+            CoreError::Agent(_) => "agent",
+            CoreError::Cancelled => "cancelled",
+            CoreError::Conflict(_) => "conflict",
         };
         Self {
             kind: kind.to_string(),

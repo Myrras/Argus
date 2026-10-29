@@ -158,6 +158,15 @@ function sayNoMore() {
   if (!shown) toastInfo(NO_MORE);
 }
 
+/** Quiet, and once for a held key like `sayNoMore`. */
+function sayWrapped(forward: boolean) {
+  const text = `Wrapped to the ${forward ? "first" : "last"} open thread`;
+  const shown = useToastStore
+    .getState()
+    .toasts.some((t) => t.message === text && !t.leaving);
+  if (!shown) toastInfo(text);
+}
+
 /**
  * Run one of the flow's review-page actions; null when `action` is not
  * one of them, false when there is nothing to act on (the key is then left
@@ -177,12 +186,11 @@ export function runFlowAction(
     case "nextOpenThread":
     case "prevOpenThread": {
       // The header's arrows, the palette or a key the user bound.
-      const moved = focus.moveOpen(
-        reviewId,
-        action === "nextOpenThread" ? 1 : -1,
-      );
-      // At an end the key stops there (no wrap, and not on to the list).
-      if (!moved) sayNoMore();
+      const forward = action === "nextOpenThread";
+      const moved = focus.moveOpen(reviewId, forward ? 1 : -1);
+      // Loops around; the key never goes on to the list.
+      if (moved === "none") sayNoMore();
+      else if (moved === "wrapped") sayWrapped(forward);
       return true;
     }
     case "resolveThread": {

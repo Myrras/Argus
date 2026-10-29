@@ -8,7 +8,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 }));
 
 import { useCommentStore } from "../state/commentStore";
-import { InlineComposer, ReplyComposer } from "./CommentBlocks";
+import { DraftBlock, InlineComposer, ReplyComposer } from "./CommentBlocks";
 
 const REVIEW = "00000000-0000-4000-8000-000000000001";
 const THREAD = "00000000-0000-4000-8000-000000001001";
@@ -94,5 +94,32 @@ describe("a draft's edit while its review posts", () => {
     useCommentStore.setState({ posting: {} });
     view.rerender(<InlineComposer />);
     expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+});
+
+describe("comments outside the diff", () => {
+  it("say what the platform makes of them, in the composer and the draft", () => {
+    useCommentStore.getState().openComposer({
+      reviewId: REVIEW,
+      path: "src/cache.rs",
+      side: "new",
+      line: 12,
+      startLine: 10,
+      headSha: "a".repeat(40),
+      baseSha: null,
+      outside: "fallback",
+    });
+    const composer = render(<InlineComposer />);
+    expect(screen.getByTestId("outside-note")).toHaveTextContent(
+      "file comment that quotes and links these lines",
+    );
+    useCommentStore.getState().setComposerBody("Leaks");
+    useCommentStore.getState().saveComposer();
+    composer.unmount();
+    const id = useCommentStore.getState().drafts[REVIEW]![0].id;
+    render(<DraftBlock reviewId={REVIEW} id={id} />);
+    expect(
+      screen.getByText("lines 10–12 (outside the diff)"),
+    ).toBeInTheDocument();
   });
 });

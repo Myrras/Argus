@@ -121,3 +121,41 @@
   font-size: var(--fs-xs);
   color: var(--text-faint);
 }
+
+/* The toolbar's icon buttons ("Insert suggestion"): off with a reason in
+   the tooltip, so aria-disabled (a disabled button shows no tooltip). */
+.tool {
+  width: 24px;
+  height: 24px;
+}
+
+.tool[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.composer button.tool[aria-disabled="true"]:hover {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+/* A suggestion that no longer covers the comment's lines. */
+.mismatch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--warning);
+  background: var(--warning-bg);
+  border-radius: var(--radius-sm);
+}
+
+.mismatch button {
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text);
+}

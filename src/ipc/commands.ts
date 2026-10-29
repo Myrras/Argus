@@ -9,10 +9,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type {
+  Batched,
+  CacheStats,
+  Account,
   AiRunState,
   ChecklistId,
   ChecklistItem,
   CloneStatus,
+  CloneSuggestion,
   CommentableLines,
   Finding,
   FindingId,
@@ -23,14 +27,16 @@ import type {
   NewComment,
   PostedNote,
   PostResult,
-  ProviderStatus,
   RefreshReport,
+  RepoSetup,
   ReviewFiles,
   ReviewId,
   ReviewRecord,
   ReviewRefresh,
   ReviewSkillList,
   ReviewVerdict,
+  ScriptDraft,
+  ScriptGenerationStatus,
   Settings,
   StoredThread,
   ThreadHistory,
@@ -100,6 +106,44 @@ export function fileContents(
   path: string,
 ): Promise<string> {
   return invoke("file_contents", { reviewId, sha, path });
+}
+
+/** One `(sha, path)` of a batch read. */
+export interface FileRequest {
+  sha: string;
+  path: string;
+}
+
+/**
+ * Several files' contents of one review in one round trip, in order; each
+ * entry answers or fails on its own (at most 64 per call).
+ */
+export function fileContentsBatch(
+  reviewId: ReviewId,
+  requests: FileRequest[],
+): Promise<Batched<string>[]> {
+  return invoke("file_contents_batch", { reviewId, requests });
+}
+
+/**
+ * Read files into the core's disk cache without sending them over (idle
+ * prefetch); resolves to how many are readable.
+ */
+export function warmFileCache(
+  reviewId: ReviewId,
+  requests: FileRequest[],
+): Promise<number> {
+  return invoke("warm_file_cache", { reviewId, requests });
+}
+
+/** What the disk cache holds. */
+export function cacheStats(): Promise<CacheStats> {
+  return invoke("cache_stats");
+}
+
+/** Empty the disk cache; resolves to what it holds afterwards. */
+export function clearCache(): Promise<CacheStats> {
+  return invoke("clear_cache");
 }
 
 /** Mark a file viewed or not; resolves to the review's viewed paths. */
@@ -181,14 +225,24 @@ export function resolveThread(
  * dialog showed), with an optional markdown `summary`. Sets the review
  * state on the platform; rejects with `headMoved` when it got new commits
  * since, `unsupported` when the platform cannot. Never merges.
+ *
+ * `scriptIds` are the submit scripts the user ticked: they run in the
+ * background only once the submit succeeded, reported by `scripts:done`.
  */
 export function submitReview(
   reviewId: ReviewId,
   headSha: string,
   verdict: ReviewVerdict,
   summary: string | null,
+  scriptIds: string[] = [],
 ): Promise<ReviewRecord> {
-  return invoke("submit_review", { reviewId, headSha, verdict, summary });
+  return invoke("submit_review", {
+    reviewId,
+    headSha,
+    verdict,
+    summary,
+    scriptIds,
+  });
 }
 
 /** The lines of `path` a new comment can go on (read only). */
@@ -197,6 +251,14 @@ export function commentableLines(
   path: string,
 ): Promise<CommentableLines> {
   return invoke("commentable_lines", { reviewId, path });
+}
+
+/** `commentableLines` of several files in one round trip, in order. */
+export function commentableLinesBatch(
+  reviewId: ReviewId,
+  paths: string[],
+): Promise<Batched<CommentableLines>[]> {
+  return invoke("commentable_lines_batch", { reviewId, paths });
 }
 
 export function getSettings(): Promise<Settings> {
@@ -208,17 +270,14 @@ export function updateSettings(settings: Settings): Promise<Settings> {
   return invoke("update_settings", { settings });
 }
 
-/** Store the GitLab token in the OS keychain; blank deletes it. */
-export function setGitlabToken(token: string): Promise<void> {
-  return invoke("set_gitlab_token", { token });
-}
-
-export function gitlabTokenPresent(): Promise<boolean> {
-  return invoke("gitlab_token_present");
-}
-
-export function providerStatus(): Promise<ProviderStatus> {
-  return invoke("provider_status");
+/**
+ * The user's hosts: every host gh and glab are logged in to (plus the ones
+ * the settings name), with the user's choice. The CLIs are asked only when
+ * the core's answer is not current (first time, a change of the accounts,
+ * a call refused for the login), or with `recheck` (Check again).
+ */
+export function listAccounts(recheck = false): Promise<Account[]> {
+  return invoke("list_accounts", { recheck });
 }
 
 // --- Thread history (M3) ---
@@ -387,4 +446,130 @@ export function revealLocalFile(
   path: string,
 ): Promise<void> {
   return invoke("reveal_local_file", { reviewId, path });
+}
+
+/**
+ * A clone of the review's repository found on disk, for a repository with
+ * none set that the user did not refuse; `null` otherwise. Reads the disk,
+ * so it can take a moment.
+ */
+export function suggestClone(
+  reviewId: ReviewId,
+): Promise<CloneSuggestion | null> {
+  return invoke("suggest_clone", { reviewId });
+}
+
+/** Store `path` as the clone of the review's repository ("Use it"). */
+export function acceptCloneSuggestion(
+  reviewId: ReviewId,
+  path: string,
+): Promise<Settings> {
+  return invoke("use_clone_suggestion", { reviewId, path });
+}
+
+/** Never offer a found clone for this repository again ("No thanks"). */
+export function ignoreCloneSuggestion(reviewId: ReviewId): Promise<Settings> {
+  return invoke("ignore_clone_suggestion", { reviewId });
+}
+
+// --- Repositories ---
+
+/**
+ * Every repository Argus knows (from its stored reviews and the settings)
+ * with its clone, review skill and review language. Read-only; the setup is
+ * saved through `updateSettings`.
+ */
+export function listRepositories(): Promise<RepoSetup[]> {
+  return invoke("list_repositories");
+}
+
+/** Show the clone set for `repo` (`host/repo`) in Finder / Explorer. */
+export function revealRepoClone(repo: string): Promise<void> {
+  return invoke("reveal_repo_clone", { repo });
+}
+
+// --- Submit scripts ---
+
+/** Whether "Write with AI" can run (AI pass on, agent found), else why. */
+export function scriptGenerationStatus(): Promise<ScriptGenerationStatus> {
+  return invoke("script_generation_status");
+}
+
+/**
+ * Start a "Write with AI" draft whose first request is `description`; with
+ * `scriptId` (Edit with AI) it starts from that saved script. Resolves at
+ * once with the draft running; `script-draft:state` reports the rest.
+ */
+export function startScriptDraft(
+  description: string,
+  scriptId: string | null,
+): Promise<ScriptDraft> {
+  return invoke("start_script_draft", { description, scriptId });
+}
+
+/** A follow-up request on a draft (rejects with `conflict` while it runs). */
+export function sendScriptDraft(
+  draftId: string,
+  message: string,
+): Promise<ScriptDraft> {
+  return invoke("send_script_draft", { draftId, message });
+}
+
+/**
+ * Send a draft's last request again after it failed or was stopped (Retry;
+ * rejects with `conflict` while it runs or when it has its script).
+ */
+export function retryScriptDraft(draftId: string): Promise<ScriptDraft> {
+  return invoke("retry_script_draft", { draftId });
+}
+
+/** Stop a draft's request under way (it ends `cancelled`). */
+export function cancelScriptDraft(draftId: string): Promise<ScriptDraft> {
+  return invoke("cancel_script_draft", { draftId });
+}
+
+/** Every draft of this session, oldest first. */
+export function listScriptDrafts(): Promise<ScriptDraft[]> {
+  return invoke("list_script_drafts");
+}
+
+/** Forget a draft, stopping it first when it runs. */
+export function discardScriptDraft(draftId: string): Promise<void> {
+  return invoke("discard_script_draft", { draftId });
+}
+
+/** Link a draft to the submit script saved from it. */
+export function linkScriptDraft(
+  draftId: string,
+  scriptId: string,
+): Promise<ScriptDraft> {
+  return invoke("link_script_draft", { draftId, scriptId });
+}
+
+/**
+ * Save a script in Argus' scripts folder as `<slug of name>.sh`,
+ * executable. Rejects with `conflict` when that file exists and
+ * `overwrite` is not set. Resolves to the file's path.
+ */
+export function saveSubmitScript(
+  name: string,
+  content: string,
+  overwrite = false,
+): Promise<string> {
+  return invoke("save_submit_script", { name, content, overwrite });
+}
+
+/** The text of a script Argus saved (to change it with the AI's help). */
+export function readSubmitScript(scriptId: string): Promise<string> {
+  return invoke("read_submit_script", { scriptId });
+}
+
+/** Where Argus saves scripts; `null` when it has no folder. */
+export function submitScriptsDir(): Promise<string | null> {
+  return invoke("submit_scripts_dir");
+}
+
+/** Show the scripts folder in Finder / Explorer. */
+export function revealSubmitScriptsDir(): Promise<void> {
+  return invoke("reveal_submit_scripts_dir");
 }

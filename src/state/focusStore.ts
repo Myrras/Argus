@@ -66,13 +66,21 @@ interface FocusState {
     item: FocusItem,
     opts?: { move?: boolean },
   ) => void;
+  /**
+   * The find bar went to a match in `item`: focus it as a click would (the
+   * keys act on it), select its card without the view's scroll and open
+   * it (the bar scrolls to the match itself; the DOM focus stays in the
+   * bar). A thread opens too.
+   */
+  focusFound: (reviewId: ReviewId, item: FocusItem) => void;
   /** `n` / `p`: false at the end of the page or without stops. */
   move: (reviewId: ReviewId, delta: 1 | -1) => boolean;
   /**
-   * ↑/↓: the next or previous thread that is not resolved, opened; false
-   * at the end of the page or without one.
+   * The next or previous thread that is not resolved, opened; past an end
+   * it wraps to the other (`wrapped`; a lone open thread is `moved`), `none`
+   * without any.
    */
-  moveOpen: (reviewId: ReviewId, delta: 1 | -1) => boolean;
+  moveOpen: (reviewId: ReviewId, delta: 1 | -1) => "moved" | "wrapped" | "none";
   /** j/k moved the selection: the page takes the DOM focus. */
   pageMoved: () => void;
   commandThread: (threadId: ThreadId, action: ThreadCommand["action"]) => void;
@@ -180,6 +188,31 @@ export const useFocusStore = create<FocusState>((set, get) => ({
     });
   },
 
+  focusFound: (reviewId, item) => {
+    const card = cardOf(item);
+    quietly(() => {
+      const history = useHistoryStore.getState();
+      const ai = useAiStore.getState();
+      if (item.kind === "thread") {
+        history.focus({ threadId: item.threadId, reviewId, mine: item.mine });
+        history.setOpen(item.threadId, true);
+      } else if (history.focused) {
+        useHistoryStore.setState({ focused: null });
+      }
+      if (item.kind === "finding") {
+        if (ai.focused !== item.findingId) ai.focus(item.findingId);
+      } else if (ai.focused) {
+        ai.focus(null);
+      }
+      const code = useCodeViewStore.getState();
+      if (code.byReview[reviewId]?.selected !== card) {
+        code.select(reviewId, card, { scroll: false });
+      }
+    });
+    seq += 1;
+    set({ reviewId, item, zone: "page", reveal: { card, seq } });
+  },
+
   move: (reviewId, delta) => {
     const s = get();
     const current = s.reviewId === reviewId ? s.item : null;
@@ -193,17 +226,23 @@ export const useFocusStore = create<FocusState>((set, get) => ({
     const s = get();
     const current = s.reviewId === reviewId ? s.item : null;
     const threads = useThreadStore.getState().byReview[reviewId]?.threads ?? [];
-    const next = moveToOpenThread(
-      currentStops(reviewId),
-      current,
-      delta,
-      threads,
-    );
-    if (next?.kind !== "thread") return false;
+    const stops = currentStops(reviewId);
+    let next = moveToOpenThread(stops, current, delta, threads);
+    let wrapped = false;
+    if (next?.kind !== "thread") {
+      // Past an end: scan again from the other one (no current = the start).
+      next = moveToOpenThread(stops, null, delta, threads);
+      wrapped = true;
+    }
+    if (next?.kind !== "thread") return "none";
+    // The only open thread, focused already: nothing to announce.
+    if (current?.kind === "thread" && current.threadId === next.threadId) {
+      wrapped = false;
+    }
     // Opened as well: a folded thread is one line, and the jump is to read it.
     quietly(() => useHistoryStore.getState().setOpen(next.threadId, true));
     get().focusItem(reviewId, next, { move: true });
-    return true;
+    return wrapped ? "wrapped" : "moved";
   },
 
   pageMoved: () => {

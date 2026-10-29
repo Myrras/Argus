@@ -44,7 +44,7 @@ import { useBackendSettingsStore } from "./state/backendSettingsStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { useReviewStore } from "./state/reviewStore";
 import { useToastStore } from "./state/toastStore";
-import { review, settings, status } from "./test/fixtures";
+import { review, settings, accounts } from "./test/fixtures";
 
 const mockInvoke = vi.mocked(invoke);
 const initialReviews = useReviewStore.getState();
@@ -56,8 +56,7 @@ function backend(over: Record<string, () => unknown> = {}) {
     list_reviews: () => [],
     last_refresh: () => null,
     get_settings: () => settings(),
-    provider_status: () => status(),
-    gitlab_token_present: () => true,
+    list_accounts: () => accounts(),
   };
   const all = { ...base, ...over };
   mockInvoke.mockImplementation(((cmd: string) => {
@@ -129,7 +128,7 @@ describe("App shell", () => {
     backend({
       list_reviews: fail("The database is locked."),
       get_settings: fail("settings.json is unreadable."),
-      provider_status: fail("gh did not answer."),
+      list_accounts: fail("gh did not answer."),
     });
     render(<App />);
     const region = await notifications();
@@ -143,7 +142,7 @@ describe("App shell", () => {
       await within(region).findByText("Could not load the settings"),
     ).toBeInTheDocument();
     expect(
-      await within(region).findByText("Could not check the providers"),
+      await within(region).findByText("Could not list the accounts"),
     ).toBeInTheDocument();
     // The list still renders, empty.
     expect(useReviewStore.getState().loaded).toBe(true);

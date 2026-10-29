@@ -23,6 +23,7 @@
 //! the run. Nothing else in the clone changes.
 
 mod diff;
+pub(crate) mod discover;
 pub mod worktree;
 
 use std::collections::HashMap;

@@ -56,6 +56,7 @@ vi.mock("./DiffEditor", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import type { FileEntry, ReviewFiles } from "../ipc/types";
 import { useAppShortcuts } from "../lib/useAppShortcuts";
@@ -75,7 +76,7 @@ import { useThreadStore } from "../state/threadStore";
 import { file, review, reviewFiles, settings, thread } from "../test/fixtures";
 import { ReviewView } from "./ReviewView";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const initialCode = useCodeViewStore.getState();
 const initialThreads = useThreadStore.getState();
 const initialSettings = useBackendSettingsStore.getState();
@@ -615,6 +616,51 @@ describe("ReviewView", () => {
     });
     await waitFor(() =>
       expect(editor.getAttribute("data-items")).toBe("composer:new@b2"),
+    );
+    const writes = mockInvoke.mock.calls.filter(([cmd]) =>
+      ["post_comments", "reply_to_thread", "approve_review"].includes(
+        cmd as string,
+      ),
+    );
+    expect(writes).toEqual([]);
+  });
+
+  it("comments on unchanged lines outside the diff and places the draft there", async () => {
+    mockInvoke.mockImplementation(((cmd: string, args?: unknown) =>
+      cmd === "commentable_lines"
+        ? Promise.resolve({
+            reviewId: r.id,
+            path: (args as { path: string }).path,
+            baseSha: listed.reviewBaseSha,
+            headSha: listed.headSha,
+            hunks: [{ old: [1], new: [1] }],
+            outside: "fallback",
+          })
+        : backend(cmd, args)) as typeof invoke);
+    render(<ReviewView review={r} now={NOW} />);
+    const editor = await screen.findByTestId("editor-src/cache.rs");
+    // Every line of both sides (three each) takes a comment now.
+    await waitFor(() =>
+      expect(editor).toHaveAttribute("data-comment-b", "1,2,3"),
+    );
+    expect(editor).toHaveAttribute("data-comment-a", "1,2,3");
+    fireEvent.click(
+      screen.getByRole("button", { name: "stub + on b2 of src/cache.rs" }),
+    );
+    expect(useCommentStore.getState().composer).toMatchObject({
+      side: "new",
+      line: 2,
+      outside: "fallback",
+    });
+    act(() => {
+      useCommentStore.getState().setComposerBody("Unrelated, but leaks");
+      useCommentStore.getState().saveComposer();
+    });
+    await waitFor(() =>
+      expect(editor.getAttribute("data-items")).toMatch(/^draft:.*@b2$/),
+    );
+    expect(useCommentStore.getState().drafts[r.id]?.[0]?.outside).toBe(
+      "fallback",
     );
     const writes = mockInvoke.mock.calls.filter(([cmd]) =>
       ["post_comments", "reply_to_thread", "approve_review"].includes(

@@ -25,7 +25,8 @@ use crate::ids::ReviewId;
 use crate::provider::Side;
 
 pub use anchor::{
-    commentable_hunks, map_forward, place, resolve, CommentableHunk, DiffLine, LineKind, Placement,
+    commentable_hunks, map_forward, place, place_in, resolve, resolve_in, CommentableHunk,
+    DiffLine, LineKind, PlaceError, Placement, Region,
 };
 
 /// A new line comment as the user (or, later, an AI finding) wrote it.
@@ -63,8 +64,19 @@ pub struct PlacedComment {
     pub side: Side,
     /// The (last) row the comment is on.
     pub line: DiffLine,
-    /// The first row of a range, in the same hunk.
+    /// The first row of a range, in the same region (one hunk, or one
+    /// stretch outside the diff).
     pub start: Option<DiffLine>,
+    /// On rows of a hunk. `false`: unchanged lines outside the diff
+    /// ([`LineKind::Context`] rows with both line numbers), which GitLab
+    /// takes as a line comment and GitHub only as a file comment
+    /// ([`OutsideDiff`]).
+    pub in_diff: bool,
+    /// For a comment outside the diff on a [`OutsideDiff::Fallback`]
+    /// provider: the lines' text at [`head_sha`](Self::head_sha) (new
+    /// side, first to last, at most [`EXCERPT_READ_MAX`]), quoted in the
+    /// file comment. `None` when not needed or the file could not be read.
+    pub excerpt: Option<Vec<String>>,
     /// The head the diff was read at; GitHub's `commit_id`, and on GitLab
     /// the head its latest version must still have.
     pub head_sha: String,
@@ -88,6 +100,28 @@ impl PlacedComment {
 fn side_line(row: &DiffLine, side: Side) -> u32 {
     // A placed row is on its side by construction (see `anchor::place`).
     row.line_on(side).unwrap_or(0)
+}
+
+/// The most lines of an outside-the-diff range read for its excerpt.
+pub const EXCERPT_READ_MAX: usize = 40;
+
+/// What a provider does with a comment on unchanged code outside the
+/// diff's hunks (lines the code view shows as collapsed or expanded
+/// context).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutsideDiff {
+    /// Only lines of the hunks take comments.
+    #[default]
+    None,
+    /// A line comment like any other (GitLab: a position with both
+    /// `old_line` and `new_line`; GitLab unfolds the diff around it).
+    Native,
+    /// Line comments only inside the hunks (GitHub: "line could not be
+    /// resolved" otherwise); outside them Argus posts a file comment that
+    /// quotes the lines, links to them at the head, and carries a marker
+    /// that places it back at those lines when read.
+    Fallback,
 }
 
 /// A comment the platform accepted.
@@ -148,6 +182,11 @@ pub struct CommentableLines {
     pub head_sha: String,
     /// Empty for a file without a text patch (binary, too large).
     pub hunks: Vec<CommentableHunk>,
+    /// Whether the unchanged lines outside `hunks` (every line of either
+    /// side not in a hunk) take comments, and how. [`OutsideDiff::None`]
+    /// for a file without a patch, and for an added or removed file (all
+    /// hunk anyway).
+    pub outside: OutsideDiff,
 }
 
 /// [`Core::commentable_lines`](crate::Core::commentable_lines)'s cache: one
@@ -164,7 +203,9 @@ pub(crate) struct CommentableCache {
     /// a retarget leaves the head alone but changes the diff.
     pub stored_head: String,
     pub stored_base: String,
-    pub files: std::collections::HashMap<String, Vec<CommentableHunk>>,
+    /// Per path: the hunks, and whether lines outside them can take
+    /// comments at all (a modified or renamed file with a patch).
+    pub files: std::collections::HashMap<String, (Vec<CommentableHunk>, bool)>,
 }
 
 /// What a post failure is, for the UI to branch on. The [`CoreError`] kinds
@@ -176,6 +217,7 @@ pub enum PostErrorKind {
     InvalidInput,
     GithubUnavailable,
     GitlabNotConfigured,
+    GlabMissing,
     GitlabAuth,
     Provider,
     Store,
@@ -198,6 +240,7 @@ impl PostErrorKind {
             PostErrorKind::InvalidInput => "invalidInput",
             PostErrorKind::GithubUnavailable => "githubUnavailable",
             PostErrorKind::GitlabNotConfigured => "gitlabNotConfigured",
+            PostErrorKind::GlabMissing => "glabMissing",
             PostErrorKind::GitlabAuth => "gitlabAuth",
             PostErrorKind::Provider => "provider",
             PostErrorKind::Store => "store",
@@ -215,7 +258,8 @@ impl PostErrorKind {
 /// `message` is app-owned text, except for [`PostErrorKind::PostRejected`]
 /// (and a GitLab 404 on a write), where it is the platform's own error
 /// message — read from its JSON error body only, run through [`sanitize`]
-/// (the token removed, one line, capped), never a raw response.
+/// (the token removed: gh's by value, anything token-shaped from GitLab;
+/// one line, capped), never a raw response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(rename_all = "camelCase")]
 #[error("{message}")]
@@ -240,10 +284,16 @@ impl From<CoreError> for PostError {
             CoreError::InvalidInput(_) => PostErrorKind::InvalidInput,
             CoreError::GithubUnavailable => PostErrorKind::GithubUnavailable,
             CoreError::GitlabNotConfigured => PostErrorKind::GitlabNotConfigured,
-            CoreError::GitlabAuth => PostErrorKind::GitlabAuth,
+            CoreError::GlabMissing => PostErrorKind::GlabMissing,
+            CoreError::GitlabAuth { .. } => PostErrorKind::GitlabAuth,
             CoreError::Provider(_) => PostErrorKind::Provider,
             CoreError::Store(_) => PostErrorKind::Store,
             CoreError::Io(_) => PostErrorKind::Io,
+            // The post API never meets these (agents, user cancels and
+            // local file conflicts are not part of a platform write).
+            CoreError::Agent(_) | CoreError::Cancelled | CoreError::Conflict(_) => {
+                PostErrorKind::Io
+            }
         };
         Self::new(kind, e.to_string())
     }

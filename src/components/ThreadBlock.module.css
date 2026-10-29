@@ -250,3 +250,14 @@
 .hunkLine[data-kind="meta"] {
   color: var(--text-faint);
 }
+
+/* "on lines 12–18 (outside the diff)": a GitHub file comment Argus placed
+   back at its lines. */
+.outside {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}

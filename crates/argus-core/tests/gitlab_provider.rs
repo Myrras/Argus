@@ -1,6 +1,12 @@
-//! The GitLab provider against a local HTTP double (a plain `TcpListener`,
-//! as in Podium) replaying `tests/fixtures/gitlab/`. No network, no real
-//! token.
+//! The GitLab provider through a fake `glab` (`support::glab`: a bash
+//! script that forwards `glab api` to a local HTTP double with curl, adding
+//! glab's own login) against that double (a plain `TcpListener`, as in
+//! Podium) replaying `tests/fixtures/gitlab/`. No network, no real token.
+//! Unix-only: the fake is a bash script; the tests still compile on Windows.
+
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
+
+mod support;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -13,9 +19,9 @@ use argus_core::{Core, MyReviewState, ReviewStatus, RoundReason};
 
 use argus_core::provider::{
     DiffRange, FileStatus, GitlabProvider, ProviderId, ReviewRef, ReviewState, ReviewerState, Side,
-    StaticToken, TokenSource,
 };
 use argus_core::CoreError;
+use support::glab::FakeGlab;
 
 const TOKEN: &str = "glpat-fixture-not-a-real-token";
 
@@ -179,8 +185,9 @@ fn serve_raw(
     (base, seen)
 }
 
+/// A provider for the double at `base`, through the shared fake glab.
 fn provider(base: &str) -> GitlabProvider {
-    GitlabProvider::new(base, StaticToken(TOKEN.into())).unwrap()
+    FakeGlab::shared().provider(base)
 }
 
 fn mr_ref(base: &str, number: u64) -> ReviewRef {
@@ -197,6 +204,7 @@ fn mr_ref(base: &str, number: u64) -> ReviewRef {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn lists_reviewer_mrs_plus_commented_ones() {
     let (base, seen) = serve(fixture_routes);
     let gl = provider(&base);
@@ -220,24 +228,31 @@ fn lists_reviewer_mrs_plus_commented_ones() {
     );
 }
 
-/// A GitLab on a LAN / VPN host over plain http: the provider talks to it
-/// at `http://host/api/v4/...`, token header included. The double listens
-/// on loopback; `0.0.0.0` reaches it but is not a loopback host to Argus,
-/// so it counts like any other non-local one.
+/// Every call is `glab api --hostname <host> --include --method <M> <path>`,
+/// the host as the URL names it (port included); no token in the arguments
+/// or glab's environment: glab sends its own login.
 #[test]
 #[cfg_attr(windows, ignore)]
-fn talks_plain_http_to_a_non_loopback_host() {
+fn calls_glab_with_the_host_and_never_a_token() {
     let (base, seen) = serve(fixture_routes);
-    let lan = base.replace("127.0.0.1", "0.0.0.0");
-    assert!(lan.starts_with("http://0.0.0.0:"));
-    assert!(argus_core::provider::gitlab::is_insecure(&lan));
-    let gl = provider(&lan);
+    let fake = FakeGlab::new();
+    let gl = fake.provider(&base);
     assert_eq!(gl.current_user().unwrap(), "rev-fixture");
-    let seen = seen.lock().unwrap();
-    assert_eq!(seen.as_slice(), ["/api/v4/user token=yes"]);
+    let host = base.trim_start_matches("http://");
+    assert_eq!(
+        fake.calls(),
+        [format!(
+            "api --hostname {host} --include --method GET /user"
+        )]
+    );
+    assert!(fake.log().contains("env-token=0"));
+    assert!(!fake.log().contains(TOKEN));
+    // The token reached the instance all the same: glab's.
+    assert_eq!(seen.lock().unwrap().as_slice(), ["/api/v4/user token=yes"]);
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn fetches_detail_with_versions_reviewers_and_approvals() {
     let (base, _) = serve(fixture_routes);
     let gl = provider(&base);
@@ -279,6 +294,7 @@ fn fetches_detail_with_versions_reviewers_and_approvals() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn approval_shows_on_a_merged_mr() {
     let (base, _) = serve(fixture_routes);
     let d = provider(&base).fetch_review(&mr_ref(&base, 31)).unwrap();
@@ -288,6 +304,7 @@ fn approval_shows_on_a_merged_mr() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn discussions_become_threads_across_pages() {
     let (base, seen) = serve(fixture_routes);
     let threads = provider(&base).fetch_threads(&mr_ref(&base, 21)).unwrap();
@@ -330,6 +347,7 @@ fn discussions_become_threads_across_pages() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn file_at_reads_raw_content() {
     let (base, _) = serve(fixture_routes);
     let gl = provider(&base);
@@ -359,6 +377,7 @@ fn review_range() -> DiffRange {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn lists_mr_diffs_across_pages() {
     let (base, seen) = serve(fixture_routes);
     let diff = provider(&base)
@@ -409,6 +428,7 @@ fn lists_mr_diffs_across_pages() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn falls_back_to_changes_on_an_older_instance() {
     let (base, _) = serve(fixture_routes);
     let diff = provider(&base)
@@ -421,7 +441,85 @@ fn falls_back_to_changes_on_an_older_instance() {
     assert!(diff.truncated);
 }
 
+/// The collapsed-diff routes: `/diffs` sends a file without its diff (as
+/// GitLab does past its size limits), `raw` answers the raw read.
+fn collapsed_routes(raw: fn() -> Reply) -> impl Fn(&str, &str) -> Reply + Send + 'static {
+    move |path, _| {
+        let (route, query) = path.split_once('?').unwrap_or((path, ""));
+        let mr21 = "/api/v4/projects/grp%2Fapp/merge_requests/21";
+        if route == format!("{mr21}/diffs") {
+            return Reply {
+                headers: "X-Next-Page: \r\n".into(),
+                ..ok("mr_21_diffs_collapsed.json")
+            };
+        }
+        if route == format!("{mr21}/changes") && query.contains("access_raw_diffs=true") {
+            return raw();
+        }
+        fixture_routes(path)
+    }
+}
+
+const TEST_FILE: &str = "tests/unit/acme-fixture/ImporterTest.php";
+
 #[test]
+#[cfg_attr(windows, ignore)]
+fn a_collapsed_diff_is_read_again_raw() {
+    // GitLab leaves a large file's diff out (an empty `diff`, and before
+    // 18.4 no flag saying so). Without the raw read the file would have no
+    // patch, and every comment on it would be refused although the code
+    // view shows its diff.
+    let (base, seen) = serve_raw(collapsed_routes(|| ok("mr_21_changes_raw.json")));
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    let f = diff.files.iter().find(|f| f.path == TEST_FILE).unwrap();
+    assert!(!f.too_large && !f.binary);
+    assert_eq!((f.additions, f.deletions), (2, 1));
+    // The posting path can place a comment on its lines again.
+    let patch = f.patch.as_deref().unwrap();
+    assert!(argus_core::post::place(patch, Side::New, 17, None).is_some());
+    // One raw read, and only because a diff was missing.
+    assert_eq!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("access_raw_diffs=true"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_failing_raw_read_leaves_the_collapsed_file_as_it_was() {
+    // The raw read is a repair, never a requirement: the rest of the diff
+    // still arrives, and the file reads as one without a patch.
+    let (base, _) = serve_raw(collapsed_routes(|| status("500 Internal Server Error")));
+    let diff = provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    assert_eq!(diff.files.len(), 2);
+    let f = diff.files.iter().find(|f| f.path == TEST_FILE).unwrap();
+    assert!(f.patch.is_none());
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_diff_without_collapsed_files_is_not_read_raw() {
+    let (base, seen) = serve(fixture_routes);
+    provider(&base)
+        .fetch_files(&mr_ref(&base, 21), &review_range())
+        .unwrap();
+    assert!(!seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|l| l.contains("access_raw_diffs")));
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
 fn compares_two_commits_straight() {
     let (base, _) = serve(fixture_routes);
     let from = "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1";
@@ -439,28 +537,37 @@ fn compares_two_commits_straight() {
     assert_eq!(diff.files[0].patch.as_deref().unwrap().lines().count(), 5);
 }
 
-struct NoToken;
-
-impl TokenSource for NoToken {
-    fn token(&self) -> Option<String> {
-        None
-    }
-}
-
 #[test]
+#[cfg_attr(windows, ignore)]
 fn auth_and_setup_errors_are_argus_text() {
-    let (base, seen) = serve(|_| status("401 Unauthorized"));
-    let err = provider(&base).list_reviews().unwrap_err();
-    assert!(matches!(err, CoreError::GitlabAuth));
-    assert!(err.is_unavailable());
-    assert!(!err.to_string().contains("secret-ish"));
-    assert_eq!(seen.lock().unwrap().len(), 1);
+    for code in ["401 Unauthorized", "403 Forbidden"] {
+        let (base, seen) = serve(match code {
+            "401 Unauthorized" => |_: &str| status("401 Unauthorized"),
+            _ => |_: &str| status("403 Forbidden"),
+        });
+        let err = provider(&base).list_reviews().unwrap_err();
+        let host = base.trim_start_matches("http://");
+        assert!(
+            matches!(&err, CoreError::GitlabAuth { host: h } if h == host),
+            "{err}"
+        );
+        assert!(err.is_unavailable());
+        // The way out, word for word.
+        assert!(err
+            .to_string()
+            .contains(&format!("glab auth login --hostname {host}")));
+        assert!(!err.to_string().contains("secret-ish"));
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
 
-    let gl = GitlabProvider::new(&base, NoToken).unwrap();
-    assert!(matches!(
-        gl.list_reviews(),
-        Err(CoreError::GitlabNotConfigured)
-    ));
+    // No glab at all.
+    let (base, seen) = serve(fixture_routes);
+    let gl = GitlabProvider::with_binary("/nonexistent/glab-fixture", &base).unwrap();
+    let err = gl.list_reviews().unwrap_err();
+    assert!(matches!(err, CoreError::GlabMissing), "{err}");
+    assert!(err.is_unavailable());
+    assert!(err.to_string().contains("glab"));
+    assert!(seen.lock().unwrap().is_empty());
 
     let (base, _) = serve(|_| status("500 Internal Server Error"));
     let err = provider(&base).current_user().unwrap_err();
@@ -468,23 +575,61 @@ fn auth_and_setup_errors_are_argus_text() {
     assert!(!err.to_string().contains(&base));
 }
 
+/// glab without a login for the host calls anonymously: GitLab's 401 is
+/// "not logged in", with the command that fixes it.
 #[test]
-fn never_follows_a_redirect_with_the_token() {
-    let (thief, stolen) = serve(|_| ok("user.json"));
-    let (base, _) = {
-        // A redirect pointing at the thief; the route fn cannot capture, so
-        // the thief's address goes through a static.
-        static TARGET: Mutex<String> = Mutex::new(String::new());
-        *TARGET.lock().unwrap() = thief.clone();
-        serve(|_| Reply {
-            status: "302 Found",
-            headers: format!("Location: {}/api/v4/user\r\n", TARGET.lock().unwrap()),
-            body: String::new(),
-        })
-    };
+#[cfg_attr(windows, ignore)]
+fn a_glab_without_a_login_is_not_logged_in() {
+    let (base, seen) = serve(|path| match path {
+        "/api/v4/user" => status("401 Unauthorized"),
+        p => fixture_routes(p),
+    });
+    let fake = FakeGlab::new();
+    fake.log_out();
+    let err = fake.provider(&base).current_user().unwrap_err();
+    assert!(matches!(err, CoreError::GitlabAuth { .. }), "{err}");
+    assert_eq!(seen.lock().unwrap().as_slice(), ["/api/v4/user token=no"]);
+}
+
+/// glab follows redirects itself. One it hands back (the fake does not
+/// follow) is an error, never data.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_redirect_glab_hands_back_is_an_error() {
+    let (base, _) = serve(|_| Reply {
+        status: "302 Found",
+        headers: "Location: http://127.0.0.1:9/api/v4/user\r\n".into(),
+        body: String::new(),
+    });
     let err = provider(&base).current_user().unwrap_err();
-    assert!(err.to_string().contains("redirected"));
-    assert!(stolen.lock().unwrap().is_empty());
+    assert!(err.to_string().contains("redirected"), "{err}");
+}
+
+/// No connection (Go's `dial tcp` failure): tried again, then "connection
+/// failed"; a write is tried again too, as nothing left the machine.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn a_connection_that_cannot_be_made_is_tried_again() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let fake = FakeGlab::new();
+    let gl = fake
+        .provider(&base)
+        .with_connect_retries(&[std::time::Duration::ZERO; 3]);
+    let err = gl.current_user().unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("could not reach GitLab (connection failed)"));
+    assert_eq!(fake.calls().len(), 3);
+    let err = gl
+        .approve(
+            &mr_ref(&base, 21),
+            "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        )
+        .unwrap_err();
+    assert!(err.message.contains("connection failed"), "{err:?}");
+    assert_eq!(fake.calls().len(), 6);
 }
 
 /// The fixture's page 2 of MR 21's discussions plus the user's notes: a
@@ -532,6 +677,7 @@ fn discussions_with_my_replies() -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn threads_i_replied_in_are_mine_through_the_core() {
     let (base, _) = serve_raw(|path, _| {
         if path.starts_with("/api/v4/projects/grp%2Fapp/merge_requests/21/discussions")
@@ -573,6 +719,7 @@ fn threads_i_replied_in_are_mine_through_the_core() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn refresh_end_to_end_through_the_core() {
     let (base, _) = serve(fixture_routes);
     let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(provider(&base))]);
@@ -635,6 +782,7 @@ fn refresh_end_to_end_through_the_core() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn commit_diff_and_resolve_events() {
     let (base, seen) = serve(fixture_routes);
     let gl = provider(&base);
@@ -702,6 +850,7 @@ fn conditional_routes(not_modified: Arc<Mutex<Vec<String>>>) -> impl Fn(&str, &s
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_second_poll_sends_if_none_match_and_replays_the_304s() {
     let not_modified = Arc::new(Mutex::new(Vec::new()));
     let (base, _) = serve_raw(conditional_routes(not_modified.clone()));
@@ -735,6 +884,7 @@ fn a_second_poll_sends_if_none_match_and_replays_the_304s() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_429_backs_off_until_retry_after() {
     let (base, seen) = serve(|_| Reply {
         status: "429 Too Many Requests",
@@ -766,6 +916,7 @@ fn a_429_backs_off_until_retry_after() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_429_without_retry_after_reads_the_reset_epoch() {
     static RESET: Mutex<i64> = Mutex::new(0);
     let reset = chrono::Utc::now().timestamp() + 300;
@@ -781,6 +932,7 @@ fn a_429_without_retry_after_reads_the_reset_epoch() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_hung_instance_times_out_without_retrying() {
     // Accepts, reads, never answers.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -817,6 +969,7 @@ fn discussions(from: usize, n: usize) -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_full_page_replayed_from_the_cache_still_reads_the_next_one() {
     use std::sync::atomic::{AtomicBool, Ordering};
     // Exactly 100 discussions, then a 101st. Page 1 does not change, so the
@@ -882,6 +1035,7 @@ fn mr21_with(
 const NO_APPROVALS: (&str, &str) = ("200 OK", r#"{"approved_by":[]}"#);
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_failing_reviewers_call_fails_the_fetch_instead_of_guessing() {
     // A 500 from /reviewers must not read as "requested" (the MR's plain
     // reviewer list): that would start a false re-request round.
@@ -898,6 +1052,7 @@ fn a_failing_reviewers_call_fails_the_fetch_instead_of_guessing() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_failing_approvals_call_fails_the_fetch_or_falls_back_to_reviewer_state() {
     const I_APPROVED: (&str, &str) = (
         "200 OK",
@@ -921,6 +1076,7 @@ fn a_failing_approvals_call_fails_the_fetch_or_falls_back_to_reviewer_state() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn the_review_diff_names_the_version_it_was_taken_at() {
     // Asked for an older head (a1): `/diffs` is the latest version's (a2),
     // and the diff is labelled with that version's shas.
@@ -940,6 +1096,7 @@ fn the_review_diff_names_the_version_it_was_taken_at() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_version_pushed_while_the_diff_loads_is_read_again() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     // The first versions read says a1 is the latest, the next ones a2: the
@@ -973,6 +1130,7 @@ fn a_version_pushed_while_the_diff_loads_is_read_again() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn discussions_are_read_past_twenty_pages() {
     // 30 pages of one discussion each (the old cap was 20 pages).
     let (base, _) = serve_raw(|path, _| {
@@ -1000,6 +1158,7 @@ fn discussions_are_read_past_twenty_pages() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_failing_commented_mr_is_skipped_not_the_whole_list() {
     let (base, _) = serve(|path| match path {
         "/api/v4/projects/200/merge_requests/5" => status("500 Internal Server Error"),
@@ -1023,6 +1182,7 @@ fn a_failing_commented_mr_is_skipped_not_the_whole_list() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_merged_commented_mr_is_not_fetched_again() {
     let (base, seen) = serve(fixture_routes);
     let gl = provider(&base);
@@ -1061,6 +1221,7 @@ fn full_last_page_then(page2: fn() -> Reply) -> impl Fn(&str, &str) -> Reply {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_page_past_the_end_after_a_full_last_page_ends_the_list() {
     // Page 2 is asked for in case more came in; a 404 or 422 there (no
     // such page) does not fail the complete list.
@@ -1075,6 +1236,7 @@ fn a_page_past_the_end_after_a_full_last_page_ends_the_list() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_failing_page_after_a_full_last_page_fails_the_list() {
     // A server error, an auth failure: whether more came is unknown, so the
     // list is not cut there silently.
@@ -1106,6 +1268,7 @@ fn a_failing_page_after_a_full_last_page_fails_the_list() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn the_head_and_commits_do_not_need_the_reviewer_state() {
     // /reviewers and /approvals failing fail `fetch_review` (see above),
     // not the head check before approving or the history's commit list.
@@ -1134,6 +1297,7 @@ fn the_head_and_commits_do_not_need_the_reviewer_state() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_commented_mr_seen_closed_is_checked_again_later() {
     use std::sync::atomic::{AtomicBool, Ordering};
     // !8 was merged... then a closed-and-reopened MR of the same kind: the
@@ -1159,6 +1323,7 @@ fn a_commented_mr_seen_closed_is_checked_again_later() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_commented_mr_failing_once_stays_listed() {
     use std::sync::atomic::{AtomicBool, Ordering};
     // Listed once; then its read fails for a poll. Dropping it from the list
@@ -1181,6 +1346,7 @@ fn a_commented_mr_failing_once_stays_listed() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_commented_mr_that_keeps_failing_drops_off_the_list() {
     use std::sync::atomic::{AtomicBool, Ordering};
     // A read that fails every poll (a permanent 500 on that MR) keeps it
@@ -1225,6 +1391,7 @@ fn discussions_with_an_mr_level_thread() -> String {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn only_gitlab_discussions_it_lets_be_resolved_are_resolvable() {
     let (base, _) = serve_raw(|path, _| {
         if path.starts_with("/api/v4/projects/grp%2Fapp/merge_requests/21/discussions")
@@ -1285,6 +1452,7 @@ fn only_gitlab_discussions_it_lets_be_resolved_are_resolvable() {
 /// from @rev-fixture", dated after the mark). The review needs the user
 /// again, with the reason.
 #[test]
+#[cfg_attr(windows, ignore)]
 fn a_re_request_note_after_the_watermark_brings_the_review_back() {
     let rerequest: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let notes = rerequest.clone();
@@ -1345,6 +1513,7 @@ fn a_re_request_note_after_the_watermark_brings_the_review_back() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn refreshing_one_mr_revalidates_it_and_reads_nothing_else() {
     use std::sync::atomic::{AtomicBool, Ordering};
 

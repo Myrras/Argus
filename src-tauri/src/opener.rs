@@ -28,6 +28,36 @@ impl Opener for DesktopOpener {
         })
     }
 
+    /// macOS: one `open -a <app> <root> <file>` (no shell), so editors such
+    /// as Zed, VS Code, Cursor or Sublime open the folder as the workspace
+    /// with the file in it and reuse a window that has the folder open.
+    /// Other platforms (Windows included) open the file only.
+    fn open_project_file(&self, app: &str, root: &Path, file: &Path) -> CoreResult<()> {
+        #[cfg(target_os = "macos")]
+        {
+            let status = std::process::Command::new("/usr/bin/open")
+                .arg("-a")
+                .arg(app)
+                .arg(root)
+                .arg(file)
+                .status();
+            match status {
+                Ok(s) if s.success() => Ok(()),
+                other => {
+                    tracing::warn!("could not open the repository in its editor: {other:?}");
+                    Err(CoreError::Io(std::io::Error::other(format!(
+                        "could not open the repository with {app}"
+                    ))))
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = root;
+            self.open(file, Some(app))
+        }
+    }
+
     fn reveal(&self, path: &Path) -> CoreResult<()> {
         tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| {
             tracing::warn!("could not show a file in the file manager: {e}");

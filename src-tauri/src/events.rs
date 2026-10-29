@@ -10,15 +10,29 @@
 //! failed, cancelled) as `ai:state` with the review's [`AiRunState`]. A run
 //! that ended also emits `review:changed`: its history pass may have
 //! rewritten the review's untouched count.
+//!
+//! The submit scripts a submit ran report once they all ended, as
+//! `scripts:done` with the review's id and one result per ticked script.
+//!
+//! A "Write with AI" draft reports every status change (running, waiting,
+//! idle, failed, cancelled, linked) as `script-draft:state` with the whole
+//! [`ScriptDraft`]; while a turn runs, its progress (stage, thinking,
+//! answer size; paced by the core) as `script-draft:progress`.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use argus_core::{AiRunState, AiRunStatus, RefreshReport, ReviewId};
+use argus_core::{
+    AiRunState, AiRunStatus, RefreshReport, ReviewId, ScriptDraft, ScriptDraftProgressEvent,
+    ScriptsDone,
+};
 
 pub const REVIEW_CHANGED: &str = "review:changed";
 pub const REVIEWS_REFRESHED: &str = "reviews:refreshed";
 pub const AI_STATE: &str = "ai:state";
+pub const SCRIPTS_DONE: &str = "scripts:done";
+pub const SCRIPT_DRAFT_STATE: &str = "script-draft:state";
+pub const SCRIPT_DRAFT_PROGRESS: &str = "script-draft:progress";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +73,22 @@ pub fn emit_ai_state(app: &AppHandle, state: &AiRunState) {
     if run_ended(state) {
         emit_changed(app, state.review_id);
     }
+}
+
+/// Emit one submit's `scripts:done` (on the scripts' thread).
+pub fn emit_scripts_done(app: &AppHandle, done: &ScriptsDone) {
+    warn_on_err(app.emit(SCRIPTS_DONE, done));
+}
+
+/// Emit one draft's `script-draft:state` (on the caller's or the draft's
+/// thread).
+pub fn emit_script_draft(app: &AppHandle, draft: &ScriptDraft) {
+    warn_on_err(app.emit(SCRIPT_DRAFT_STATE, draft));
+}
+
+/// Emit a running draft's `script-draft:progress` (on the draft's thread).
+pub fn emit_script_draft_progress(app: &AppHandle, event: &ScriptDraftProgressEvent) {
+    warn_on_err(app.emit(SCRIPT_DRAFT_PROGRESS, event));
 }
 
 /// A run finished (or failed, or was stopped) and none waits behind it. A
@@ -142,13 +172,69 @@ mod tests {
     }
 
     #[test]
+    fn scripts_done_payload_is_camel_case() {
+        let done = ScriptsDone {
+            review_id: ReviewId::from_key("github|github.com|acme-fixture/widgets|1"),
+            results: vec![argus_core::ScriptResult {
+                script_id: "s1".into(),
+                name: "Tick".into(),
+                status: argus_core::ScriptStatus::NotExecutable,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                duration_ms: 0,
+                message: Some("not executable".into()),
+                finished_at: chrono::Utc::now(),
+            }],
+        };
+        let json = serde_json::to_value(&done).unwrap();
+        assert!(json.get("reviewId").is_some());
+        assert_eq!(json["results"][0]["scriptId"], "s1");
+        assert_eq!(json["results"][0]["status"], "notExecutable");
+        assert_eq!(json["results"][0]["exitCode"], serde_json::Value::Null);
+        assert!(json["results"][0].get("durationMs").is_some());
+    }
+
+    #[test]
+    fn script_draft_payload_is_camel_case() {
+        let t = chrono::Utc::now();
+        let draft = ScriptDraft {
+            id: "d1".into(),
+            script_id: None,
+            title: "Tick".into(),
+            base: None,
+            turns: vec![{
+                let mut turn = argus_core::DraftTurn::new("Tick every item");
+                turn.attachments = vec!["MR !12".into()];
+                turn
+            }],
+            status: argus_core::ScriptDraftStatus::Running,
+            waiting: true,
+            error: None,
+            progress: None,
+            created_at: t,
+            updated_at: t,
+            revision: 1,
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["status"], "running");
+        assert_eq!(json["scriptId"], serde_json::Value::Null);
+        assert_eq!(json["waiting"], true);
+        assert_eq!(json["turns"][0]["prompt"], "Tick every item");
+        assert_eq!(json["turns"][0]["attachments"][0], "MR !12");
+        assert!(json["turns"][0].get("material").is_none());
+        assert!(json.get("updatedAt").is_some());
+    }
+
+    #[test]
     fn refreshed_payload_is_the_camel_case_report() {
         let report = RefreshReport {
             changed: vec![],
             errors: vec![RefreshError {
                 provider: ProviderId::Gitlab,
+                host: "gitlab.example.test".into(),
                 review: None,
-                message: "GitLab is not set up: add its URL and a token in Settings.".into(),
+                message: "Not logged in to gitlab.example.test: run `glab auth login --hostname gitlab.example.test`.".into(),
                 unavailable: true,
                 rate_limited_until: None,
             }],

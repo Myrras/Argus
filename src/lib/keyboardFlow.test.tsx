@@ -5,6 +5,7 @@ vi.mock("./platform", () => ({ isMac: false, isWindows: false }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import type { StoredThread } from "../ipc/types";
 import { useAiStore } from "../state/aiStore";
@@ -40,6 +41,7 @@ const anchor = (path: string, line: number) => ({
   headSha: r.headSha,
   diffHunk: null,
   currentLine: null,
+  outsideDiff: false,
 });
 const talk = thread({ reviewId: r.id, anchor: null, author: "carol-fixture" });
 const onA = thread({ reviewId: r.id, anchor: anchor("src/a.rs", 3) });
@@ -141,7 +143,7 @@ beforeEach(() => {
   localStorage.clear();
   clearCommentableCache();
   vi.mocked(invoke).mockReset();
-  vi.mocked(invoke).mockImplementation((cmd: string) => {
+  answerBatches(vi.mocked(invoke)).mockImplementation((cmd: string) => {
     if (cmd === "commentable_lines") {
       return Promise.resolve({
         reviewId: r.id,
@@ -588,7 +590,7 @@ describe("next / previous unresolved thread", () => {
     detail.remove();
   });
 
-  it("step through the unresolved threads in page order, no wrap", () => {
+  it("step through the unresolved threads in page order, looping around", () => {
     seed([openTalk, resolved, openB, later, onA]);
     bindG();
     renderHook(() => useAppShortcuts());
@@ -609,15 +611,21 @@ describe("next / previous unresolved thread", () => {
     expect(useCodeViewStore.getState().byReview[r.id].selected).toBe(
       "src/b.rs",
     );
-    // The end: it stays and says so once.
+    // The end: it loops to the first and says so once.
+    const wrapMessages = (m: string) =>
+      useToastStore.getState().toasts.filter((t) => t.message === m);
     expect(next().defaultPrevented).toBe(true);
+    expect(focusedName()).toBe(`thread ${openTalk.threadId}`);
     press({ key: "g", code: "KeyG", repeat: true });
+    expect(focusedName()).toBe(`thread ${openB.threadId}`);
+    expect(wrapMessages("Wrapped to the first open thread")).toHaveLength(1);
+    expect(wrapMessages("No more open threads")).toHaveLength(0);
+    // And back: before the first is the last.
+    prev();
+    expect(focusedName()).toBe(`thread ${openTalk.threadId}`);
+    prev();
     expect(focusedName()).toBe(`thread ${later.threadId}`);
-    expect(
-      useToastStore
-        .getState()
-        .toasts.filter((t) => t.message === "No more open threads"),
-    ).toHaveLength(1);
+    expect(wrapMessages("Wrapped to the last open thread")).toHaveLength(1);
     prev();
     expect(focusedName()).toBe(`thread ${openB.threadId}`);
     // The palette and the header's buttons run the same action.
@@ -629,11 +637,29 @@ describe("next / previous unresolved thread", () => {
   it("count an outdated thread that is still open", () => {
     const old = { ...onA, resolvable: true, outdated: true };
     seed([old, { ...openB, resolved: true }]);
+    useToastStore.setState({ toasts: [] });
     renderHook(() => useAppShortcuts());
     runShortcut("nextOpenThread");
     expect(focusedName()).toBe(`thread ${old.threadId}`);
     runShortcut("nextOpenThread");
+    // The only one: pressing again stays on it, no hint.
     expect(focusedName()).toBe(`thread ${old.threadId}`);
+    expect(useToastStore.getState().toasts).toEqual([]);
+    runShortcut("prevOpenThread");
+    expect(focusedName()).toBe(`thread ${old.threadId}`);
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
+  it("say so when no thread is open", () => {
+    seed([{ ...openB, resolved: true }, onA]);
+    useToastStore.setState({ toasts: [] });
+    renderHook(() => useAppShortcuts());
+    expect(runShortcut("nextOpenThread")).toBe(true);
+    expect(runShortcut("prevOpenThread")).toBe(true);
+    expect(focusedName()).toBeNull();
+    expect(useToastStore.getState().toasts.map((t) => t.message)).toEqual([
+      "No more open threads",
+    ]);
   });
 
   it("leave the review list's ↑/↓ alone", () => {

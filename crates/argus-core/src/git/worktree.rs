@@ -529,7 +529,7 @@ fn safe_remote_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-/".contains(&b))
 }
 
-fn strip_port(host: &str) -> &str {
+pub(crate) fn strip_port(host: &str) -> &str {
     if host.starts_with('[') {
         return host.split_inclusive(']').next().unwrap_or(host);
     }

@@ -7,7 +7,9 @@ pub mod history;
 pub mod open;
 pub mod post;
 pub mod provider;
+pub mod repos;
 pub mod review;
+pub mod scripts;
 pub mod settings;
 pub mod thread;
 
@@ -20,8 +22,8 @@ use argus_core::{Core, CoreResult, PostError, ReviewId, ThreadId};
 use crate::error::IpcError;
 use crate::state::AppState;
 
-/// Run a core call on a blocking thread: provider calls (network, `gh`), the
-/// keychain, SQLite (which may wait on a poll's write) and stopping the poll
+/// Run a core call on a blocking thread: provider calls (network, `gh`,
+/// `glab`), SQLite (which may wait on a poll's write) and stopping the poll
 /// loop (which waits for an in-flight refresh) must never hold up the
 /// webview's IPC thread.
 pub(crate) async fn blocking<T: Send + 'static>(

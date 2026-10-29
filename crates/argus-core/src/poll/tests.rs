@@ -247,7 +247,9 @@ fn one_provider_failing_does_not_stop_the_other() {
     let gh = github();
     gh.serve(detail_n(12, "h1"), vec![]);
     let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
-    *gl.down.lock().unwrap() = Some(|| CoreError::GitlabAuth);
+    *gl.down.lock().unwrap() = Some(|| CoreError::GitlabAuth {
+        host: "gitlab.example.test".into(),
+    });
     let store = Store::in_memory().unwrap();
 
     let report = refresh_all(&as_providers(&[gh, gl]), &store, at(10, 12));
@@ -257,7 +259,13 @@ fn one_provider_failing_does_not_stop_the_other() {
     assert_eq!(e.provider, ProviderId::Gitlab);
     assert_eq!(e.review, None);
     assert!(e.unavailable);
-    assert_eq!(e.message, CoreError::GitlabAuth.to_string());
+    assert_eq!(
+        e.message,
+        CoreError::GitlabAuth {
+            host: "gitlab.example.test".into()
+        }
+        .to_string()
+    );
 }
 
 #[test]
@@ -633,31 +641,35 @@ fn quitting_does_not_wait_for_a_refresh_under_way() {
     assert_eq!(reports.load(Ordering::SeqCst), 0);
 }
 
+/// `s` with `provider`'s `host` switched on or off.
+fn switched(mut s: crate::Settings, provider: ProviderId, host: &str, on: bool) -> crate::Settings {
+    s.accounts.insert(
+        crate::settings::account_key(provider, host),
+        crate::AccountChoice {
+            enabled: on,
+            account: None,
+        },
+    );
+    s
+}
+
 #[test]
 fn two_quick_saves_leave_the_poll_on_the_last_ones_providers() {
     let a = Arc::new(Fake::new(ProviderId::Github, "a.example.test"));
     let b = Arc::new(Fake::new(ProviderId::Github, "b.example.test"));
-    let mut core = crate::Core::with_providers(
+    let core = Arc::new(crate::Core::with_providers(
         Store::in_memory().unwrap(),
-        as_providers(std::slice::from_ref(&a)),
-    );
-    let (fa, fb) = (a.clone(), b.clone());
-    core.build_providers = Box::new(move |s: &crate::Settings| {
-        let f = if s.github.host == "b.example.test" {
-            &fb
-        } else {
-            &fa
-        };
-        vec![f.clone() as Arc<dyn ReviewProvider>]
-    });
-    let core = Arc::new(core);
+        as_providers(&[a.clone(), b.clone()]),
+    ));
     core.start_polling(|_| {});
-    let save = |host: &str| {
-        let mut s = core.settings();
-        s.github.host = host.into();
-        s
+    let save = |on: &str, off: &str| {
+        let s = switched(core.settings(), ProviderId::Github, on, true);
+        switched(s, ProviderId::Github, off, false)
     };
-    let (first, second) = (save("a.example.test"), save("b.example.test"));
+    let (first, second) = (
+        save("a.example.test", "b.example.test"),
+        save("b.example.test", "a.example.test"),
+    );
     // The first save has read its providers for the new loop and not yet
     // put the loop in place when the second one comes in. The second is
     // given a moment to finish; serialized, it waits for the first instead.
@@ -678,7 +690,9 @@ fn two_quick_saves_leave_the_poll_on_the_last_ones_providers() {
     let second_save = handle.lock().unwrap().take().expect("the second save ran");
     second_save.join().unwrap();
 
-    assert_eq!(core.settings().github.host, "b.example.test");
+    assert!(core
+        .settings()
+        .account_enabled(ProviderId::Github, "b.example.test"));
     let hosts: Vec<String> = core
         .poller
         .lock()
@@ -710,8 +724,7 @@ fn saving_settings_does_not_wait_for_a_refresh_under_way() {
     // A refresh is on the network (a hung `gh` or a slow instance).
     started.recv().unwrap();
     // GitHub off: the restarted loop has no provider, so nothing runs `gh`.
-    let mut s = core.settings();
-    s.github.enabled = false;
+    let s = switched(core.settings(), ProviderId::Github, "github.com", false);
     let (saved_tx, saved) = mpsc::channel();
     let saver = core.clone();
     std::thread::spawn(move || {
@@ -728,160 +741,56 @@ fn saving_settings_does_not_wait_for_a_refresh_under_way() {
     core.shutdown();
 }
 
-/// Wait until `f` holds (another thread's progress), failing after 10 s.
-fn wait_until(what: &str, f: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !f() {
-        assert!(std::time::Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(5));
-    }
-}
-
-/// A core polling a GitHub fake plus, once a GitLab URL is saved, a GitLab
-/// fake that is "not set up" until its token is stored (the keychain, read
-/// per call as `KeychainToken` does). Also counts the provider builds.
-fn core_with_gitlab_token(gh: &Arc<Fake>, gl: &Arc<Fake>) -> (Arc<crate::Core>, Arc<AtomicUsize>) {
-    *gl.down.lock().unwrap() = Some(|| CoreError::GitlabNotConfigured);
-    let mut core = crate::Core::with_providers(
-        Store::in_memory().unwrap(),
-        as_providers(std::slice::from_ref(gh)),
-    );
-    let builds = Arc::new(AtomicUsize::new(0));
-    let (fgh, fgl, built) = (gh.clone(), gl.clone(), builds.clone());
-    core.build_providers = Box::new(move |s: &crate::Settings| {
-        built.fetch_add(1, Ordering::SeqCst);
-        let mut out = vec![fgh.clone() as Arc<dyn ReviewProvider>];
-        if s.gitlab_enabled() {
-            out.push(fgl.clone());
-        }
-        out
-    });
-    let keychain = gl.clone();
-    core.write_gitlab_token = Box::new(move |_url: &str, token: &str| {
-        *keychain.down.lock().unwrap() = token
-            .trim()
-            .is_empty()
-            .then_some(|| CoreError::GitlabNotConfigured);
-        Ok(())
-    });
-    (Arc::new(core), builds)
-}
-
-#[test]
-fn storing_the_gitlab_token_leaves_no_stale_not_set_up_error() {
-    // The Settings form saves the URL first and the token right after. The
-    // URL save restarts the loop, whose first refresh runs before the token
-    // is stored: GitLab "is not set up". That refresh is still on the
-    // network (GitHub) when the token comes in.
-    let gh = github();
-    gh.serve(detail_n(12, "h1"), vec![]);
-    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
-    let (core, builds) = core_with_gitlab_token(&gh, &gl);
-    let (tx, rx) = mpsc::channel();
-    core.start_polling(move |r| {
-        let _ = tx.send(r.clone());
-    });
-    let first = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(first.errors.is_empty(), "{:?}", first.errors);
-
-    let (started, go) = gh.hold_next_fetch();
-    let mut s = core.settings();
-    s.gitlab.base_url = "http://gitlab.example.test".into();
-    core.update_settings(s).unwrap();
-    started.recv().unwrap();
-    wait_until("GitLab was asked without a token", || {
-        gl.calls.load(Ordering::SeqCst) >= 1
-    });
-    let built = builds.load(Ordering::SeqCst);
-
-    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
-    // A token is part of GitLab's setup: fresh providers, as for a save.
-    assert_eq!(builds.load(Ordering::SeqCst), built + 1);
-    go.send(()).unwrap();
-
-    // The refresh from before the token reports nothing; the next one
-    // reads GitLab with it, right away (not a poll interval later).
-    let next = rx.recv_timeout(Duration::from_secs(10)).unwrap();
-    assert!(
-        next.errors.is_empty(),
-        "a stale error was reported: {:?}",
-        next.errors
-    );
-    assert!(gl.calls.load(Ordering::SeqCst) >= 2);
-    core.shutdown();
-}
-
-#[test]
-fn storing_the_gitlab_token_without_a_loop_rebuilds_the_providers() {
-    let gh = github();
-    let gl = Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test"));
-    let (core, builds) = core_with_gitlab_token(&gh, &gl);
-    let mut s = core.settings();
-    s.gitlab.base_url = "https://gitlab.example.test".into();
-    core.update_settings(s).unwrap();
-    let built = builds.load(Ordering::SeqCst);
-    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
-    assert_eq!(builds.load(Ordering::SeqCst), built + 1);
-    assert!(core.poller.lock().unwrap().is_none(), "no loop was started");
-    assert!(core.refresh().errors.is_empty());
-}
-
-const FIXTURE_TOKEN: &str = "glpat-fixture-not-a-real-token";
-
 #[test]
 fn a_change_rebuilds_only_the_provider_it_is_about() {
     // A rebuilt provider forgets its rate-limit pause and conditional
-    // cache: only the one whose setup changed is rebuilt.
-    let mut core = crate::Core::with_providers(Store::in_memory().unwrap(), Vec::new());
-    core.build_providers = Box::new(|s: &crate::Settings| {
-        let mut out: Vec<Arc<dyn ReviewProvider>> = Vec::new();
-        if s.github.enabled {
-            out.push(Arc::new(Fake::new(ProviderId::Github, &s.github.host)));
-        }
-        if s.gitlab_enabled() {
-            out.push(Arc::new(Fake::new(
-                ProviderId::Gitlab,
-                "gitlab.example.test",
-            )));
-        }
-        out
+    // cache: only the one whose host's choice changed is rebuilt.
+    let mut core = crate::Core::with_providers(
+        Store::in_memory().unwrap(),
+        as_providers(&[
+            github(),
+            Arc::new(Fake::new(ProviderId::Gitlab, "gitlab.example.test")),
+        ]),
+    );
+    core.build_providers = Box::new(|spec: &crate::ProviderSpec| {
+        Some(Arc::new(Fake::new(spec.provider, &spec.host)) as Arc<dyn ReviewProvider>)
     });
-    core.write_gitlab_token = Box::new(|_: &str, _: &str| Ok(()));
     let get = |core: &crate::Core, id: ProviderId| {
         core.providers()
             .into_iter()
             .find(|p| p.id() == id)
             .expect("provider")
     };
-    let mut s = core.settings();
-    s.gitlab.base_url = "https://gitlab.example.test".into();
-    core.update_settings(s.clone()).unwrap();
     let (gh, gl) = (
         get(&core, ProviderId::Github),
         get(&core, ProviderId::Gitlab),
     );
 
-    // The token is GitLab's: GitHub stays as it is.
-    core.set_gitlab_token(FIXTURE_TOKEN).unwrap();
-    assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
-    assert!(!Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
-    let gl = get(&core, ProviderId::Gitlab);
-
-    // Neither provider's section changed: both stay.
+    // No host's choice changed: both stay.
+    let mut s = core.settings();
     s.poll_interval_secs = 300;
     core.update_settings(s.clone()).unwrap();
     assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
     assert!(Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
 
-    // GitHub's section: GitLab stays.
-    s.github.host = "ghe.example.test".into();
+    // Another gh account on github.com: GitLab stays.
+    s.accounts.insert(
+        "github:github.com".into(),
+        crate::AccountChoice {
+            enabled: true,
+            account: Some("work".into()),
+        },
+    );
     core.update_settings(s.clone()).unwrap();
     assert!(!Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
     assert!(Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));
     let gh = get(&core, ProviderId::Github);
 
-    // GitLab's section: GitHub stays.
-    s.gitlab.base_url = "https://gitlab2.example.test".into();
+    // GitLab off and on again: GitHub stays, GitLab is a new one.
+    let s = switched(s, ProviderId::Gitlab, "gitlab.example.test", false);
+    core.update_settings(s.clone()).unwrap();
+    assert_eq!(core.providers().len(), 1);
+    let s = switched(s, ProviderId::Gitlab, "gitlab.example.test", true);
     core.update_settings(s).unwrap();
     assert!(Arc::ptr_eq(&gh, &get(&core, ProviderId::Github)));
     assert!(!Arc::ptr_eq(&gl, &get(&core, ProviderId::Gitlab)));

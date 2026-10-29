@@ -28,6 +28,13 @@ interface ModalProps {
   tone?: "default" | "danger" | "warning";
   /** Card width — a px number or any CSS width (e.g. `"min(960px, 94vw)"`). */
   width?: number | string;
+  /** Fixed card height (any CSS length); the card still stays inside the window. */
+  height?: number | string;
+  /**
+   * The caller lays out the body itself: no padding, no scrolling, a flex
+   * column. Use it for a dialog with a fixed strip and one scrolling pane.
+   */
+  bare?: boolean;
   /** What takes the focus on open (a field); the card by default. */
   initialFocus?: RefObject<HTMLElement | null>;
 }
@@ -40,6 +47,8 @@ export function Modal({
   footer,
   tone = "default",
   width = 460,
+  height,
+  bare = false,
   initialFocus,
 }: ModalProps) {
   const cardRef = useRef<HTMLDivElement>(null);
@@ -123,7 +132,7 @@ export function Modal({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        style={{ width }}
+        style={{ width, height }}
         onKeyDown={trapTab}
       >
         <header className={`${styles.header} ${styles[tone]}`}>
@@ -137,7 +146,9 @@ export function Modal({
             <CloseIcon />
           </button>
         </header>
-        <div className={styles.body}>{children}</div>
+        <div className={`${styles.body} ${bare ? styles.bare : ""}`}>
+          {children}
+        </div>
         {footer && <footer className={styles.footer}>{footer}</footer>}
       </div>
     </div>,
