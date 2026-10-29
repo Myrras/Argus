@@ -16,16 +16,16 @@ tracing.workspace = true
 # Parsing the GitLab instance URL (its host is what `glab` is asked for).
 url = "2.5"
 # GitHub's contents API returns files base64-encoded.
-base64 = "0.22"
+base64 = "0.23"
 # GitLab line codes (`<sha1 of the path>_<old>_<new>`) for multi-line
 # comments. Already in the tree through `uuid`.
 sha1_smol = "1"
 # Local review state. `bundled` compiles SQLite in, so no system library is
 # needed on macOS or Windows.
-rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+rusqlite = { version = "0.41", features = ["bundled", "chrono"] }
 # The then/now line diff of thread history. 2.x: 3.x needs Rust 1.85, the
 # workspace targets 1.82.
-similar = "2.7"
+similar = "3.2"
 
 [dev-dependencies]
 tempfile = "3"
