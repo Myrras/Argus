@@ -11,6 +11,8 @@ when it merges.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-29
+
 ### Added
 
 - Hide whitespace changes, like GitHub's "Hide whitespace" and GitLab's "Show
