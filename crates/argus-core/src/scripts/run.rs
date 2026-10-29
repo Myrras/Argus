@@ -8,7 +8,8 @@
 //! app's `PATH` lacks Homebrew's `glab`, `gh` and `jq`) and the `ARGUS_*`
 //! variables; stdin gets one JSON object, then closes. stdout and stderr
 //! are kept (their tails), never logged. On Unix the script gets its own
-//! process group, so a timeout kills what it started too.
+//! process group, so a timeout kills what it started too; on Windows its
+//! process tree is ended (`taskkill /T`).
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -65,10 +66,7 @@ pub(crate) fn execute_with(
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
         .map(|(_, v)| v.clone());
-    let home = env
-        .iter()
-        .find(|(k, _)| k == "HOME")
-        .map(|(_, v)| PathBuf::from(v));
+    let home = home_of(&env);
     let program = match resolve_command(&script.command, path_var.as_deref(), home.as_deref()) {
         Ok(p) => p,
         Err((status, message)) => return not_run(status, message),
@@ -225,9 +223,38 @@ pub(crate) fn script_env(
 
 type NotRun = (ScriptStatus, String);
 
+/// The home folder in the script's `env`: `HOME`, else (Windows, where
+/// `HOME` is usually unset) `USERPROFILE`. Windows names are matched in
+/// any case, as Windows does.
+pub(crate) fn home_of(env: &[(String, String)]) -> Option<PathBuf> {
+    let var = |name: &str| {
+        env.iter()
+            .rev()
+            .find(|(k, _)| {
+                if cfg!(windows) {
+                    k.eq_ignore_ascii_case(name)
+                } else {
+                    k == name
+                }
+            })
+            .map(|(_, v)| v.as_str())
+            .filter(|v| !v.is_empty())
+    };
+    var("HOME")
+        .or_else(|| {
+            if cfg!(windows) {
+                var("USERPROFILE")
+            } else {
+                None
+            }
+        })
+        .map(PathBuf::from)
+}
+
 /// The program to spawn for `command`: an absolute path, `~/…` (under
-/// `home`), or a bare name found on `path_var`. A relative path with a
-/// folder in it is refused (relative to what?).
+/// `home`; also `~\…` on Windows), or a bare name found on `path_var`
+/// (on Windows with each `PATHEXT` extension, as `cmd` looks). A relative
+/// path with a folder in it is refused (relative to what?).
 pub(crate) fn resolve_command(
     command: &str,
     path_var: Option<&str>,
@@ -240,7 +267,10 @@ pub(crate) fn resolve_command(
             "No command is set: add the script's path in Settings → Scripts.".into(),
         ));
     }
-    let path = if let Some(rest) = command.strip_prefix("~/") {
+    let home_rest = command
+        .strip_prefix("~/")
+        .or_else(|| command.strip_prefix("~\\").filter(|_| cfg!(windows)));
+    let path = if let Some(rest) = home_rest {
         match home {
             Some(h) => h.join(rest),
             None => {
@@ -272,8 +302,34 @@ pub(crate) fn resolve_command(
 /// The first `dir/name` on `path_var` that is a runnable file.
 fn find_on_path(name: &str, path_var: Option<&str>) -> Option<PathBuf> {
     std::env::split_paths(path_var?)
-        .map(|dir| dir.join(name))
+        .flat_map(|dir| candidates(&dir, name))
         .find(|p| check_runnable(p).is_ok())
+}
+
+/// The files a bare `name` may be in `dir`: itself (Unix).
+#[cfg(not(windows))]
+fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![dir.join(name)]
+}
+
+/// The files a bare `name` may be in `dir` on Windows: a name with an
+/// extension as it is, else `name` plus each `PATHEXT` extension (lower
+/// case). A file without one is never a candidate: Windows cannot start it
+/// (an npm package's `tool` next to `tool.cmd` is a shell script).
+#[cfg(windows)]
+fn candidates(dir: &Path, name: &str) -> Vec<PathBuf> {
+    if Path::new(name).extension().is_some() {
+        return vec![dir.join(name)];
+    }
+    let exts = std::env::var("PATHEXT")
+        .ok()
+        .filter(|e| !e.trim().is_empty())
+        .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+    exts.split(';')
+        .map(str::trim)
+        .filter(|e| e.starts_with('.') && e.len() > 1)
+        .map(|e| dir.join(format!("{name}{}", e.to_ascii_lowercase())))
+        .collect()
 }
 
 /// `path` is a file the user may run: there, not a folder, executable.
@@ -297,20 +353,40 @@ fn check_runnable(path: &Path) -> Result<(), NotRun> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn not_executable(path: &Path) -> String {
     let p = path.display();
     format!("{p} is not executable — run chmod +x {p}")
 }
 
+#[cfg(windows)]
+fn not_executable(path: &Path) -> String {
+    format!("{} could not be run (access denied).", path.display())
+}
+
 /// Why the spawn failed, in Argus' words.
 fn spawn_failure(e: &std::io::Error, program: &Path) -> NotRun {
     use std::io::ErrorKind;
-    // ENOEXEC: no `#!` line and not a binary.
+    // ENOEXEC: no `#!` line and not a binary. (8 is another error on
+    // Windows.)
+    #[cfg(unix)]
     if e.raw_os_error() == Some(8) {
         return (
             ScriptStatus::NotExecutable,
             format!(
                 "{} could not start: a script needs a first line such as #!/bin/sh",
+                program.display()
+            ),
+        );
+    }
+    // ERROR_BAD_EXE_FORMAT: not a program Windows can start (a `.sh`, a
+    // file without an extension).
+    #[cfg(windows)]
+    if e.raw_os_error() == Some(193) {
+        return (
+            ScriptStatus::NotExecutable,
+            format!(
+                "{} could not start: Windows runs .exe, .cmd and .bat files, not this one.",
                 program.display()
             ),
         );
@@ -349,8 +425,9 @@ fn hide_console_window(cmd: &mut Command) {
 #[cfg(not(windows))]
 fn hide_console_window(_cmd: &mut Command) {}
 
-/// Kill the script and (Unix) its process group: what it started too.
-/// `kill(1)` rather than a syscall, as the crate forbids `unsafe`.
+/// Kill the script and what it started: its process group (Unix), its
+/// process tree (Windows). `kill(1)` and `taskkill` rather than syscalls,
+/// as the crate forbids `unsafe`.
 fn kill_tree(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -361,6 +438,17 @@ fn kill_tree(child: &mut Child) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+    #[cfg(windows)]
+    {
+        let mut taskkill = Command::new("taskkill");
+        taskkill
+            .args(["/T", "/F", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        hide_console_window(&mut taskkill);
+        let _ = taskkill.status();
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -432,6 +520,12 @@ impl TempDir {
         let path =
             std::env::temp_dir().join(format!("{TEMP_PREFIX}{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&path)?;
+        // Canonical for `pwd -P` (macOS' `/private/var`), but not on
+        // Windows: that is a `\\?\` path, which `cmd` (a `.cmd` script)
+        // cannot start in.
+        if cfg!(windows) {
+            return Ok(Self(path));
+        }
         Ok(Self(path.canonicalize().unwrap_or(path)))
     }
 }
