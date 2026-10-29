@@ -8,6 +8,7 @@ target
 src-tauri
 crates
 scripts
+ci
 .claude
 .podium
 pnpm-lock.yaml

@@ -1,5 +1,79 @@
 # CLAUDE.md — Argus
 
+<!-- rust-base:start -->
+<!-- Synced from rust-base. Do not edit this block here; change it in rust-base. -->
+## Shared CI and recipes (rust-base)
+
+CI, release and installer builds come from
+<https://github.com/RobbieMinderhoud/rust-base>. `.github/workflows/` holds thin
+callers (`ci.yml`, `pr-checks.yml`, `build.yml`, `integration.yml`) of its
+reusable workflows, pinned `@v2`. The callers and the shared config files
+(`.gitattributes`, `.editorconfig`, `rust-toolchain.toml`, `.prettierrc.json`,
+`.prettierignore`, `eslint.config.js`, `tsconfig*.json`,
+`.github/dependabot.yml`) are synced from rust-base: **change them there**,
+not here. Behaviour is documented in the rust-base README.
+
+App-specific CI settings (runner, Windows test scope, extra recipe, release
+title prefix, integration packages and env) live in `.github/rust-base.json`.
+That file is owned by this repo.
+
+- **Required checks on `main`:** `ci / ci-ok`, `pr-checks / Changelog entry`,
+  `pr-checks / Release label`. Don't require `ci / frontend`, `ci / rust` or
+  `ci / windows`. The labels `release:patch`, `release:minor`, `release:major`,
+  `no-release` and `windows` must exist.
+- **Release labels:** every PR carries exactly one of `release:patch`,
+  `release:minor` or `release:major`, enforced by `pr-checks.yml`. Use
+  `no-release` for CI, config or docs-only PRs. Merging to `main` releases:
+  the version is the latest `v*` tag bumped by the highest label across the PRs
+  merged since. Never bump the version or create a tag by hand; `just version`
+  is for emergencies only.
+- **Changelog gate:** every PR adds an entry under `## [Unreleased]` in
+  `CHANGELOG.md` (user-facing changes only, _Keep a Changelog_). `pr-checks.yml`
+  fails unless the PR touches `CHANGELOG.md` and that section holds at least one
+  `- ` entry. The heading must stay exactly `## [Unreleased]`. `no-release` PRs
+  need no entry.
+- **`packageManager`:** don't add one to `package.json`. The shared workflows
+  set pnpm 10; a second version fails setup.
+- **Shared recipes** (`dev`, `dev-signed`, `build`, `build-signed`,
+  `install-signed`, `check`, `test-core`, `format`, `version`, `version-check`,
+  `rust`, `frontend`, `ci`, `sweep`) come from `ci/common.just` in rust-base.
+  The justfile imports it with `import? '~/.rust-base/ci/common.just'`; link
+  your clone with `ln -s /path/to/rust-base ~/.rust-base`. Don't redefine those
+  names (just rejects duplicates) and never add `set allow-duplicate-recipes`:
+  change the shared recipe in rust-base instead. Recipes that CI calls
+  (`test-integration`) must not depend on shared recipes: in CI the optional
+  import resolves to nothing.
+
+### When to add the `windows` label
+
+Windows CI runs on pushes to `main` and on PRs that carry the `windows` label
+(adding the label re-runs CI for the PR). It gates the release. Add `windows`
+to a PR when it:
+
+- touches `cfg(windows)`, `cfg(unix)` or `target_os` code, or platform-specific modules
+- changes file paths, path separators, drive letters or case sensitivity; process spawning, PTY or shell quoting; environment variables; WSL
+- changes the Windows settings in `tauri.conf.json` (bundle, NSIS) or installer scripts
+- adds or upgrades a dependency with platform-specific code (`tauri`, `windows-rs`, `portable-pty`, …) or bumps the Rust toolchain
+- fixes a Windows bug
+
+Skip it for frontend-only, docs-only and purely cross-platform logic changes. If unsure, add it: `main` runs Windows after the merge anyway, and a failure there blocks the release.
+<!-- rust-base:end -->
+
+## Windows-sensitive spots
+
+Add `windows` to a PR that touches these (all in `crates/argus-core/src/` unless noted):
+
+- `platform.rs`: finding `gh`, `glab`, `claude`, `auggie` (login shell on Unix, `where` and `%COMSPEC%` on Windows), `CREATE_NO_WINDOW`
+- `git/mod.rs` (git lookup, process spawning), `provider/github.rs` (spawning `gh`)
+- `ai/adapter.rs`: agent spawning, sandbox and absolute-path checks (`cfg!(windows)`)
+- `open/mod.rs` and `src-tauri/src/opener.rs`: opening files in an editor, what runs instead of opens (`RUNS_ON_OPEN_WINDOWS`)
+- `provider/gitlab.rs` (spawning `glab`), `accounts/cli.rs` (`gh`/`glab auth status`): `CREATE_NO_WINDOW`
+- `scripts/run.rs` and `scripts/save.rs`: running submit scripts (own process group on Unix, `CREATE_NO_WINDOW`) and saving them executable (Unix mode bits)
+- `git/discover.rs`: looking for local clones under the home folder (`USERPROFILE` on Windows)
+- `src-tauri/src/lib.rs` (macOS-only menu bar; the title-bar window controls and Settings gear elsewhere), `src-tauri/src/main.rs` (`windows_subsystem`)
+- `src-tauri/tauri.conf.json` (bundle, icons) and `build.yml` (NSIS installer)
+- tests with Unix fake scripts (`fake gh`, `fake glab`, fake agents, submit scripts, git fixtures; written with `tests/support/script.rs` `write_executable`) carry `#[cfg_attr(windows, ignore)]`; the Windows job runs clippy on the whole workspace but tests `-p argus-core` only, so `src-tauri` tests run on Linux only
+
 Guidance for AI agents (and humans) working in this repository.
 
 ## What Argus is
@@ -15,7 +89,7 @@ files, design tokens, layering/IPC conventions — comes from
 <https://github.com/RobbieMinderhoud/rust-application-boilerplate>
 (`../rust-application-boilerplate` locally). CI, release and the shared
 recipes and scripts come from
-<https://github.com/RobbieMinderhoud/ci-workflows> (see Versioning, CI &
+<https://github.com/RobbieMinderhoud/rust-base> (see Versioning, CI &
 releases).
 
 - **Rule:** a change to the **shared skeleton or conventions** (not Argus
@@ -1177,12 +1251,7 @@ just coverage         # cargo-llvm-cov + Vitest v8 (not in `just ci`)
 just icons            # regenerate app icons from the SVG (needs rsvg-convert)
 ```
 
-All recipes marked `common.just` are shared, imported from
-`~/.ci-workflows/common.just`: symlink a clone of ci-workflows there
-(`ln -s /path/to/ci-workflows ~/.ci-workflows`). Don't define recipes with
-those names here, and don't add `allow-duplicate-*` settings: change the shared
-recipe in ci-workflows instead (`sweep` and the `_` helpers are shared too). `test-integration` must not depend on
-`common.just` recipes: in CI the import resolves to nothing.
+Recipes marked `common.just` come from rust-base (see above).
 
 ### Signed builds on macOS
 
@@ -1286,16 +1355,10 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
 
 ## Versioning, CI & releases
 
-CI, release and installer builds are thin callers (`.github/workflows/`, pinned
-`@v1`) of <https://github.com/RobbieMinderhoud/ci-workflows>; behaviour lives
-there, see its README. Shared scripts (`changelog.sh`, `next-version.sh`,
-`sync-version.sh`, `make-dmg.sh`) live there too; `just version`,
-`just version-check` and `just build` call `~/.ci-workflows/scripts/`.
-
 - SemVer. `[workspace.package]` version in the root `Cargo.toml` is the source
   of truth; `sync-version.sh` propagates it (`--check` detects drift).
 - `ci.yml`: frontend and Rust checks (`just frontend` / `just rust`), a
-  Windows job (`cargo test -p argus-core`) and the `ci-ok` gate; on push to
+  Windows job (`cargo test -p argus-core`, scope set in `.github/rust-base.json`) and the `ci-ok` gate; on push to
   `main` the release follows. `pr-checks.yml`: changelog entry and release
   label. `build.yml` (dispatch-only, run by the release): .dmg and NSIS
   installers. `integration.yml`: nightly `just test-integration`.
@@ -1303,42 +1366,7 @@ there, see its README. Shared scripts (`changelog.sh`, `next-version.sh`,
   packages). Code and tests must pass on Linux as well as macOS: gate anything
   that needs a desktop session or macOS (keychain, Finder, `open`) behind
   `cfg`, and keep tests off the real keychain.
-- **Windows runs on push to `main` and on PRs with the `windows` label**
-  (adding the label re-runs CI for the PR). It gates the release.
-- Required checks on `main`: `ci / ci-ok`, `pr-checks / Changelog entry`,
-  `pr-checks / Release label`. Don't require `ci / frontend`, `ci / rust` or
-  `ci / windows`. The labels `release:patch`, `release:minor`, `release:major`, `no-release` and `windows` must exist.
-- **Every PR adds an entry under `## [Unreleased]` in `CHANGELOG.md`**
-  (user-facing voice) and carries exactly one of `release:patch` / `release:minor` / `release:major`
-  (`no-release` for CI, config or docs-only PRs, no entry needed):
-  merging to main releases it and the label sets the bump (the highest across
-  PRs since the last tag). The first release ships the `Cargo.toml` version.
+- The first release ships the `Cargo.toml` version.
 - `RELEASE_DEPLOY_KEY` (optional secret) lets the release commit through a
   protected main; without it the job falls back to `GITHUB_TOKEN`.
   `INTEGRATION_TOKEN` (secret) is for the nightly integration run.
-- Do **not** create tags or releases by hand without explicit approval.
-
-### When to add the `windows` label
-
-Add `windows` to a PR when it:
-
-- touches `cfg(windows)`, `cfg(unix)` or `target_os` code, or platform-specific modules
-- changes file paths, path separators, drive letters or case sensitivity; process spawning, PTY or shell quoting; environment variables; WSL
-- changes the Windows settings in `tauri.conf.json` (bundle, NSIS) or installer scripts
-- adds or upgrades a dependency with platform-specific code (`tauri`, `windows-rs`, `portable-pty`, …) or bumps the Rust toolchain
-- fixes a Windows bug
-
-Skip it for frontend-only, docs-only and purely cross-platform logic changes. If unsure, add it: `main` runs Windows after the merge anyway, and a failure there blocks the release.
-
-Windows-sensitive spots in this repo (all in `crates/argus-core/src/` unless noted):
-
-- `platform.rs`: finding `gh`, `glab`, `claude`, `auggie` (login shell on Unix, `where` and `%COMSPEC%` on Windows), `CREATE_NO_WINDOW`
-- `git/mod.rs` (git lookup, process spawning), `provider/github.rs` (spawning `gh`)
-- `ai/adapter.rs`: agent spawning, sandbox and absolute-path checks (`cfg!(windows)`)
-- `open/mod.rs` and `src-tauri/src/opener.rs`: opening files in an editor, what runs instead of opens (`RUNS_ON_OPEN_WINDOWS`)
-- `provider/gitlab.rs` (spawning `glab`), `accounts/cli.rs` (`gh`/`glab auth status`): `CREATE_NO_WINDOW`
-- `scripts/run.rs` and `scripts/save.rs`: running submit scripts (own process group on Unix, `CREATE_NO_WINDOW`) and saving them executable (Unix mode bits)
-- `git/discover.rs`: looking for local clones under the home folder (`USERPROFILE` on Windows)
-- `src-tauri/src/lib.rs` (macOS-only menu bar; the title-bar window controls and Settings gear elsewhere), `src-tauri/src/main.rs` (`windows_subsystem`)
-- `src-tauri/tauri.conf.json` (bundle, icons) and `build.yml` (NSIS installer)
-- tests with Unix fake scripts (`fake gh`, `fake glab`, fake agents, submit scripts, git fixtures; written with `tests/support/script.rs` `write_executable`) carry `#[cfg_attr(windows, ignore)]`; the Windows job runs clippy on the whole workspace but tests `-p argus-core` only, so `src-tauri` tests run on Linux only

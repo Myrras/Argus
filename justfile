@@ -1,9 +1,9 @@
 # Argus — development tasks. Run `just` to see them.
 # Shared recipes (dev, dev-signed, build, install-signed, check, test-core,
 # format, version, version-check, rust, frontend, ci, build-signed, sweep) come
-# from the ci-workflows clone: `ln -s /path/to/ci-workflows ~/.ci-workflows`.
+# from the rust-base clone: `ln -s /path/to/rust-base ~/.rust-base`.
 # Don't redefine them here.
-import? '~/.ci-workflows/common.just'
+import? '~/.rust-base/ci/common.just'
 
 # Show available recipes.
 default:

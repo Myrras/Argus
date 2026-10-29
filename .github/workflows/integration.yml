@@ -1,5 +1,10 @@
-# Nightly and on demand: `just test-integration`, the read-only GitHub provider
-# tests (crates/argus-core/tests/github_integration.rs).
+# Synced from rust-base (sync/files/); don't edit it in the app, the next sync
+# overwrites it. Per-app settings (runner, apt packages, WSL, env, recipe) go
+# in the `integration` section of .github/rust-base.json.
+#
+# Runs `just test-integration` (or the configured recipe) from this repo's
+# justfile. Off the per-PR path on purpose: image pulls, WSL and real external
+# services make these slow and occasionally flaky. Nightly and on demand.
 name: Integration tests
 
 on:
@@ -12,11 +17,8 @@ permissions:
 
 jobs:
   integration:
-    uses: RobbieMinderhoud/ci-workflows/.github/workflows/integration.yml@v1
-    # The GitHub provider talks to the real API (read-only); gh ships on the
-    # ubuntu runner. GitLab is internal, so it has no real-API test.
-    # libdbus: argus-core links the Secret Service keyring backend on Linux.
-    with:
-      apt-packages: libdbus-1-dev pkg-config
+    uses: RobbieMinderhoud/rust-base/.github/workflows/reusable-integration.yml@v2
     secrets:
+      # Exposed to the test step as env INTEGRATION_TOKEN; empty when the repo
+      # has no such secret.
       INTEGRATION_TOKEN: ${{ secrets.INTEGRATION_TOKEN }}
