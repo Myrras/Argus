@@ -25,7 +25,7 @@ sha1_smol = "1"
 rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
 # The then/now line diff of thread history. 2.x: 3.x needs Rust 1.85, the
 # workspace targets 1.82.
-similar = "2.7"
+similar = "3.2"
 
 [dev-dependencies]
 tempfile = "3"
