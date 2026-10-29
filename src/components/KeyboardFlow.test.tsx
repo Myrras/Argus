@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import { registerDiffEditor, threadBlockKey } from "../lib/diffEditors";
 import { runFlowAction } from "../lib/keyboardFlow";
@@ -48,7 +49,7 @@ const NOW = Date.parse("2026-10-16T12:00:00Z");
 const r = review({ title: "Fixture cache change" });
 const other = review({ title: "Fixture docs tweak", status: "needsReReview" });
 const t = thread({ reviewId: r.id, author: "bob-fixture", anchor: null });
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 
 /** The writes; the palette never runs one by itself. */
 const WRITES = [

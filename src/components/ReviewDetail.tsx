@@ -4,16 +4,20 @@
  * threads inline). Without a selection the island shows the
  * `WelcomeScreen`.
  *
- * The header reads top-down: the title, with the actions top right (the AI
- * group, pending comments with "Post all", then the review's verdict slot:
- * "Submit review…"); where the review lives and who wrote it; then its
- * status with the round, the user's review state on the platform, the
- * reasons, GitLab's "N unresolved threads" (every thread of the review)
- * and what is untouched. Under a narrow island the actions move
- * below (container query). Beside the ref: open it on the platform, and
- * refresh this review alone (spinning while it runs; the full refresh in
- * the title bar stays free). The meta row ends with the local-clone chip
- * (`CloneChip`: found, missing, or none set).
+ * The header has three zones, grouped by meaning. The title, with the
+ * actions top right (the AI group, pending comments with "Post all", then
+ * the review's verdict slot: "Submit review…"). The status line, loudest
+ * after the title: what needs you and why (draft / merged, the status with
+ * its round as one pill, the user's review state on the platform, the
+ * reasons unboxed with an icon each, what is untouched, and faint at the
+ * end when Argus last saw it). Then the context bar, a quieter strip: the
+ * reference facts left (platform and ref with open-on-the-platform and
+ * refresh-this-review, spinning while it runs; the author; when it was
+ * updated; the local-clone chip, `CloneChip`: found, missing, or none
+ * set), GitLab's "N unresolved threads" with ⌃ ⌄ right (every thread of
+ * the review). Every group wraps as a whole; under a narrow island the
+ * actions move below the status line and the navigation below the facts
+ * (container queries).
  *
  * Submitting a review (Approve / Request changes / on GitHub Comment) is
  * its own explicit action in `SubmitReviewModal`: it names the head being
@@ -23,7 +27,12 @@
  * one (`ReviewDialogs`).
  */
 
-import type { ReviewRecord, StoredThread } from "../ipc/types";
+import type {
+  ReviewRecord,
+  ReviewStatus,
+  RoundReason,
+  StoredThread,
+} from "../ipc/types";
 import { resolutionLabel, unresolvedCount } from "../lib/diffThreads";
 import { withHint } from "../lib/keymap";
 import { openExternal } from "../lib/links";
@@ -45,17 +54,36 @@ import { useThreadStore } from "../state/threadStore";
 import { AiStatus } from "./AiStatus";
 import { Badge, PlatformBadge } from "./Badge";
 import { CloneChip } from "./CloneChip";
+import { CloneSuggestionBar } from "./CloneSuggestionBar";
 import {
+  AuthorRepliedIcon,
+  CommitIcon,
   ExternalLinkIcon,
   NextThreadIcon,
   OpenThreadIcon,
   PrevThreadIcon,
+  ReRequestedIcon,
   RefreshIcon,
   ResolvedIcon,
 } from "./icons";
 import { ReviewView } from "./ReviewView";
 import { WelcomeScreen } from "./WelcomeScreen";
 import styles from "./ReviewDetail.module.css";
+
+/** The status pill's hue: accent while it is with you, success once approved. */
+const STATUS_TONE: Record<ReviewStatus, "accent" | "success" | "neutral"> = {
+  needsReview: "accent",
+  needsReReview: "accent",
+  waitingOnAuthor: "neutral",
+  closedWithoutApproval: "neutral",
+  approved: "success",
+};
+
+const REASON_ICON: Record<RoundReason, typeof CommitIcon> = {
+  newCommits: CommitIcon,
+  authorReplied: AuthorRepliedIcon,
+  reRequested: ReRequestedIcon,
+};
 
 export function ReviewDetail({ now }: { now: number }) {
   const review = useReviewStore((s) =>
@@ -151,59 +179,23 @@ function ReviewHeader({
             </button>
           </div>
         </div>
-        <div className={styles.meta}>
-          <PlatformBadge provider={r.provider} />
-          <span className={styles.ref}>
-            <span className={`${styles.refText} mono`}>{reviewRef(r)}</span>
-            <button
-              type="button"
-              className={`iconButton ${styles.open}`}
-              onClick={() => openExternal(r.url)}
-              aria-label={`Open in ${PROVIDER_LABEL[r.provider]}`}
-              title={`Open in ${PROVIDER_LABEL[r.provider]}: ${r.url}`}
-            >
-              <ExternalLinkIcon />
-            </button>
-            <button
-              type="button"
-              className={`iconButton ${styles.open} ${styles.refresh}`}
-              onClick={() => void refreshOne(r.id)}
-              disabled={refreshingThis}
-              aria-busy={refreshingThis || undefined}
-              data-spinning={refreshingThis ? "true" : undefined}
-              aria-label="Refresh this review"
-              title={withHint("Refresh this review", keymap, "refreshReview")}
-            >
-              <RefreshIcon size={13} />
-            </button>
-          </span>
+        {/* What needs you and why: the loudest line under the title. */}
+        <div
+          className={styles.status}
+          role="group"
+          aria-label="Review status"
+          data-slot="review-status"
+        >
           {r.draft && <Badge>Draft</Badge>}
           {r.state !== "open" && (
             <Badge tone={r.state === "merged" ? "accent" : "neutral"}>
               {r.state === "merged" ? "Merged" : "Closed"}
             </Badge>
           )}
-          <span>
-            by <strong>{r.author}</strong>
-          </span>
-          {r.updatedAt && (
-            <span title={fullTime(r.updatedAt)}>
-              updated {ago(r.updatedAt, now)}
-            </span>
-          )}
-          <CloneChip review={r} />
-        </div>
-        <div className={styles.status}>
-          {/* The status and its round read as one: "Needs re-review · R2". */}
-          <span
-            className={styles.statusPill}
-            data-tone={r.status === "needsReReview" ? "accent" : "neutral"}
-          >
+          {/* The status and its round read as one: "Needs re-review | Round 2". */}
+          <span className={styles.statusPill} data-tone={STATUS_TONE[r.status]}>
             <span>{STATUS_LABEL[r.status]}</span>
-            <span className={styles.round} title={`Round ${r.round}`}>
-              <span aria-hidden>R{r.round}</span>
-              <span className="visually-hidden">Round {r.round}</span>
-            </span>
+            <span className={styles.round}>Round {r.round}</span>
           </span>
           {myState && (
             <span
@@ -214,12 +206,19 @@ function ReviewHeader({
               {myState}
             </span>
           )}
-          {r.roundReasons.map((reason) => (
-            <Badge key={reason} tone="accent">
-              {REASON_LABEL[reason]}
-            </Badge>
-          ))}
-          <Resolution reviewId={r.id} />
+          {r.roundReasons.length > 0 && (
+            <ul className={styles.reasons} aria-label="Why it is back">
+              {r.roundReasons.map((reason) => {
+                const Glyph = REASON_ICON[reason];
+                return (
+                  <li key={reason}>
+                    <Glyph size={13} className={styles.reasonIcon} />
+                    {REASON_LABEL[reason]}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
           {untouched && <span className={styles.untouched}>{untouched}</span>}
           {r.lastReviewedAt && (
             <span
@@ -230,6 +229,65 @@ function ReviewHeader({
             </span>
           )}
         </div>
+        {/* Reference facts left, the thread navigation right. Each group
+            wraps as a whole. */}
+        <div className={styles.context}>
+          <div
+            className={styles.facts}
+            role="group"
+            aria-label="Review details"
+            data-slot="review-meta"
+          >
+            <span className={styles.fact}>
+              <PlatformBadge provider={r.provider} />
+              <span className={styles.ref}>
+                <span className={`${styles.refText} mono`}>{reviewRef(r)}</span>
+                <button
+                  type="button"
+                  className={`iconButton ${styles.open}`}
+                  onClick={() => openExternal(r.url)}
+                  aria-label={`Open in ${PROVIDER_LABEL[r.provider]}`}
+                  title={`Open in ${PROVIDER_LABEL[r.provider]}: ${r.url}`}
+                >
+                  <ExternalLinkIcon />
+                </button>
+                <button
+                  type="button"
+                  className={`iconButton ${styles.open} ${styles.refresh}`}
+                  onClick={() => void refreshOne(r.id)}
+                  disabled={refreshingThis}
+                  aria-busy={refreshingThis || undefined}
+                  data-spinning={refreshingThis ? "true" : undefined}
+                  aria-label="Refresh this review"
+                  title={withHint(
+                    "Refresh this review",
+                    keymap,
+                    "refreshReview",
+                  )}
+                >
+                  <RefreshIcon size={13} />
+                </button>
+              </span>
+            </span>
+            <span className={styles.fact}>
+              <span className={styles.author}>
+                by{" "}
+                <strong className={styles.authorName} title={r.author}>
+                  {r.author}
+                </strong>
+              </span>
+            </span>
+            {r.updatedAt && (
+              <span className={styles.fact} title={fullTime(r.updatedAt)}>
+                updated {ago(r.updatedAt, now)}
+              </span>
+            )}
+            <CloneChip review={r} />
+          </div>
+          <Resolution reviewId={r.id} />
+        </div>
+        {/* Full width under the facts; nothing when there is no offer. */}
+        <CloneSuggestionBar review={r} />
       </div>
     </header>
   );
@@ -243,7 +301,7 @@ const NO_THREADS: StoredThread[] = [];
  * be resolved. Follows the thread store, so a resolve moves it at once.
  * GitLab's ⌃ / ⌄ beside it jump to the previous / next unresolved thread
  * (`prevOpenThread` / `nextOpenThread`, as the palette runs them; "No more
- * open threads" at an end); none when everything is resolved.
+ * open threads" when none; they wrap around); none when everything is resolved.
  */
 function Resolution({ reviewId }: { reviewId: ReviewRecord["id"] }) {
   const threads = useThreadStore(

@@ -38,6 +38,7 @@ vi.mock("./DiffEditor", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import type { Finding } from "../ipc/types";
 import { useAiStore } from "../state/aiStore";
@@ -47,7 +48,7 @@ import { aiRun, finding } from "../test/aiFixtures";
 import { file, reviewFiles } from "../test/fixtures";
 import { FileDiffCard } from "./FileDiffCard";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const initial = useAiStore.getState();
 const files = reviewFiles();
 const ID = files.reviewId;
@@ -186,42 +187,44 @@ describe("findings in the code view", () => {
 
   it("select, edit with a preview, and dismiss inline; nothing posts", async () => {
     renderCard();
-    const block = await screen.findByRole("article", {
-      name: "AI finding: Unbounded cache",
-    });
+    // Looked up anew each time: the block re-renders as the file's
+    // commentable lines arrive, whenever that is.
+    const name = { name: "AI finding: Unbounded cache" };
+    await screen.findByRole("article", name);
+    const block = () => screen.getByRole("article", name);
     const id = findings[0].id;
     fireEvent.click(
-      within(block).getByRole("checkbox", {
+      within(block()).getByRole("checkbox", {
         name: 'Select "Unbounded cache" for posting',
       }),
     );
     expect(useAiStore.getState().ui[id]?.selected).toBe(true);
 
-    fireEvent.click(within(block).getByRole("button", { name: "Edit" }));
-    const field = within(block).getByRole("textbox", {
+    fireEvent.click(within(block()).getByRole("button", { name: "Edit" }));
+    const field = within(block()).getByRole("textbox", {
       name: 'Edit finding "Unbounded cache"',
     });
     expect(field).toHaveValue(`**Unbounded cache**\n\n${findings[0].body}`);
     fireEvent.change(field, { target: { value: "**Cap it**\n\nUse an LRU." } });
-    fireEvent.click(within(block).getByRole("tab", { name: "Preview" }));
-    expect(within(block).getByTestId("composer-preview")).toHaveTextContent(
+    fireEvent.click(within(block()).getByRole("tab", { name: "Preview" }));
+    expect(within(block()).getByTestId("composer-preview")).toHaveTextContent(
       "Use an LRU.",
     );
-    fireEvent.click(within(block).getByRole("button", { name: "Save edit" }));
+    fireEvent.click(within(block()).getByRole("button", { name: "Save edit" }));
     expect(useAiStore.getState().ui[id]?.edit).toBe(
       "**Cap it**\n\nUse an LRU.",
     );
-    expect(within(block).getByText("Edited")).toBeInTheDocument();
-    expect(within(block).getByText("Use an LRU.")).toBeInTheDocument();
+    expect(within(block()).getByText("Edited")).toBeInTheDocument();
+    expect(within(block()).getByText("Use an LRU.")).toBeInTheDocument();
 
     // Back to the AI's text.
-    fireEvent.click(within(block).getByRole("button", { name: "Edit" }));
+    fireEvent.click(within(block()).getByRole("button", { name: "Edit" }));
     fireEvent.click(
-      within(block).getByRole("button", { name: "Reset to AI text" }),
+      within(block()).getByRole("button", { name: "Reset to AI text" }),
     );
     expect(useAiStore.getState().ui[id]?.edit).toBeNull();
 
-    fireEvent.click(within(block).getByRole("button", { name: "Dismiss" }));
+    fireEvent.click(within(block()).getByRole("button", { name: "Dismiss" }));
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("dismiss_finding", {
         findingId: id,

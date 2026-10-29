@@ -5,14 +5,19 @@
  * its status, +/− counts, the user's open thread count and
  * a Viewed checkbox. Selecting an entry scrolls the page to it.
  *
+ * With whitespace changes hidden (`hideWhitespace`) the +/− are the
+ * patch's with whitespace ignored, and a file that changed only in
+ * whitespace gets a quiet ␣ mark instead (`lib/whitespace`).
+ *
  * Open in editor: `fileAction` renders a per-file button (shown on hover or
  * focus, `OpenInEditorButton`) and `onFileContextMenu` the file menu.
  */
 
-import { useState } from "react";
+import { memo, useState } from "react";
 
 import type { FileEntry } from "../ipc/types";
 import { buildTree, type TreeNode } from "../lib/fileTree";
+import { fileWhitespaceStats, shownLineStats } from "../lib/whitespace";
 import type { FileListMode } from "../state/layoutStore";
 import {
   FileStatusMark,
@@ -31,6 +36,8 @@ export interface FileTreeProps {
   counts: ReadonlyMap<string, number>;
   onSelect: (path: string) => void;
   onToggleViewed: (file: FileEntry) => void;
+  /** Counts and marks as seen with whitespace changes hidden. */
+  hideWhitespace?: boolean;
   /** Shown when `files` is empty; `null` shows nothing. */
   empty?: string | null;
   /** The Conversation entry above the files. */
@@ -63,9 +70,7 @@ export function FileTree(props: FileTreeProps) {
   const rows =
     mode === "tree"
       ? renderNodes(buildTree(files), 0, closed, toggleDir, props)
-      : files.map((f) => (
-          <FileRow key={f.path} file={f} depth={0} label={f.path} {...props} />
-        ));
+      : files.map((f) => row(f, 0, f.path, props));
   return (
     <>
       <ul className={styles.tree} role="tree" aria-label="Changed files">
@@ -109,17 +114,7 @@ function renderNodes(
   props: FileTreeProps,
 ): React.ReactNode[] {
   return nodes.flatMap((n) => {
-    if (n.kind === "file") {
-      return [
-        <FileRow
-          key={n.file.path}
-          file={n.file}
-          depth={depth}
-          label={n.name}
-          {...props}
-        />,
-      ];
-    }
+    if (n.kind === "file") return [row(n.file, depth, n.name, props)];
     const open = !closed.has(n.path);
     return [
       <li
@@ -156,19 +151,56 @@ function indent(depth: number): string {
   return `calc(var(--sp-2) + ${depth} * var(--sp-3))`;
 }
 
-function FileRow({
+/**
+ * One file's row, with only what it shows as props: a review of a thousand
+ * files re-renders the rows whose file, selection or count changed, not
+ * all of them (`FileRow` is memoized; the callbacks are the page's stable
+ * ones).
+ */
+function row(f: FileEntry, depth: number, label: string, props: FileTreeProps) {
+  return (
+    <FileRow
+      key={f.path}
+      file={f}
+      depth={depth}
+      label={label}
+      selected={props.selected === f.path}
+      count={props.counts.get(f.path) ?? 0}
+      onSelect={props.onSelect}
+      onToggleViewed={props.onToggleViewed}
+      fileAction={props.fileAction}
+      onFileContextMenu={props.onFileContextMenu}
+      hideWhitespace={props.hideWhitespace ?? false}
+    />
+  );
+}
+
+const FileRow = memo(function FileRow({
   file: f,
   depth,
   label,
-  selected,
-  counts,
+  selected: isSelected,
+  count,
   onSelect,
   onToggleViewed,
   fileAction,
   onFileContextMenu,
-}: FileTreeProps & { file: FileEntry; depth: number; label: string }) {
-  const count = counts.get(f.path) ?? 0;
-  const isSelected = selected === f.path;
+  hideWhitespace,
+}: {
+  file: FileEntry;
+  depth: number;
+  label: string;
+  selected: boolean;
+  count: number;
+  onSelect: (path: string) => void;
+  onToggleViewed: (file: FileEntry) => void;
+  fileAction?: (file: FileEntry) => React.ReactNode;
+  onFileContextMenu?: (file: FileEntry, e: React.MouseEvent) => void;
+  hideWhitespace: boolean;
+}) {
+  const stats = shownLineStats(f, hideWhitespace);
+  const whitespaceOnly =
+    hideWhitespace && fileWhitespaceStats(f)?.whitespaceOnly === true;
   return (
     <li
       role="treeitem"
@@ -190,7 +222,17 @@ function FileRow({
         <FileStatusMark status={f.status} />
         <span className={styles.name}>{label}</span>
         <MyOpenThreads count={count} />
-        <LineStats additions={f.additions} deletions={f.deletions} />
+        {whitespaceOnly ? (
+          <span
+            className={styles.whitespaceOnly}
+            title="Only whitespace changes (hidden)"
+            aria-label="Only whitespace changes"
+          >
+            ␣
+          </span>
+        ) : (
+          <LineStats additions={stats.additions} deletions={stats.deletions} />
+        )}
       </button>
       {fileAction && <span className={styles.fileAction}>{fileAction(f)}</span>}
       <input
@@ -203,4 +245,4 @@ function FileRow({
       />
     </li>
   );
-}
+});

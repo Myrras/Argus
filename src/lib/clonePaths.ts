@@ -1,5 +1,5 @@
 /**
- * Settings → AI → Local clones: the local checkout per repository
+ * Settings → Repositories → Local clone: the local checkout per repository
  * (`Settings.clonePaths`, `host/repo` → folder), Iris's editor-overrides
  * pattern. The core looks a review's clone up by `host/repo` exactly as the
  * provider reports it, so the key is only tidied (trimmed, scheme, `.git`

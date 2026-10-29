@@ -20,6 +20,22 @@ import type { Text } from "@codemirror/state";
 import type { FileEntry, StoredThread } from "../ipc/types";
 import { splitThreads } from "./reviews";
 
+/**
+ * "on lines 12–18 (outside the diff)" for a GitHub file comment Argus posted
+ * on unchanged lines (`anchor.outsideDiff`); null for any other thread.
+ */
+export function outsideDiffLabel(
+  t: Pick<StoredThread, "anchor">,
+): string | null {
+  const a = t.anchor;
+  if (!a?.outsideDiff || a.lineNew === null) return null;
+  const lines =
+    a.startLine !== null && a.startLine !== a.lineNew
+      ? `lines ${a.startLine}–${a.lineNew}`
+      : `line ${a.lineNew}`;
+  return `on ${lines} (outside the diff)`;
+}
+
 /** One side of the split view: `a` the base (left), `b` the head (right). */
 export type DiffSide = "a" | "b";
 
@@ -152,15 +168,16 @@ export function resolutionLabel(list: readonly StoredThread[]): string | null {
   return `${n} unresolved ${n === 1 ? "thread" : "threads"}`;
 }
 
-/** Total and mine, for the file tree and the card header. */
+/**
+ * Open threads (as `unresolvedCount`) and how many of them are the user's
+ * (`myOpenCount`), for the card headers. A resolved thread counts in
+ * neither, outdated or not.
+ */
 export function threadCounts(threads: readonly StoredThread[]): {
-  total: number;
+  open: number;
   mine: number;
 } {
-  return {
-    total: threads.length,
-    mine: threads.filter((t) => t.mine).length,
-  };
+  return { open: unresolvedCount(threads), mine: myOpenCount(threads) };
 }
 
 /**
@@ -245,7 +262,13 @@ export function mapOldLine(
     startA = c.toA;
     startB = c.toB;
   }
-  return b.lineAt(Math.min(b.length, startB + (pos - startA))).number;
+  // By lines, not characters: with whitespace changes hidden
+  // (`lib/whitespaceDiff`) an unchanged line may differ in whitespace, but
+  // the unchanged stretch has as many lines on both sides.
+  const lineOf = (t: Text, at: number) =>
+    at > t.length ? t.lines + 1 : t.lineAt(at).number;
+  const n = lineOf(b, startB) + (a.lineAt(pos).number - lineOf(a, startA));
+  return Math.min(Math.max(n, 1), b.lines);
 }
 
 /**

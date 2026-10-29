@@ -1,0 +1,110 @@
+/* Settings → Repositories. The cards are SettingsModal's (.card,
+   .cardHeader); this lays out the three settings inside one. */
+
+.card {
+  transition: border-color var(--dur-2) var(--ease-out);
+}
+
+/* The repository the tab was opened on (the clone chip, the suggestion). */
+.card[data-highlighted="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.count {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* Quiet: a fact, not a warning. */
+.tag {
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* One setting: its label over its control. */
+.setting {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+
+.label {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.clone {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.clone > :first-child {
+  min-width: 0;
+}
+
+.clone > :last-child {
+  flex: none;
+  margin-left: auto;
+}
+
+.cloneLine {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.state[data-state="found"] {
+  color: var(--success);
+}
+
+.state[data-state="missing"],
+.state[data-state="notRepository"] {
+  color: var(--warning);
+}
+
+.stateIcon {
+  flex-shrink: 0;
+}
+
+.muted {
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}

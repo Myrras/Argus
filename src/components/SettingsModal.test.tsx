@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,22 +20,28 @@ vi.mock("@tauri-apps/plugin-log", () => ({
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import type { Settings } from "../ipc/types";
+import type { Account, Settings } from "../ipc/types";
 import { useAiStore } from "../state/aiStore";
 import { useBackendSettingsStore } from "../state/backendSettingsStore";
 import { useSettingsRequestStore } from "../state/settingsRequestStore";
 import { useSettingsStore } from "../state/settingsStore";
 import { useThemeStore } from "../state/themeStore";
 import { useToastStore } from "../state/toastStore";
-import { settings, status } from "../test/fixtures";
+import { account, accounts, settings } from "../test/fixtures";
 import { SettingsModal } from "./SettingsModal";
 
 const mockInvoke = vi.mocked(invoke);
 const initialBackend = useBackendSettingsStore.getState();
-const TOKEN = "glpat-fixture-not-a-real-token";
-
-/** A fake core: `update_settings` stores what it gets. */
-function backend(initial: Settings, tokenPresent: boolean) {
+/**
+ * A fake core: `update_settings` stores what it gets; `list_accounts`
+ * answers `rows` with the stored choices applied, and with `recheck` (Check
+ * again) the CLIs' answer now, `after` when given.
+ */
+function backend(
+  initial: Settings,
+  rows: Account[] = accounts(),
+  after?: Account[],
+) {
   let stored = initial;
   mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
@@ -43,13 +50,13 @@ function backend(initial: Settings, tokenPresent: boolean) {
       case "update_settings":
         stored = (args as { settings: Settings }).settings;
         return Promise.resolve(stored);
-      case "set_gitlab_token":
-        tokenPresent = (args as { token: string }).token !== "";
-        return Promise.resolve(undefined);
-      case "gitlab_token_present":
-        return Promise.resolve(tokenPresent);
-      case "provider_status":
-        return Promise.resolve(status());
+      case "list_accounts": {
+        const recheck = (args as { recheck: boolean }).recheck;
+        const now = recheck && after ? after : rows;
+        return Promise.resolve(
+          now.map((a) => ({ ...a, ...stored.accounts[a.key] })),
+        );
+      }
       default:
         return Promise.resolve(undefined);
     }
@@ -78,7 +85,7 @@ beforeEach(() => {
   useSettingsRequestStore.getState().clear();
   useBackendSettingsStore.setState({ ...initialBackend }, true);
   useToastStore.setState({ toasts: [] });
-  backend(settings(), false);
+  backend(settings());
 });
 
 describe("SettingsModal — General tab", () => {
@@ -127,204 +134,266 @@ describe("SettingsModal — General tab", () => {
     expect(updates()).toEqual([{ ...settings(), pollIntervalSecs: 240 }]);
   });
 
-  it("opens on the tab a settings request asks for", () => {
-    useSettingsRequestStore.getState().open("gitlab");
+  it("shows the disk cache, steps its limit and clears it", async () => {
+    let stats = { entries: 1200, bytes: 300 * 1024 * 1024 };
+    const inner = mockInvoke.getMockImplementation()!;
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
+      if (cmd === "cache_stats") return Promise.resolve(stats);
+      if (cmd === "clear_cache") {
+        stats = { entries: 0, bytes: 0 };
+        return Promise.resolve(stats);
+      }
+      return inner(cmd, args as never);
+    });
     render(<SettingsModal open onClose={() => undefined} />);
-    expect(screen.getByRole("tab", { name: "GitLab" })).toHaveAttribute(
+    expect(
+      await screen.findByText("300 MB in 1200 entries"),
+    ).toBeInTheDocument();
+    // No limit stored yet: the default.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Cache limit")).toHaveTextContent("512 MB"),
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Increase cache limit" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("Cache limit")).toHaveTextContent("1 GB"),
+    );
+    expect(updates()).toEqual([{ ...settings(), cacheLimitMb: 1024 }]);
+    fireEvent.click(screen.getByRole("button", { name: "Clear cache" }));
+    expect(await screen.findByText("0.0 MB in 0 entries")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear cache" })).toBeDisabled();
+  });
+
+  it("opens on the tab a settings request asks for", () => {
+    useSettingsRequestStore.getState().open("accounts");
+    render(<SettingsModal open onClose={() => undefined} />);
+    expect(screen.getByRole("tab", { name: "Accounts" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
   });
+
+  it("has one Accounts tab in place of GitHub and GitLab", () => {
+    render(<SettingsModal open onClose={() => undefined} />);
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "General",
+      "Accounts",
+      "AI",
+      "Repositories",
+      "Editors",
+      "Scripts",
+      "Shortcuts",
+    ]);
+  });
 });
 
-describe("SettingsModal — GitHub tab", () => {
-  it("turns GitHub off at once", async () => {
-    await renderTab("GitHub");
-    const toggle = screen.getByRole("switch", { name: "Use GitHub" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
+describe("SettingsModal — Accounts tab", () => {
+  const GITLAB = "gitlab.example.test";
+  const LOGIN = `glab auth login --hostname ${GITLAB}`;
+  /** Every command the dialog sent, by name. */
+  const sent = () => mockInvoke.mock.calls.map(([cmd]) => cmd);
+  const card = (name: string) => screen.getByRole("group", { name });
+
+  it("lists every host of gh and glab, logged in, never asking for a token", async () => {
+    await renderTab("Accounts");
+    expect(
+      screen.getByText(/never sees or stores a token/),
+    ).toBeInTheDocument();
+    const gh = await screen.findByRole("group", { name: "GitHub github.com" });
+    expect(within(gh).getByText("Logged in as rev-fixture")).toBeVisible();
+    expect(
+      within(gh).getByRole("switch", { name: "Use GitHub at github.com" }),
+    ).toHaveAttribute("aria-checked", "true");
+    const gl = card(`GitLab ${GITLAB}`);
+    expect(within(gl).getByText("Logged in as rev-fixture")).toBeVisible();
+    // Logged in: no login command on the card.
+    expect(within(gl).queryByText(LOGIN)).not.toBeInTheDocument();
+    // gh and glab hold the logins: no token field at all.
+    expect(screen.queryByLabelText(/token/i)).not.toBeInTheDocument();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(sent().every((c) => !c.includes("token"))).toBe(true);
+  });
+
+  it("switches a host off at once", async () => {
+    await renderTab("Accounts");
+    const toggle = await screen.findByRole("switch", {
+      name: `Use GitLab at ${GITLAB}`,
+    });
     fireEvent.click(toggle);
     await waitFor(() =>
       expect(toggle).toHaveAttribute("aria-checked", "false"),
     );
     expect(updates()).toEqual([
-      { ...settings(), github: { ...settings().github, enabled: false } },
+      {
+        ...settings(),
+        accounts: { [`gitlab:${GITLAB}`]: { enabled: false, account: null } },
+      },
     ]);
+    expect(within(card(`GitLab ${GITLAB}`)).getByText("Off")).toBeVisible();
   });
 
-  it("saves the host and account from the form", async () => {
-    await renderTab("GitHub");
-    const save = screen.getByRole("button", { name: "Save" });
-    expect(save).toBeDisabled();
-    fireEvent.change(screen.getByLabelText("Account (optional)"), {
-      target: { value: " work-fixture " },
+  it("shows a host that is not logged in off, with its login command", async () => {
+    backend(settings(), [
+      account({
+        provider: "gitlab",
+        host: "gitlab.com",
+        key: "gitlab:gitlab.com",
+        enabled: false,
+        state: { kind: "notLoggedIn", message: null },
+        loginCommand: "glab auth login --hostname gitlab.com",
+      }),
+    ]);
+    await renderTab("Accounts");
+    const toggle = await screen.findByRole("switch", {
+      name: "Use GitLab at gitlab.com",
     });
-    fireEvent.click(save);
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(
+      within(card("GitLab gitlab.com")).getByText(
+        "glab auth login --hostname gitlab.com",
+      ),
+    ).toBeVisible();
+  });
+
+  it("picks one of several gh accounts on a host", async () => {
+    backend(settings(), [
+      account({
+        accounts: ["rev-fixture", "work-fixture"],
+        active: "rev-fixture",
+      }),
+    ]);
+    await renderTab("Accounts");
+    const picker = await screen.findByLabelText("gh account");
+    expect(picker).toHaveValue("");
+    expect(
+      screen.getByRole("option", { name: "gh's active account (rev-fixture)" }),
+    ).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: "work-fixture" } });
     await waitFor(() =>
       expect(updates()).toEqual([
         {
           ...settings(),
-          github: {
-            enabled: true,
-            host: "github.com",
-            account: "work-fixture",
+          accounts: {
+            "github:github.com": { enabled: true, account: "work-fixture" },
           },
         },
       ]),
     );
+    await waitFor(() => expect(picker).toHaveValue("work-fixture"));
+  });
+
+  it("has no picker for a host with one gh account", async () => {
+    await renderTab("Accounts");
+    await screen.findByRole("group", { name: "GitHub github.com" });
+    expect(screen.queryByLabelText("gh account")).not.toBeInTheDocument();
+  });
+
+  it("gives the exact login command for a host not logged in, and checks again", async () => {
+    const loggedOut = account({
+      provider: "gitlab",
+      host: GITLAB,
+      user: null,
+      state: {
+        kind: "notLoggedIn",
+        message: `glab has no working login for ${GITLAB}.`,
+      },
+    });
+    backend(settings(), [account(), loggedOut], accounts());
+    await renderTab("Accounts");
+    const gl = await screen.findByRole("group", { name: `GitLab ${GITLAB}` });
+    expect(within(gl).getByText("Not logged in")).toBeVisible();
+    expect(
+      within(gl).getByText(`glab has no working login for ${GITLAB}.`),
+    ).toBeVisible();
+    // In a code block (highlighted once loaded) with its own copy button.
+    expect(gl).toHaveTextContent(LOGIN);
+    expect(within(gl).getByRole("button", { name: "Copy code" })).toBeVisible();
+
+    mockInvoke.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    // The forced check: the core asks the CLIs even with a current answer.
     await waitFor(() =>
-      expect(useToastStore.getState().toasts).toMatchObject([
-        { kind: "success", message: "GitHub settings saved" },
+      expect(mockInvoke.mock.calls).toEqual([
+        ["list_accounts", { recheck: true }],
       ]),
     );
-  });
-});
-
-describe("SettingsModal — GitLab tab", () => {
-  it("sends the token only to set_gitlab_token, after the settings", async () => {
-    await renderTab("GitLab");
-    expect(screen.getByText("Not set")).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("Base URL"), {
-      target: { value: "https://gitlab.example.test" },
-    });
-    fireEvent.change(screen.getByLabelText("Personal access token"), {
-      target: { value: TOKEN },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-
-    await waitFor(() => expect(screen.getByText("Token set")).toBeVisible());
-    const calls = mockInvoke.mock.calls.map(([cmd]) => cmd);
-    expect(calls.indexOf("update_settings")).toBeLessThan(
-      calls.indexOf("set_gitlab_token"),
-    );
-    expect(JSON.stringify(updates())).not.toContain(TOKEN);
-    expect(updates()).toEqual([
-      { ...settings(), gitlab: { baseUrl: "https://gitlab.example.test" } },
-    ]);
-    expect(mockInvoke).toHaveBeenCalledWith("set_gitlab_token", {
-      token: TOKEN,
-    });
-    // The field never shows the token back.
-    expect(screen.getByLabelText("Personal access token")).toHaveValue("");
-  });
-
-  it("keeps the stored token unless it is replaced or removed", async () => {
-    backend(
-      settings({ gitlab: { baseUrl: "https://gitlab.example.test" } }),
-      true,
-    );
-    await renderTab("GitLab");
-    await waitFor(() => expect(screen.getByText("Token set")).toBeVisible());
-    expect(screen.getByLabelText("Personal access token")).toHaveValue("");
-    // Nothing changed: nothing to save, and the token is kept.
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Remove token" }));
-    await waitFor(() => expect(screen.getByText("Not set")).toBeVisible());
-    expect(mockInvoke).toHaveBeenCalledWith("set_gitlab_token", { token: "" });
-    expect(updates()).toEqual([]);
-  });
-
-  it("warns under the URL while it is plain http off this machine", async () => {
-    await renderTab("GitLab");
-    const url = screen.getByLabelText("Base URL");
-    const warning = () =>
-      screen.queryByText(
-        "Plain http: your token travels unencrypted. Only use this on a trusted network, such as a VPN.",
-      );
-    expect(warning()).not.toBeInTheDocument();
-    for (const quiet of [
-      "https://gitlab.example.test",
-      "http://localhost:8080",
-      "http://127.0.0.1:3000",
-      "http://[::1]:8080",
-    ]) {
-      fireEvent.change(url, { target: { value: quiet } });
-      expect(warning(), quiet).not.toBeInTheDocument();
-    }
-    fireEvent.change(url, { target: { value: "http://gitlab.vpn.test" } });
-    expect(warning()).toBeInTheDocument();
-    // Not blocking: no alert, no toast, and Save still works.
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(updates()).toEqual([
-        { ...settings(), gitlab: { baseUrl: "http://gitlab.vpn.test" } },
-      ]),
+      expect(
+        within(card(`GitLab ${GITLAB}`)).getByText("Logged in as rev-fixture"),
+      ).toBeVisible(),
     );
-    expect(
-      useToastStore.getState().toasts.every((t) => t.kind !== "error"),
-    ).toBe(true);
   });
 
-  it("says why a plain http instance asks for its token again", async () => {
-    const note = () =>
-      screen.queryByText(
-        "Plain http needs its own token; enter it to send it unencrypted.",
-      );
-    const http = { baseUrl: "http://gitlab.vpn.test" };
-    backend(settings({ gitlab: http }), false);
-    mockInvoke.mockImplementation(
-      ((answer) => (cmd: string, args?: unknown) =>
-        cmd === "provider_status"
-          ? Promise.resolve(
-              status({
-                gitlab: {
-                  configured: true,
-                  baseUrl: http.baseUrl,
-                  tokenPresent: false,
-                  problem: null,
-                  insecure: true,
-                },
-              }),
-            )
-          : answer(cmd, args as never))(mockInvoke.getMockImplementation()!),
-    );
-    await renderTab("GitLab");
-    await waitFor(() => expect(note()).toBeInTheDocument());
-    // Typing an https URL instead: the note is about plain http only.
-    fireEvent.change(screen.getByLabelText("Base URL"), {
-      target: { value: "https://gitlab.vpn.test" },
-    });
-    expect(note()).not.toBeInTheDocument();
-  });
-
-  it("refuses a token without a GitLab URL, and toasts backend errors", async () => {
-    await renderTab("GitLab");
-    fireEvent.change(screen.getByLabelText("Personal access token"), {
-      target: { value: TOKEN },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Set the GitLab URL before its token.",
-    );
-    expect(
-      mockInvoke.mock.calls.some(([cmd]) => cmd === "set_gitlab_token"),
-    ).toBe(false);
-
-    mockInvoke.mockImplementationOnce(() =>
-      Promise.reject({
-        kind: "invalidInput",
-        message: "the GitLab URL must start with https:// or http://",
-      }),
-    );
-    fireEvent.change(screen.getByLabelText("Base URL"), {
-      target: { value: "gitlab.example.test" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(useToastStore.getState().toasts).toMatchObject([
-        {
-          kind: "error",
-          message: "Could not save the settings",
-          detail: "the GitLab URL must start with https:// or http://",
+  it("says to install a missing CLI", async () => {
+    backend(settings(), [
+      account(),
+      account({
+        provider: "gitlab",
+        key: "gitlab:",
+        host: "",
+        user: null,
+        state: {
+          kind: "cliMissing",
+          hint: "Install the GitLab CLI (brew install glab), then run glab auth login.",
         },
-      ]),
-    );
-    // A failed save stores no token.
-    expect(
-      mockInvoke.mock.calls.some(([cmd]) => cmd === "set_gitlab_token"),
-    ).toBe(false);
+        loginCommand: "glab auth login",
+      }),
+    ]);
+    await renderTab("Accounts");
+    const gl = await screen.findByRole("group", { name: "GitLab GitLab" });
+    expect(within(gl).getByText("glab not found")).toBeVisible();
+    expect(within(gl).getByText(/brew install glab/)).toBeVisible();
+    expect(gl).toHaveTextContent("glab auth login");
+    // Nothing to switch without a host.
+    expect(within(gl).queryByRole("switch")).not.toBeInTheDocument();
+  });
+
+  it("tells a host it could not check apart from a missing login", async () => {
+    backend(settings(), [
+      account({
+        provider: "gitlab",
+        host: GITLAB,
+        state: { kind: "error", message: `glab could not reach ${GITLAB}.` },
+      }),
+    ]);
+    await renderTab("Accounts");
+    const gl = await screen.findByRole("group", { name: `GitLab ${GITLAB}` });
+    expect(within(gl).getByText("Couldn't check")).toBeVisible();
+    expect(within(gl).getByText(/could not reach/)).toBeVisible();
+    expect(within(gl).queryByText(LOGIN)).not.toBeInTheDocument();
+  });
+
+  it("fills a new host into both login commands", async () => {
+    await renderTab("Accounts");
+    const add = screen.getByRole("region", { name: "Add an account" });
+    expect(add).toHaveTextContent("gh auth login");
+    expect(add).not.toHaveTextContent("--hostname");
+    fireEvent.change(within(add).getByLabelText("Host (optional)"), {
+      target: { value: " ghe.example.test " },
+    });
+    await waitFor(() => {
+      expect(add).toHaveTextContent(
+        "gh auth login --hostname ghe.example.test",
+      );
+      expect(add).toHaveTextContent(
+        "glab auth login --hostname ghe.example.test",
+      );
+    });
+  });
+
+  it("opens on an account a request asks for, highlighted", async () => {
+    useSettingsRequestStore.getState().open("accounts", `gitlab:${GITLAB}`);
+    render(<SettingsModal open onClose={() => undefined} />);
+    const gl = await screen.findByRole("group", { name: `GitLab ${GITLAB}` });
+    await waitFor(() => expect(gl).toHaveAttribute("data-highlighted", "true"));
+    expect(card("GitHub github.com")).not.toHaveAttribute("data-highlighted");
+  });
+
+  it("says so when there is no account yet", async () => {
+    backend(settings(), []);
+    await renderTab("Accounts");
+    expect(await screen.findByText(/No accounts yet/)).toBeVisible();
   });
 });
 
@@ -341,7 +410,7 @@ describe("SettingsModal — AI tab", () => {
 
   it("warns when the configured agent is auggie, with no run read yet", async () => {
     const warning =
-      "Auggie can still use MCP tools from your own Auggie setup and read local secret files in the clone (.env files, keys); Argus cannot guarantee this run only reads.";
+      "Argus turns off Auggie's MCP and tools beyond reading, but Auggie has no path rules, so its read tool can open any file on your machine, and your own Auggie hooks still run; Argus cannot guarantee this run only reads.";
     const initialAi = useAiStore.getState();
     useAiStore.setState({ runs: {} });
     await renderTab("AI");
@@ -362,7 +431,7 @@ describe("SettingsModal — AI tab", () => {
     const stored = settings({
       ai: { ...settings().ai, binary: "/opt/fixture/bin/claude" },
     });
-    backend(stored, false);
+    backend(stored);
     await renderTab("AI");
     fireEvent.click(screen.getByRole("switch", { name: "AI analysis" }));
     await waitFor(() =>
@@ -373,90 +442,57 @@ describe("SettingsModal — AI tab", () => {
     expect(updates()[0].ai.binary).toBe("/opt/fixture/bin/claude");
   });
 
-  it("adds a clone picked with the dialog, keyed host/repo", async () => {
+  it("keeps the pass itself; clones and review skills moved to Repositories", async () => {
+    backend(
+      settings({ clonePaths: { "github.com/acme-fixture/widgets": "/src/w" } }),
+    );
     await renderTab("AI");
-    expect(screen.getByText("No clones set.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Add clone" }));
-    fireEvent.change(screen.getByLabelText("Repository"), {
-      target: { value: "https://github.com/acme-fixture/widgets.git" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
-    await waitFor(() =>
-      expect(screen.getByLabelText("Folder")).toHaveValue("/src/widgets"),
+    expect(screen.queryByText("Local clones")).toBeNull();
+    expect(screen.queryByText("Review skill")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Add clone" })).toBeNull();
+    expect(screen.queryByText("github.com/acme-fixture/widgets")).toBeNull();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Settings → Repositories" }),
     );
-    expect(openDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ directory: true }),
+    expect(screen.getByRole("tab", { name: "Repositories" })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(updates()).toEqual([
-        {
-          ...settings(),
-          clonePaths: { "github.com/acme-fixture/widgets": "/src/widgets" },
-        },
-      ]),
-    );
-    // Its card (the review skill section lists the repository too).
-    expect(
-      await screen.findByRole("button", {
-        name: "Edit the clone of github.com/acme-fixture/widgets",
-      }),
-    ).toBeInTheDocument();
   });
 
-  it("validates inline, edits and removes a row", async () => {
-    backend(
-      settings({
-        clonePaths: {
-          "github.com/acme-fixture/widgets": "/src/widgets",
-          "gitlab.example.test/grp/proj": "/src/proj",
-        },
-      }),
-      false,
-    );
+  it("saves the default review language at once, another one with its own Save", async () => {
     await renderTab("AI");
-    fireEvent.click(await screen.findByRole("button", { name: "Add clone" }));
-    fireEvent.change(screen.getByLabelText("Repository"), {
-      target: { value: "acme/widgets" },
+    const select = screen.getByRole("combobox", {
+      name: "Default review language",
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("host/owner/name");
-    fireEvent.change(screen.getByLabelText("Repository"), {
-      target: { value: "github.com/acme-fixture/widgets" },
+    // Auto when the settings have none (an older file); no "Default" here.
+    expect(select).toHaveValue("auto");
+    expect(
+      screen.queryByRole("option", { name: /^Default/ }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(select, { target: { value: "dutch" } });
+    await waitFor(() =>
+      expect(updates()[0]?.ai.reviewLanguage).toEqual({ kind: "dutch" }),
+    );
+    // Other…: nothing saved until the name is.
+    fireEvent.change(select, { target: { value: "other" } });
+    const name = screen.getByRole("textbox", {
+      name: "Default review language: language name",
     });
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("already has a clone");
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(updates()).toEqual([]);
-
-    vi.mocked(openDialog).mockResolvedValueOnce("/work/proj");
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Edit the clone of gitlab.example.test/grp/proj",
-      }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(save).toBeDisabled();
+    expect(updates()).toHaveLength(1);
+    fireEvent.change(name, { target: { value: "  Deutsch " } });
+    fireEvent.click(save);
     await waitFor(() =>
-      expect(screen.getByLabelText("Folder")).toHaveValue("/work/proj"),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(updates()[updates().length - 1]?.clonePaths).toEqual({
-        "github.com/acme-fixture/widgets": "/src/widgets",
-        "gitlab.example.test/grp/proj": "/work/proj",
+      expect(updates()[1]?.ai.reviewLanguage).toEqual({
+        kind: "other",
+        name: "Deutsch",
       }),
     );
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Remove the clone of github.com/acme-fixture/widgets",
-      }),
-    );
-    await waitFor(() =>
-      expect(updates()[updates().length - 1]?.clonePaths).toEqual({
-        "gitlab.example.test/grp/proj": "/work/proj",
-      }),
-    );
+    // The rest of the AI settings stay as they were.
+    expect(updates()[1]?.ai.enabled).toBe(true);
+    expect(updates()[1]?.ai.adapter).toBe("claude");
   });
 });
 
@@ -504,6 +540,18 @@ describe("SettingsModal — Editors tab", () => {
     );
   });
 
+  it("switches opening the repository with the file", async () => {
+    await renderTab("Editors");
+    const toggle = screen.getByRole("switch", {
+      name: "Open the repository with the file",
+    });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    await waitFor(() =>
+      expect(updates()[updates().length - 1]?.openWithRepository).toBe(false),
+    );
+  });
+
   it("chooses and resets the default editor", async () => {
     await renderTab("Editors");
     vi.mocked(openDialog).mockResolvedValueOnce(
@@ -523,5 +571,26 @@ describe("SettingsModal — Editors tab", () => {
       expect(updates()[updates().length - 1]?.defaultEditor).toBeNull(),
     );
     expect(await screen.findByText("System default")).toBeInTheDocument();
+  });
+});
+
+describe("SettingsModal — layout", () => {
+  it("scrolls only the tab pane, the dialog and its tabs stay put", () => {
+    render(<SettingsModal open onClose={() => undefined} />);
+    const pane = screen.getByTestId("settings-pane");
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(pane).toHaveAttribute("role", "tabpanel");
+    expect(pane.className).toMatch(/pane/);
+    // The tab strip is a sibling of the pane, not inside what scrolls.
+    expect(pane).not.toContainElement(screen.getByRole("tablist"));
+    expect(dialog).toContainElement(pane);
+  });
+
+  it("starts a new tab at the top of the pane", () => {
+    render(<SettingsModal open onClose={() => undefined} />);
+    const pane = screen.getByTestId("settings-pane");
+    pane.scrollTop = 120;
+    fireEvent.click(screen.getByRole("tab", { name: "Shortcuts" }));
+    expect(pane.scrollTop).toBe(0);
   });
 });

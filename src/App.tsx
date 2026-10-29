@@ -32,6 +32,11 @@ import { subscribeThreadEvents } from "./state/threadStore";
 import { subscribeHistoryEvents } from "./state/historyStore";
 import { subscribeCodeViewEvents } from "./state/codeViewStore";
 import { subscribeAiEvents } from "./state/aiStore";
+import { subscribeScriptEvents } from "./state/scriptResultsStore";
+import {
+  subscribeScriptDraftEvents,
+  useSubmitScriptsStore,
+} from "./state/submitScriptsStore";
 import { AiPanel } from "./components/AiPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { ShortcutHelp } from "./components/ShortcutHelp";
@@ -78,6 +83,8 @@ export default function App() {
         subscribeCodeViewEvents(),
         subscribeBackendSettingsEvents(),
         subscribeAiEvents(),
+        subscribeScriptEvents(),
+        subscribeScriptDraftEvents(),
       ]).catch(() => [] as (() => void)[]);
       if (cancelled) {
         subs.forEach((off) => off());
@@ -87,6 +94,7 @@ export default function App() {
       await Promise.all([
         useReviewStore.getState().load(),
         useBackendSettingsStore.getState().load(),
+        useSubmitScriptsStore.getState().loadDrafts(),
       ]);
     })();
     return () => {

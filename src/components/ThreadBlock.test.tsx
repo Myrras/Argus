@@ -354,3 +354,22 @@ describe("resolved threads fold", () => {
     expect(document.querySelector('[data-slot="then-now"]')).not.toBeNull();
   });
 });
+
+describe("a comment Argus posted outside the diff", () => {
+  it("says which lines it is on", () => {
+    const base = thread();
+    const outside = thread({
+      anchor: {
+        ...base.anchor!,
+        lineNew: 18,
+        startLine: 12,
+        outsideDiff: true,
+      },
+    });
+    seed([outside]);
+    render(<Live id={outside.threadId} />);
+    expect(
+      screen.getByText("on lines 12–18 (outside the diff)"),
+    ).toBeInTheDocument();
+  });
+});

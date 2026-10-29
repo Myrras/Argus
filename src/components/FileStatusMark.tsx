@@ -50,13 +50,16 @@ export function LineStats({
   );
 }
 
-/** The thread count of a file; the accent when some are the user's. */
-export function ThreadCount({ total, mine }: { total: number; mine: number }) {
-  if (total === 0) return null;
+/**
+ * The open (unresolved) thread count of a file card; the accent when some
+ * are the user's. Nothing once every thread is resolved.
+ */
+export function ThreadCount({ open, mine }: { open: number; mine: number }) {
+  if (open === 0) return null;
   const label =
     mine > 0
-      ? `${total} ${total === 1 ? "thread" : "threads"}, ${mine} yours`
-      : `${total} ${total === 1 ? "thread" : "threads"}`;
+      ? `${open} open ${open === 1 ? "thread" : "threads"}, ${mine} yours`
+      : `${open} open ${open === 1 ? "thread" : "threads"}`;
   return (
     <span
       className={styles.threads}
@@ -64,7 +67,7 @@ export function ThreadCount({ total, mine }: { total: number; mine: number }) {
       title={label}
       aria-label={label}
     >
-      {total}
+      {open}
     </span>
   );
 }

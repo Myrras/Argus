@@ -25,7 +25,7 @@
 import { create } from "zustand";
 
 import {
-  commentableLines,
+  commentableLinesBatch,
   postComments,
   replyToThread,
   toIpcError,
@@ -33,6 +33,7 @@ import {
 import type {
   CommentableLines,
   NewComment,
+  OutsideDiff,
   PostError,
   ReviewId,
   Side,
@@ -40,6 +41,7 @@ import type {
 } from "../ipc/types";
 import { clampRange, type LineRange } from "../lib/commentRanges";
 import { FOCUS, requestFocus } from "../lib/focusRequests";
+import { createRequestQueue } from "../lib/requestQueue";
 import { useCodeViewStore } from "./codeViewStore";
 import { useHistoryStore } from "./historyStore";
 import {
@@ -68,6 +70,11 @@ export interface Draft {
   headSha: string;
   /** The diff's left side, for an old-side line; null in "since" mode. */
   baseSha: string | null;
+  /**
+   * On unchanged lines outside the diff: what the platform makes of it
+   * (`native` line comment, `fallback` file comment); absent or null inside.
+   */
+  outside?: OutsideDiff | null;
   createdAt: string;
   /** Why the last post of it failed. */
   error: PostError | null;
@@ -84,6 +91,8 @@ export interface CommentTarget {
   startLine: number | null;
   headSha: string;
   baseSha: string | null;
+  /** As `Draft.outside`. */
+  outside?: OutsideDiff | null;
 }
 
 /** The open composer (one at a time): a new comment or a draft's edit. */
@@ -93,6 +102,12 @@ export interface Composer extends CommentTarget {
   draftId: string | null;
   busy: boolean;
   error: PostError | null;
+  /**
+   * The lines (head side) the last inserted suggestion was written for, so
+   * a range changed since can be flagged (GitHub's fence has no range of
+   * its own). Not kept with a draft.
+   */
+  suggestedFor?: { start: number; end: number } | null;
 }
 
 /** The line last clicked in a diff: what the Comment-on-line key uses. */
@@ -134,9 +149,23 @@ interface CommentState {
   openComposer: (
     target: Omit<CommentTarget, "anchor"> & { anchor?: number },
   ) => boolean;
-  /** Shift-click: extend the open composer's range to `line`, in its hunk. */
-  extendComposer: (lines: CommentableLines | null, line: number) => boolean;
+  /**
+   * Shift-click: extend the open composer's range to `line`, in its region
+   * (one hunk, or one stretch outside the diff; `docLines` bounds the last).
+   */
+  extendComposer: (
+    lines: CommentableLines | null,
+    line: number,
+    docLines?: number,
+  ) => boolean;
   setComposerBody: (body: string) => void;
+  /** A suggestion was inserted for these lines. */
+  setSuggestedFor: (range: { start: number; end: number }) => void;
+  /**
+   * Put a new comment back on `range` (the lines its suggestion was written
+   * for); only within its region, which a range it had always is.
+   */
+  setComposerRange: (range: { start: number; end: number }) => void;
   closeComposer: () => void;
   /** "Add to review" (or "Save" for a draft's edit): no write. */
   saveComposer: () => void;
@@ -422,7 +451,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
       return true;
     },
 
-    extendComposer: (lines, line) => {
+    extendComposer: (lines, line, docLines) => {
       const cur = get().composer;
       if (!cur || cur.busy || cur.draftId) return false;
       const range: LineRange | null = clampRange(
@@ -430,6 +459,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
         cur.side,
         cur.anchor,
         line,
+        docLines,
       );
       if (!range) return false;
       patchComposer(range);
@@ -437,6 +467,17 @@ export const useCommentStore = create<CommentState>((set, get) => {
     },
 
     setComposerBody: (body) => patchComposer({ body, error: null }),
+
+    setSuggestedFor: (range) => patchComposer({ suggestedFor: range }),
+
+    setComposerRange: (range) => {
+      const cur = get().composer;
+      if (!cur || cur.busy || cur.draftId) return;
+      patchComposer({
+        line: range.end,
+        startLine: range.start < range.end ? range.start : null,
+      });
+    },
 
     closeComposer: () => {
       const c = get().composer;
@@ -513,6 +554,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
             body: c.body,
             headSha: c.headSha,
             baseSha: c.baseSha,
+            outside: c.outside ?? null,
             createdAt: new Date().toISOString(),
             error: null,
           },
@@ -562,6 +604,7 @@ export const useCommentStore = create<CommentState>((set, get) => {
           startLine: d.startLine,
           headSha: d.headSha,
           baseSha: d.baseSha,
+          outside: d.outside ?? null,
           body: d.body,
           draftId: d.id,
           busy: false,
@@ -725,6 +768,12 @@ export function usePostableCount(reviewId: ReviewId): number {
 const commentable = new Map<string, Promise<CommentableLines>>();
 /** (review, head, list base, lines base) pairs a file list was re-read for. */
 const reread = new Set<string>();
+/** The cards that load together ask in one call (`lib/requestQueue`). */
+const commentableReads = createRequestQueue<string, CommentableLines>({
+  send: (reviewId, paths) => commentableLinesBatch(reviewId, paths),
+  maxBatch: 32,
+  concurrency: 2,
+});
 
 /**
  * A file's commentable lines, fetched once per (review, head, review base,
@@ -749,7 +798,7 @@ export function loadCommentable(
   const key = `${reviewId}|${headSha}|${reviewBaseSha}|${path}`;
   let p = commentable.get(key);
   if (!p) {
-    p = commentableLines(reviewId, path);
+    p = commentableReads.request(reviewId, key, path);
     commentable.set(key, p);
     p.then(
       (lines) => {
@@ -773,6 +822,7 @@ export function clearCommentableCache(reviewId?: ReviewId) {
   if (reviewId === undefined) {
     commentable.clear();
     reread.clear();
+    commentableReads.reset();
     return;
   }
   const prefix = `${reviewId}|`;

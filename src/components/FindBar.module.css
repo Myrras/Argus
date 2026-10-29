@@ -1,0 +1,168 @@
+/* Pinned under the page toolbar, in the flow: the cards' sticky headers
+   move down by its height (`--page-sticky-top` on the column). */
+.bar {
+  container-type: inline-size;
+  position: sticky;
+  top: var(--tabbar-h);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--findbar-h);
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  flex-shrink: 0;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-sm);
+}
+
+.field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 220px;
+  min-width: 120px;
+  max-width: 420px;
+  margin: 0;
+}
+
+.icon {
+  position: absolute;
+  left: var(--sp-2);
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.field input {
+  height: 26px;
+  padding: 0 var(--sp-2) 0 26px;
+  font-size: var(--fs-sm);
+}
+
+.field[data-invalid="true"] input,
+.field[data-invalid="true"] input:focus {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 20%, transparent);
+}
+
+.field[data-none="true"] input {
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg));
+}
+
+.status {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.status[data-error="true"] {
+  color: var(--danger);
+}
+
+.searching {
+  color: var(--text-faint);
+}
+
+/* A short, quiet word after next/previous went round. */
+.wrapped {
+  color: var(--accent);
+  animation: wrapped var(--dur-4) var(--ease-out);
+}
+
+@keyframes wrapped {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wrapped {
+    animation: none;
+  }
+}
+
+.skipped {
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--warning);
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--sp-1);
+  background: var(--border);
+}
+
+.toggle {
+  width: 24px;
+  height: 24px;
+}
+
+.scope {
+  width: auto;
+  height: 24px;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-1);
+  font-size: var(--fs-xs);
+}
+
+/* The files not searched, under the bar (over the page, not in its flow). */
+.skippedList {
+  position: absolute;
+  top: 100%;
+  right: var(--sp-2);
+  z-index: 4;
+  max-width: min(520px, 90%);
+  max-height: 240px;
+  overflow: auto;
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  font-size: var(--fs-xs);
+}
+
+.skippedList li {
+  display: flex;
+  gap: var(--sp-2);
+  padding: 2px 0;
+}
+
+.reason {
+  color: var(--text-muted);
+}
+
+/* Narrow: the scope menu and the divider go first. */
+@container (max-width: 520px) {
+  .divider,
+  .skipped {
+    display: none;
+  }
+}
+
+@container (max-width: 420px) {
+  .scope {
+    display: none;
+  }
+}

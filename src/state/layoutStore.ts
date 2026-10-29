@@ -1,8 +1,9 @@
 /**
  * Persistent shell layout (Iris's `layoutStore`): sidebar width, the
  * Providers section's collapse, the review view's file tree (open, tree
- * or flat) and diff layout (unified or side by side), and whether the AI
- * island (findings and checklist) is open.
+ * or flat) and diff layout (unified or side by side), whether whitespace
+ * changes are hidden in every diff (`lib/whitespaceDiff`), and whether the
+ * AI island (findings and checklist) is open.
  *
  * Builds with a Threads / Files tab strip saved `detailTab`; `load` ignores
  * it and the next save drops it.
@@ -23,6 +24,8 @@ interface LayoutPersisted {
   /** Whether the review view's file tree is expanded. */
   fileTreeOpen: boolean;
   diffLayout: DiffLayout;
+  /** Diffs compare lines with whitespace ignored (GitHub's `?w=1`). */
+  hideWhitespace: boolean;
   fileListMode: FileListMode;
   /** Whether the AI island right of the review is open. */
   aiPanelOpen: boolean;
@@ -38,6 +41,7 @@ const DEFAULTS: LayoutPersisted = {
   providersCollapsed: false,
   fileTreeOpen: true,
   diffLayout: "unified",
+  hideWhitespace: false,
   fileListMode: "tree",
   aiPanelOpen: true,
 };
@@ -59,6 +63,7 @@ function load(): LayoutPersisted {
       providersCollapsed: saved.providersCollapsed === true,
       fileTreeOpen: saved.fileTreeOpen !== false,
       diffLayout: saved.diffLayout === "split" ? "split" : "unified",
+      hideWhitespace: saved.hideWhitespace === true,
       fileListMode: saved.fileListMode === "flat" ? "flat" : "tree",
       aiPanelOpen: saved.aiPanelOpen !== false,
     };
@@ -76,6 +81,7 @@ function persist(state: LayoutPersisted) {
         providersCollapsed: state.providersCollapsed,
         fileTreeOpen: state.fileTreeOpen,
         diffLayout: state.diffLayout,
+        hideWhitespace: state.hideWhitespace,
         fileListMode: state.fileListMode,
         aiPanelOpen: state.aiPanelOpen,
       }),
@@ -90,6 +96,8 @@ interface LayoutState extends LayoutPersisted {
   setProvidersCollapsed: (collapsed: boolean) => void;
   toggleFileTree: () => void;
   setDiffLayout: (layout: DiffLayout) => void;
+  setHideWhitespace: (hide: boolean) => void;
+  toggleHideWhitespace: () => void;
   setFileListMode: (mode: FileListMode) => void;
   setAiPanelOpen: (open: boolean) => void;
   toggleAiPanel: () => void;
@@ -107,6 +115,9 @@ export const useLayoutStore = create<LayoutState>((set, get) => {
       update({ providersCollapsed: collapsed }),
     toggleFileTree: () => update({ fileTreeOpen: !get().fileTreeOpen }),
     setDiffLayout: (layout) => update({ diffLayout: layout }),
+    setHideWhitespace: (hide) => update({ hideWhitespace: hide }),
+    toggleHideWhitespace: () =>
+      update({ hideWhitespace: !get().hideWhitespace }),
     setFileListMode: (mode) => update({ fileListMode: mode }),
     setAiPanelOpen: (open) => update({ aiPanelOpen: open }),
     toggleAiPanel: () => update({ aiPanelOpen: !get().aiPanelOpen }),

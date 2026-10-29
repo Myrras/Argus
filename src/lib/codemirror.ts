@@ -13,6 +13,9 @@
  *
  * Comment code blocks (`codeBlockExtensions`) use the same themes, without
  * line numbers and a size smaller.
+ *
+ * Every editor takes Mod+F to the find bar (`lib/findHighlight.findKeys`),
+ * never to CodeMirror's own search.
  */
 
 import {
@@ -31,6 +34,7 @@ import {
 import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
 
 import type { ThemeMode } from "../state/themeStore";
+import { findKeys } from "./findHighlight";
 
 /** Selene's editor look, on the Argus tokens (every theme). */
 const tokenTheme = Prec.highest(
@@ -99,6 +103,7 @@ export function baseExtensions(mode: ThemeMode): Extension[] {
   return [
     mode === "dark" ? githubDark : githubLight,
     tokenTheme,
+    findKeys,
     lineNumbers(),
     highlightSpecialChars(),
     drawSelection(),
@@ -122,6 +127,7 @@ export function codeBlockExtensions(mode: ThemeMode): Extension[] {
     mode === "dark" ? githubDark : githubLight,
     tokenTheme,
     codeBlockTheme,
+    findKeys,
     highlightSpecialChars(),
     drawSelection(),
     EditorState.readOnly.of(true),

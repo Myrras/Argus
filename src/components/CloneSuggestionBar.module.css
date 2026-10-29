@@ -1,0 +1,60 @@
+/* An offer, not a warning: the header's own surface with an accent edge,
+   the actions at the end of the row. */
+.bar {
+  /* A row of its own under the header's grid, however wide that is. */
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  border-radius: var(--radius-md);
+  animation: suggestionIn var(--dur-2) var(--ease-out);
+}
+
+@keyframes suggestionIn {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    animation: none;
+  }
+}
+
+.icon {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+
+.text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.text strong {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-left: auto;
+}
+
+.actions button {
+  height: 26px;
+}
+
+.actions .close {
+  width: 22px;
+  height: 22px;
+}

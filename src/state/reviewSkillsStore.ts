@@ -1,7 +1,7 @@
 /**
- * Settings → AI → Review skill: the skills the picker offers per repository
- * (`list_review_skills`), read when the section shows and again when a
- * repository's picker opens (a skill may have been installed meanwhile).
+ * Settings → Repositories → Review skill: the skills the picker offers per
+ * repository (`list_review_skills`), read when its card shows and again when
+ * its picker opens (a skill may have been installed meanwhile).
  * The choice itself lives in `Settings.reviewSkills`
  * (`backendSettingsStore.save`).
  */

@@ -205,12 +205,38 @@ describe("the composer", () => {
       baseSha: "b".repeat(40),
       headSha: HEAD,
       hunks: [{ old: [], new: [3, 4, 5, 6] }],
+      outside: "none" as const,
     };
     useCommentStore.getState().openComposer(target(4));
     useCommentStore.getState().extendComposer(lines, 9);
     expect(useCommentStore.getState().composer).toMatchObject({
       startLine: 4,
       line: 6,
+    });
+  });
+
+  it("extends a range outside the diff up to the next hunk", () => {
+    const lines = {
+      reviewId: REVIEW,
+      path: "src/cache.rs",
+      baseSha: "b".repeat(40),
+      headSha: HEAD,
+      hunks: [{ old: [], new: [3, 4, 5, 6] }],
+      outside: "fallback" as const,
+    };
+    useCommentStore.getState().openComposer(target(9, { outside: "fallback" }));
+    useCommentStore.getState().extendComposer(lines, 2, 40);
+    expect(useCommentStore.getState().composer).toMatchObject({
+      startLine: 7,
+      line: 9,
+      outside: "fallback",
+    });
+    useCommentStore.getState().setComposerBody("Leaks");
+    useCommentStore.getState().saveComposer();
+    expect(useCommentStore.getState().drafts[REVIEW]?.[0]).toMatchObject({
+      line: 9,
+      startLine: 7,
+      outside: "fallback",
     });
   });
 

@@ -1,10 +1,22 @@
 {
   "enums": {
+    "AccountState.kind": [
+      "loggedIn",
+      "notLoggedIn",
+      "error",
+      "cliMissing"
+    ],
     "AiRunStatus": [
       "notStarted",
       "running",
       "done",
       "failed"
+    ],
+    "CloneState": [
+      "notSet",
+      "found",
+      "missing",
+      "notRepository"
     ],
     "DiffKind": [
       "same",
@@ -12,14 +24,19 @@
       "removed",
       "added"
     ],
+    "DraftStage": [
+      "reading",
+      "starting",
+      "thinking",
+      "writing",
+      "validating",
+      "repairing"
+    ],
     "FileStatus": [
       "added",
       "modified",
       "removed",
       "renamed"
-    ],
-    "GitlabProblem": [
-      "invalidUrl"
     ],
     "LineChange.kind": [
       "modified",
@@ -42,11 +59,17 @@
       "approved",
       "notReviewer"
     ],
+    "OutsideDiff": [
+      "none",
+      "native",
+      "fallback"
+    ],
     "PostErrorKind": [
       "notFound",
       "invalidInput",
       "githubUnavailable",
       "gitlabNotConfigured",
+      "glabMissing",
       "gitlabAuth",
       "provider",
       "store",
@@ -63,6 +86,12 @@
     "RepeatReason": [
       "agentMarked",
       "similar"
+    ],
+    "ReviewLanguage.kind": [
+      "auto",
+      "english",
+      "dutch",
+      "other"
     ],
     "ReviewSkillChoice.kind": [
       "auto",
@@ -90,6 +119,20 @@
       "newCommits",
       "authorReplied",
       "reRequested"
+    ],
+    "ScriptDraftStatus": [
+      "idle",
+      "running",
+      "failed",
+      "cancelled"
+    ],
+    "ScriptStatus": [
+      "ok",
+      "failed",
+      "timedOut",
+      "skipped",
+      "notFound",
+      "notExecutable"
     ],
     "Severity": [
       "high",
@@ -122,9 +165,27 @@
     ]
   },
   "structs": {
+    "Account": [
+      "account",
+      "accounts",
+      "active",
+      "enabled",
+      "host",
+      "key",
+      "loginCommand",
+      "provider",
+      "scheme",
+      "state",
+      "state.kind",
+      "state.message",
+      "user"
+    ],
     "AiRunState": [
       "adapter",
       "context",
+      "context.language",
+      "context.language.kind",
+      "context.language.name",
       "context.notes",
       "context.rulesFiles",
       "context.skill",
@@ -145,6 +206,10 @@
       "skippedChecklist",
       "startedAt",
       "status"
+    ],
+    "CacheStats": [
+      "bytes",
+      "entries"
     ],
     "ChecklistItem": [
       "checked",
@@ -167,12 +232,17 @@
       "matchesReviewHead",
       "path"
     ],
+    "CloneSuggestion": [
+      "path",
+      "repo"
+    ],
     "CommentableLines": [
       "baseSha",
       "headSha",
       "hunks",
       "hunks[].new",
       "hunks[].old",
+      "outside",
       "path",
       "reviewId"
     ],
@@ -208,6 +278,12 @@
       "postedAt",
       "postedUrl",
       "status"
+    ],
+    "GeneratedScript": [
+      "explanation",
+      "name",
+      "script",
+      "verdicts"
     ],
     "LineStatus:deleted": [
       "kind",
@@ -272,28 +348,32 @@
       "providerThreadId",
       "url"
     ],
-    "ProviderStatus": [
-      "github",
-      "github.enabled",
-      "github.host",
-      "github.installed",
-      "github.loggedIn",
-      "gitlab",
-      "gitlab.baseUrl",
-      "gitlab.configured",
-      "gitlab.insecure",
-      "gitlab.problem",
-      "gitlab.tokenPresent"
-    ],
     "RefreshReport": [
       "changed",
       "errors",
+      "errors[].host",
       "errors[].message",
       "errors[].provider",
       "errors[].rateLimitedUntil",
       "errors[].review",
       "errors[].unavailable",
       "refreshedAt"
+    ],
+    "RepoSetup": [
+      "clone",
+      "clonePath",
+      "host",
+      "key",
+      "openReviews",
+      "provider",
+      "repo",
+      "reviewLanguage",
+      "reviewLanguage.kind",
+      "reviewLanguage.name",
+      "reviewSkill",
+      "reviewSkill.kind",
+      "reviewSkill.name",
+      "reviewSkill.source"
     ],
     "ReviewFiles": [
       "baseApproximate",
@@ -314,6 +394,19 @@
       "reviewId",
       "sinceLastReview",
       "truncated"
+    ],
+    "ReviewLanguage:auto": [
+      "kind"
+    ],
+    "ReviewLanguage:dutch": [
+      "kind"
+    ],
+    "ReviewLanguage:english": [
+      "kind"
+    ],
+    "ReviewLanguage:other": [
+      "kind",
+      "name"
     ],
     "ReviewRecord": [
       "approvedAt",
@@ -396,23 +489,123 @@
       "skills[].name",
       "skills[].source"
     ],
+    "ScriptDraft": [
+      "base",
+      "base.explanation",
+      "base.name",
+      "base.script",
+      "base.verdicts",
+      "createdAt",
+      "error",
+      "id",
+      "progress",
+      "progress.answerChars",
+      "progress.notice",
+      "progress.stage",
+      "progress.startedAt",
+      "progress.thinking",
+      "progress.thinkingCut",
+      "progress.thinkingTokens",
+      "progress.turn",
+      "revision",
+      "scriptId",
+      "status",
+      "title",
+      "turns",
+      "turns[].at",
+      "turns[].attachments",
+      "turns[].error",
+      "turns[].notes",
+      "turns[].prompt",
+      "turns[].result",
+      "turns[].result.explanation",
+      "turns[].result.name",
+      "turns[].result.script",
+      "turns[].result.verdicts",
+      "updatedAt",
+      "waiting"
+    ],
+    "ScriptDraftProgress": [
+      "answerChars",
+      "notice",
+      "stage",
+      "startedAt",
+      "thinking",
+      "thinkingCut",
+      "thinkingTokens",
+      "turn"
+    ],
+    "ScriptDraftProgressEvent": [
+      "draftId",
+      "progress",
+      "progress.answerChars",
+      "progress.notice",
+      "progress.stage",
+      "progress.startedAt",
+      "progress.thinking",
+      "progress.thinkingCut",
+      "progress.thinkingTokens",
+      "progress.turn"
+    ],
+    "ScriptGenerationStatus": [
+      "adapter",
+      "available",
+      "reason"
+    ],
+    "ScriptResult": [
+      "durationMs",
+      "exitCode",
+      "finishedAt",
+      "message",
+      "name",
+      "scriptId",
+      "status",
+      "stderr",
+      "stdout"
+    ],
+    "ScriptsDone": [
+      "results",
+      "results[].durationMs",
+      "results[].exitCode",
+      "results[].finishedAt",
+      "results[].message",
+      "results[].name",
+      "results[].scriptId",
+      "results[].status",
+      "results[].stderr",
+      "results[].stdout",
+      "reviewId"
+    ],
     "Settings": [
+      "accounts",
+      "accounts.github:github.com",
+      "accounts.github:github.com.account",
+      "accounts.github:github.com.enabled",
       "ai",
       "ai.adapter",
       "ai.args",
       "ai.binary",
       "ai.enabled",
+      "ai.reviewLanguage",
+      "ai.reviewLanguage.kind",
+      "cacheLimitMb",
       "clonePaths",
+      "cloneSuggestIgnored",
       "defaultEditor",
       "editorOverrides",
-      "github",
-      "github.account",
-      "github.enabled",
-      "github.host",
-      "gitlab",
-      "gitlab.baseUrl",
+      "openWithRepository",
       "pollIntervalSecs",
-      "reviewSkills"
+      "reviewLanguages",
+      "reviewSkills",
+      "submitScripts",
+      "submitScripts[].args",
+      "submitScripts[].command",
+      "submitScripts[].defaultOn",
+      "submitScripts[].id",
+      "submitScripts[].name",
+      "submitScripts[].repos",
+      "submitScripts[].timeoutSecs",
+      "submitScripts[].verdicts"
     ],
     "StoredThread": [
       "anchor",
@@ -422,6 +615,7 @@
       "anchor.headSha",
       "anchor.lineNew",
       "anchor.lineOld",
+      "anchor.outsideDiff",
       "anchor.pathNew",
       "anchor.pathOld",
       "anchor.side",

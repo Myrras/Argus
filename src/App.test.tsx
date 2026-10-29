@@ -31,11 +31,21 @@ import type { RefreshError, RefreshReport } from "./ipc/types";
 import { useReviewStore } from "./state/reviewStore";
 import { useBackendSettingsStore } from "./state/backendSettingsStore";
 import { useSettingsRequestStore } from "./state/settingsRequestStore";
-import { review, settings, status } from "./test/fixtures";
+import { account, review, settings } from "./test/fixtures";
 
 const mockInvoke = vi.mocked(invoke);
 const initialReviews = useReviewStore.getState();
 const initialSettings = useBackendSettingsStore.getState();
+
+/** glab knows the host but has no login for it. */
+const glabLoggedOut = account({
+  provider: "gitlab",
+  host: "gitlab.example.test",
+  user: null,
+  state: { kind: "notLoggedIn", message: null },
+});
+const NOT_LOGGED_IN =
+  "GitLab unavailable: glab is not logged in to gitlab.example.test. Run glab auth login --hostname gitlab.example.test.";
 
 const a = review({ title: "Fixture A" });
 const b = review({ title: "Fixture B" });
@@ -54,20 +64,8 @@ describe("App", () => {
           return Promise.resolve(null);
         case "get_settings":
           return Promise.resolve(settings());
-        case "provider_status":
-          return Promise.resolve(
-            status({
-              gitlab: {
-                configured: false,
-                baseUrl: "",
-                tokenPresent: false,
-                problem: null,
-                insecure: false,
-              },
-            }),
-          );
-        case "gitlab_token_present":
-          return Promise.resolve(false);
+        case "list_accounts":
+          return Promise.resolve([account(), glabLoggedOut]);
         case "refresh_reviews":
           return Promise.resolve({
             changed: [],
@@ -82,12 +80,13 @@ describe("App", () => {
     });
   });
 
-  it("loads the reviews, the provider status and the settings", async () => {
+  it("loads the reviews, the accounts and the settings", async () => {
     render(<App />);
     expect(await screen.findByText("Fixture A")).toBeInTheDocument();
-    expect(
-      await screen.findByText("GitLab is not set up."),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(NOT_LOGGED_IN)).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("list_accounts", {
+      recheck: false,
+    });
     expect(screen.getByText("Refreshed never")).toBeInTheDocument();
     // The island shell: sidebar and the welcome screen in the detail island.
     expect(
@@ -134,107 +133,104 @@ describe("App", () => {
     ).toBeInTheDocument();
   });
 
-  it("drops a GitLab error from before its token was stored", async () => {
-    // The URL save restarted the poll, which refreshed before the token
-    // was there: its report says GitLab is not set up.
-    const notSetUp: RefreshError = {
+  it("drops a GitLab error from before its host was switched", async () => {
+    // A refresh from before the host was switched off: its report says
+    // the host failed.
+    const failed: RefreshError = {
       provider: "gitlab",
+      host: "gitlab.example.test",
       review: null,
-      message: "GitLab is not set up: add its URL and a token in Settings.",
-      unavailable: true,
+      message: "Could not fetch reviews: glab could not reach GitLab",
+      unavailable: false,
       rateLimitedUntil: null,
     };
     const stale: RefreshReport = {
       changed: [],
-      errors: [notSetUp],
+      errors: [failed],
       refreshedAt: new Date(Date.now() - 1000).toISOString(),
     };
-    let tokenStored = false;
+    let stored = settings();
     const base = mockInvoke.getMockImplementation()!;
-    mockInvoke.mockImplementation((cmd: string) => {
+    mockInvoke.mockImplementation((cmd: string, args?: unknown) => {
       switch (cmd) {
         case "last_refresh":
           return Promise.resolve(stale);
         case "get_settings":
-          return Promise.resolve(
-            settings({ gitlab: { baseUrl: "http://gitlab.vpn.test" } }),
-          );
-        case "provider_status":
-          return Promise.resolve(
-            status({
-              gitlab: {
-                configured: true,
-                baseUrl: "http://gitlab.vpn.test",
-                tokenPresent: tokenStored,
-                problem: null,
-                insecure: true,
-              },
+          return Promise.resolve(stored);
+        case "update_settings":
+          stored = (args as { settings: typeof stored }).settings;
+          return Promise.resolve(stored);
+        case "list_accounts":
+          return Promise.resolve([
+            account(),
+            account({
+              provider: "gitlab",
+              host: "gitlab.example.test",
+              enabled:
+                stored.accounts["gitlab:gitlab.example.test"]?.enabled ?? true,
             }),
-          );
-        case "gitlab_token_present":
-          return Promise.resolve(tokenStored);
-        case "set_gitlab_token":
-          tokenStored = true;
-          return Promise.resolve(null);
+          ]);
         default:
           return base(cmd);
       }
     });
     render(<App />);
     const providers = screen.getByRole("region", { name: "Providers" });
-    await within(providers).findByText(
-      "GitLab has no token: add one in Settings.",
-    );
+    const shown = `GitLab (gitlab.example.test): ${failed.message}`;
+    await within(providers).findByText(shown);
 
     fireEvent.click(screen.getByTitle("Settings (Ctrl+,)"));
     const dialog = await screen.findByRole("dialog", { name: "Settings" });
-    fireEvent.click(within(dialog).getByRole("tab", { name: "GitLab" }));
-    fireEvent.change(within(dialog).getByLabelText("Personal access token"), {
-      target: { value: "glpat-fixture-not-a-real-token" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(within(providers).getByText("Token set")).toBeInTheDocument(),
+    fireEvent.click(within(dialog).getByRole("tab", { name: "Accounts" }));
+    fireEvent.click(
+      await within(dialog).findByRole("switch", {
+        name: "Use GitLab at gitlab.example.test",
+      }),
     );
-    // No new report yet (the refresh with the token is still running), and
-    // still no "not set up": that report predates the token.
+    await waitFor(() =>
+      expect(stored.accounts["gitlab:gitlab.example.test"]).toEqual({
+        enabled: false,
+        account: null,
+      }),
+    );
+    // Only GitHub is in use now, and the old report's error is gone.
+    await waitFor(() =>
+      expect(within(providers).getAllByText("Connected")).toHaveLength(1),
+    );
     expect(useReviewStore.getState().lastRefresh).toEqual(stale);
-    expect(within(providers).queryByText(/is not set up/)).toBeNull();
-    expect(within(providers).queryByRole("status")).toBeNull();
+    expect(within(providers).queryByText(shown)).toBeNull();
 
-    // A refresh that began after the token does show its GitLab errors.
+    // A refresh that began after the change does show its errors.
     act(() =>
       useReviewStore.setState({
         lastRefresh: {
           ...stale,
-          errors: [
-            {
-              ...notSetUp,
-              message: "GitLab rejected the token: check Settings.",
-            },
-          ],
           refreshedAt: new Date(Date.now() + 1000).toISOString(),
         },
       }),
     );
-    expect(
-      within(providers).getByText(
-        "GitLab: GitLab rejected the token: check Settings.",
-      ),
-    ).toBeInTheDocument();
+    expect(within(providers).getByText(shown)).toBeInTheDocument();
   });
 
-  it("opens the provider's tab from the Providers section", async () => {
+  it("opens Settings → Accounts on the host from the Providers section", async () => {
     render(<App />);
     const providers = screen.getByRole("region", { name: "Providers" });
-    await within(providers).findByText("GitLab is not set up.");
+    await within(providers).findByText(NOT_LOGGED_IN);
     fireEvent.click(
       within(providers).getByRole("button", { name: "Settings" }),
     );
     const dialog = await screen.findByRole("dialog", { name: "Settings" });
-    expect(within(dialog).getByRole("tab", { name: "GitLab" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    expect(
+      within(dialog).getByRole("tab", { name: "Accounts" }),
+    ).toHaveAttribute("aria-selected", "true");
+    const card = within(dialog).getByRole("group", {
+      name: "GitLab gitlab.example.test",
+    });
+    await waitFor(() =>
+      expect(card).toHaveAttribute("data-highlighted", "true"),
+    );
+    expect(card).toHaveTextContent(
+      "glab auth login --hostname gitlab.example.test",
     );
   });
 });

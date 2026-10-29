@@ -1,4 +1,4 @@
-//! Finding CLI binaries (`gh`, the AI agents). Ported from Podium's
+//! Finding CLI binaries (`gh`, `glab`, the AI agents). Ported from Podium's
 //! `platform.rs` (`gh_binary`, `login_shell`, `command_exists_query`), minus
 //! its WSL backend.
 
@@ -18,6 +18,15 @@ const WELL_KNOWN_GH: &[&str] = &[
     "/usr/bin/gh",
 ];
 
+/// Where `glab` usually lives when the login shell cannot tell us.
+#[cfg(unix)]
+const WELL_KNOWN_GLAB: &[&str] = &[
+    "/opt/homebrew/bin/glab",
+    "/usr/local/bin/glab",
+    "/opt/local/bin/glab",
+    "/usr/bin/glab",
+];
+
 /// The `gh` binary, resolved once; `None` when it is not installed (so
 /// callers can report that instead of a spawn failure).
 ///
@@ -29,20 +38,44 @@ const WELL_KNOWN_GH: &[&str] = &[
 /// Windows PATH is process-wide, so `where` is enough there.
 pub fn gh_binary() -> Option<&'static str> {
     static GH_PATH: OnceLock<Option<String>> = OnceLock::new();
-    GH_PATH
-        .get_or_init(|| {
-            #[cfg(unix)]
-            {
-                shell_stdout(&command_exists_query("gh"))
-                    .and_then(|out| parse_binary_path(&out))
-                    .or_else(|| first_existing(WELL_KNOWN_GH.iter().map(Path::new)))
-            }
-            #[cfg(windows)]
-            {
-                shell_ok(&command_exists_query("gh")).then(|| "gh".to_string())
-            }
-        })
-        .as_deref()
+    #[cfg(unix)]
+    let well_known = WELL_KNOWN_GH;
+    #[cfg(windows)]
+    let well_known: &[&str] = &[];
+    cached_binary(&GH_PATH, "gh", well_known)
+}
+
+/// The `glab` binary (GitLab's CLI), found and cached like [`gh_binary`].
+pub fn glab_binary() -> Option<&'static str> {
+    static GLAB_PATH: OnceLock<Option<String>> = OnceLock::new();
+    #[cfg(unix)]
+    let well_known = WELL_KNOWN_GLAB;
+    #[cfg(windows)]
+    let well_known: &[&str] = &[];
+    cached_binary(&GLAB_PATH, "glab", well_known)
+}
+
+/// `binary` resolved once into `cell`: the login shell's `command -v`, else
+/// the first of `well_known` that exists (Unix); `where` on Windows.
+fn cached_binary(
+    cell: &'static OnceLock<Option<String>>,
+    binary: &str,
+    well_known: &[&str],
+) -> Option<&'static str> {
+    cell.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            shell_stdout(&command_exists_query(binary))
+                .and_then(|out| parse_binary_path(&out))
+                .or_else(|| first_existing(well_known.iter().map(Path::new)))
+        }
+        #[cfg(windows)]
+        {
+            let _ = well_known;
+            shell_ok(&command_exists_query(binary)).then(|| binary.to_string())
+        }
+    })
+    .as_deref()
 }
 
 /// A shell command line that exits 0 iff `binary` resolves on `PATH`, and

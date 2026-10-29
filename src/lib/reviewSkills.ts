@@ -1,7 +1,8 @@
 /**
- * Settings → AI → Review skill: which code-review skill a repository's AI
- * runs follow (`Settings.reviewSkills`, keyed `host/repo` like
- * `clonePaths`; no entry is `auto`). Pure rules for `ReviewSkillPicker`.
+ * Settings → Repositories → Review skill: which code-review skill a
+ * repository's AI runs follow (`Settings.reviewSkills`, keyed `host/repo`
+ * like `clonePaths`; no entry is `auto`). Pure rules for
+ * `ReviewSkillPicker`.
  */
 
 import type {
@@ -74,18 +75,22 @@ export function autoHelp(list: ReviewSkillList | null): string {
   return "The project's own review skill, read from the target branch.";
 }
 
-/** The current choice in a word or two, for the repository's card. */
+/** The current choice in full, for the line under the repository's key. */
 export function choiceSummary(
   choice: ReviewSkillChoice,
   list: ReviewSkillList | null,
 ): string {
   switch (choice.kind) {
     case "auto":
-      return autoLabel(list);
+      if (!list) return "Auto";
+      if (list.autoPick) return `Auto: ${list.autoPick}`;
+      return list.projectListed
+        ? "Auto: none found"
+        : "Auto: project's own, checked at run time";
     case "none":
       return "None";
     case "skill":
-      return `${choice.name} (${SOURCE_LABEL[choice.source]})`;
+      return `${choice.name} · ${SOURCE_LABEL[choice.source]}`;
   }
 }
 
@@ -110,20 +115,4 @@ export function filterSkills(
       skills: skills.filter((s) => s.source === source && hit(s)),
     }))
     .filter((g) => g.skills.length > 0);
-}
-
-/**
- * The repositories the picker lists: those with a clone or a choice, and
- * those of the reviews Argus tracks, each once, sorted.
- */
-export function knownRepos(
-  settings: Settings | null,
-  reviews: { host: string; repo: string }[],
-): string[] {
-  const all = new Set<string>([
-    ...Object.keys(settings?.clonePaths ?? {}),
-    ...Object.keys(settings?.reviewSkills ?? {}),
-    ...reviews.map((r) => `${r.host}/${r.repo}`),
-  ]);
-  return [...all].sort((a, b) => a.localeCompare(b));
 }

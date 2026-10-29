@@ -17,6 +17,7 @@ vi.mock("./DiffEditor", () => ({
 }));
 
 import { invoke } from "@tauri-apps/api/core";
+import { answerBatches } from "../test/batches";
 
 import type { LocalFile, ReviewFiles } from "../ipc/types";
 import { useAppShortcuts } from "../lib/useAppShortcuts";
@@ -31,7 +32,7 @@ import { useToastStore } from "../state/toastStore";
 import { file, review, reviewFiles, settings } from "../test/fixtures";
 import { ReviewView } from "./ReviewView";
 
-const mockInvoke = vi.mocked(invoke);
+const mockInvoke = answerBatches(vi.mocked(invoke));
 const HEAD = "a".repeat(40);
 const r = review({ headSha: HEAD });
 const CLONE = "/Users/fixture/widgets";

@@ -68,3 +68,10 @@
   padding: var(--sp-2) var(--sp-3);
   border-top: 1px solid var(--border);
 }
+
+/* What a comment outside the diff becomes on the platform. */
+.outsideNote {
+  margin: 0 0 var(--sp-1);
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}

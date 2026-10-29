@@ -1,20 +1,24 @@
 /**
  * App settings dialog, tabbed like Iris's and Podium's.
  *
- * - General: theme and reduced motion (`themeStore` / `settingsStore`), and
- *   the refresh interval (the core's `settings.json`).
- * - GitHub: on/off, host and an optional `gh` account.
- * - GitLab: the instance URL and the personal access token. The token is
- *   write-only: it goes to `set_gitlab_token` (`backendSettingsStore`
- *   `.setGitlabToken`) and is never part of the `Settings` sent to
- *   `update_settings`; the dialog only shows whether one is stored.
- * - AI: analysis on/off, the local clone per repository (cards in Iris's
- *   Editors look, the folder picked with the native dialog), and the review
- *   skill per repository (`ReviewSkillsSection`: a filterable picker in the
- *   repository's card, applied at once).
+ * - General: theme and reduced motion (`themeStore` / `settingsStore`), the
+ *   refresh interval and the disk cache's size limit (the core's
+ *   `settings.json`), with what the cache holds and Clear (`cacheStore`).
+ * - Accounts: every host the user's `gh` and `glab` are logged in to, each
+ *   with its login state, an on/off switch and (gh) the account to use;
+ *   the login commands, copyable, and Check again (`AccountsTab`). Argus
+ *   keeps no token.
+ * - AI: analysis on/off, the default review language (`ReviewLanguageField`)
+ *   and a pointer to Repositories.
+ * - Repositories: per repository its local clone, review skill and review
+ *   language (`RepositoriesTab`), opened on one by the clone chip.
  * - Editors: which application opens a review's file from its local clone
  *   (Open in editor): a default editor and per-extension overrides, Iris's
  *   Editors tab (`editorOverrides`, `defaultEditor` in `settings.json`).
+ * - Scripts: the user's own submit scripts (`ScriptsTab`): what they are and
+ *   get, the "Write with AI" drafts, one card per script, and the writer
+ *   (`ScriptWriter`, a dialog over this one: Escape closes it first; the
+ *   draft keeps running). The tab shows a spinner while a draft runs.
  * - Shortcuts: rebind the keyboard shortcuts (`ShortcutsTab`, `lib/keymap`).
  *
  * The family's save model: switches and steppers apply at once; text fields
@@ -25,15 +29,9 @@
  * in `TabBody`.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { toIpcError } from "../ipc/commands";
-import {
-  cloneError,
-  normalizeRepo,
-  withClone,
-  withoutClone,
-} from "../lib/clonePaths";
 import {
   appName,
   normalizeExtension,
@@ -42,11 +40,7 @@ import {
   withoutOverride,
 } from "../lib/editorOverrides";
 import { isMac, isWindows } from "../lib/platform";
-import {
-  HTTP_TOKEN_NOTE,
-  INSECURE_NOTE,
-  isInsecureUrl,
-} from "../lib/providers";
+import { AUTO_LANGUAGE, globalLanguage } from "../lib/repositories";
 import { NOT_READ_ONLY_NOTE, useReadOnlyGuaranteed } from "../state/aiStore";
 import {
   POLL_MINUTES_MAX,
@@ -57,12 +51,24 @@ import {
   useSettingsRequestStore,
   type SettingsTabId,
 } from "../state/settingsRequestStore";
+import {
+  CACHE_LIMITS_MB,
+  DEFAULT_CACHE_LIMIT_MB,
+  formatBytes,
+  formatLimit,
+  useCacheStore,
+} from "../state/cacheStore";
 import { useSettingsStore } from "../state/settingsStore";
+import { useSubmitScriptsStore } from "../state/submitScriptsStore";
 import { useThemeStore, type ThemeMode } from "../state/themeStore";
-import { toastSuccess } from "../state/toastStore";
-import { AddIcon, CheckIcon, MinusIcon } from "./icons";
+import { AccountsTab } from "./AccountsTab";
+import { CheckIcon } from "./icons";
 import { Modal } from "./Modal";
-import { ReviewSkillsSection } from "./ReviewSkillPicker";
+import { RepositoriesTab } from "./RepositoriesTab";
+import { ReviewLanguageField } from "./ReviewLanguageField";
+import { ScriptsTab } from "./ScriptsTab";
+import { ScriptWriterHost } from "./ScriptWriter";
+import { SettingToggle, Stepper } from "./SettingsControls";
 import { ShortcutsTab } from "./ShortcutsTab";
 import styles from "./SettingsModal.module.css";
 
@@ -73,10 +79,11 @@ interface SettingsModalProps {
 
 const TABS: [SettingsTabId, string][] = [
   ["general", "General"],
-  ["github", "GitHub"],
-  ["gitlab", "GitLab"],
+  ["accounts", "Accounts"],
   ["ai", "AI"],
+  ["repositories", "Repositories"],
   ["editors", "Editors"],
+  ["scripts", "Scripts"],
   ["shortcuts", "Shortcuts"],
 ];
 
@@ -119,137 +126,110 @@ const THEMES: {
   },
 ];
 
-/** Checkbox toggle row with label and optional helper text. */
-function SettingToggle({
-  label,
-  help,
-  value,
-  disabled,
-  onChange,
-}: {
-  label: string;
-  help?: string;
-  value: boolean;
-  disabled?: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className={styles.row}>
-      <span className={styles.rowLabel}>
-        {label}
-        {help && <small className={styles.rowHelp}>{help}</small>}
-      </span>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={value}
-        className={styles.toggle}
-        data-on={value ? "true" : "false"}
-        disabled={disabled}
-        onClick={() => onChange(!value)}
-        aria-label={label}
-      />
-    </div>
-  );
-}
-
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTabId>("general");
   const requestedTab = useSettingsRequestStore((s) => s.request);
+  // Every request counts, also one for the tab asked for before.
+  const requestSeq = useSettingsRequestStore((s) => s.seq);
   useEffect(() => {
     if (open && requestedTab) setTab(requestedTab);
-  }, [open, requestedTab]);
+  }, [open, requestedTab, requestSeq]);
   // Fresh from the core every time the dialog opens.
   useEffect(() => {
     if (open) void useBackendSettingsStore.getState().load();
   }, [open]);
+  // "Write with AI" sits over this dialog: Escape (or a click outside)
+  // closes it first, never both.
+  const writerOpen = useSubmitScriptsStore((s) => s.writer !== null);
+  // A small spinner on the Scripts tab while a draft is being written.
+  const draftRunning = useSubmitScriptsStore((s) =>
+    s.drafts.some((d) => d.status === "running"),
+  );
+  useEffect(() => {
+    if (!open) useSubmitScriptsStore.getState().closeWriter();
+  }, [open]);
+  const close = () => {
+    if (!writerOpen) onClose();
+  };
+  // Only this pane scrolls; a new tab starts at the top, not where the last
+  // one was left.
+  const paneRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (paneRef.current) paneRef.current.scrollTop = 0;
+  }, [tab]);
 
   return (
-    <Modal open={open} title="Settings" onClose={onClose} width={520}>
-      {/* Tabs */}
-      <div className={styles.tabs} role="tablist" aria-label="Settings tabs">
-        {TABS.map(([id, label]) => (
-          <button
-            key={id}
-            type="button"
-            role="tab"
-            aria-selected={tab === id}
-            className={styles.tab}
-            data-active={tab === id ? "true" : "false"}
-            onClick={() => setTab(id)}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+    <>
+      <Modal
+        open={open}
+        title="Settings"
+        onClose={close}
+        width="min(760px, calc(100vw - 32px))"
+        height="min(680px, calc(100vh - 64px))"
+        bare
+      >
+        {/* Tabs */}
+        <div className={styles.tabs} role="tablist" aria-label="Settings tabs">
+          {TABS.map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={tab === id}
+              className={styles.tab}
+              data-active={tab === id ? "true" : "false"}
+              onClick={() => setTab(id)}
+            >
+              {label}
+              {id === "scripts" && draftRunning && (
+                <span
+                  className={`spinner ${styles.tabBusy}`}
+                  aria-hidden="true"
+                  title="A script draft is being written"
+                />
+              )}
+            </button>
+          ))}
+        </div>
 
-      <TabBody tab={tab} />
-    </Modal>
+        <div
+          ref={paneRef}
+          className={styles.pane}
+          role="tabpanel"
+          aria-label={TABS.find(([id]) => id === tab)?.[1]}
+          data-testid="settings-pane"
+        >
+          <TabBody tab={tab} onTab={setTab} />
+        </div>
+      </Modal>
+      {open && <ScriptWriterHost />}
+    </>
   );
 }
 
-function TabBody({ tab }: { tab: SettingsTabId }) {
+function TabBody({
+  tab,
+  onTab,
+}: {
+  tab: SettingsTabId;
+  onTab: (tab: SettingsTabId) => void;
+}) {
   switch (tab) {
     case "general":
       return <GeneralTab />;
-    case "github":
-      return <GithubTab />;
-    case "gitlab":
-      return <GitlabTab />;
+    case "accounts":
+      return <AccountsTab />;
     case "ai":
-      return (
-        <>
-          <AiTab />
-          <ClonesSection />
-          <ReviewSkillsSection />
-        </>
-      );
+      return <AiTab onRepositories={() => onTab("repositories")} />;
+    case "repositories":
+      return <RepositoriesTab />;
     case "editors":
       return <EditorsTab />;
+    case "scripts":
+      return <ScriptsTab />;
     case "shortcuts":
       return <ShortcutsTab />;
   }
-}
-
-/** A − value + control for a bounded whole number (`label` names it). */
-function Stepper({
-  label,
-  value,
-  min,
-  max,
-  show = String,
-  onChange,
-}: {
-  label: string;
-  value: number | null;
-  min: number;
-  max: number;
-  show?: (value: number) => string;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <div className={styles.stepper}>
-      <button
-        type="button"
-        aria-label={`Decrease ${label.toLowerCase()}`}
-        disabled={value === null || value <= min}
-        onClick={() => value !== null && onChange(value - 1)}
-      >
-        <MinusIcon size={14} />
-      </button>
-      <span className={styles.stepperValue} aria-label={label}>
-        {value === null ? "–" : show(value)}
-      </span>
-      <button
-        type="button"
-        aria-label={`Increase ${label.toLowerCase()}`}
-        disabled={value === null || value >= max}
-        onClick={() => value !== null && onChange(value + 1)}
-      >
-        <AddIcon size={14} />
-      </button>
-    </div>
-  );
 }
 
 function GeneralTab() {
@@ -327,423 +307,129 @@ function GeneralTab() {
           />
         </div>
       </section>
+
+      <CacheSection />
     </>
   );
 }
 
-function GithubTab() {
+/**
+ * The disk cache: file contents and file lists read from GitHub and GitLab,
+ * so reopening a review needs no network. Its limit is a stepper over
+ * `CACHE_LIMITS_MB` (by index: the steps are not even).
+ */
+function CacheSection() {
   const settings = useBackendSettingsStore((s) => s.settings);
   const save = useBackendSettingsStore((s) => s.save);
-  const [host, setHost] = useState("");
-  const [account, setAccount] = useState("");
-  const [busy, setBusy] = useState(false);
-  const github = settings?.github;
-  // The form follows what is stored (on load and after every save).
+  const stats = useCacheStore((s) => s.stats);
+  const clearing = useCacheStore((s) => s.clearing);
+  const load = useCacheStore((s) => s.load);
+  const clear = useCacheStore((s) => s.clear);
   useEffect(() => {
-    if (!github) return;
-    setHost(github.host);
-    setAccount(github.account ?? "");
-  }, [github]);
-
-  const dirty =
-    !!github &&
-    (host.trim() !== github.host || account.trim() !== (github.account ?? ""));
-
-  const submit = async () => {
-    if (!github) return;
-    setBusy(true);
-    const ok = await save({
-      github: { ...github, host: host.trim(), account: account.trim() || null },
-    });
-    setBusy(false);
-    if (ok) toastSuccess("GitHub settings saved");
-  };
-
+    void load();
+  }, [load]);
+  const limit = settings?.cacheLimitMb ?? DEFAULT_CACHE_LIMIT_MB;
+  // The nearest offered step (a hand-edited value may be between two).
+  const index = settings
+    ? CACHE_LIMITS_MB.reduce(
+        (best, mb, i) =>
+          Math.abs(mb - limit) < Math.abs(CACHE_LIMITS_MB[best] - limit)
+            ? i
+            : best,
+        0,
+      )
+    : null;
   return (
     <section className={styles.section}>
-      <h3 className={styles.sectionLabel}>GitHub</h3>
-      <SettingToggle
-        label="Use GitHub"
-        help="Through the gh CLI and its login. Run gh auth login once."
-        value={github?.enabled ?? false}
-        disabled={!github}
-        onChange={(enabled) =>
-          github && void save({ github: { ...github, enabled } })
-        }
-      />
-      <form
-        className={styles.card}
-        aria-label="GitHub host and account"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <div className={styles.field}>
-          <label htmlFor="gh-host">Host</label>
-          <input
-            id="gh-host"
-            type="text"
-            value={host}
-            placeholder="github.com"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            disabled={!github}
-            onChange={(e) => setHost(e.target.value)}
-          />
-        </div>
-        <div className={styles.field}>
-          <label htmlFor="gh-account">Account (optional)</label>
-          <input
-            id="gh-account"
-            type="text"
-            value={account}
-            placeholder="Blank = gh's active account"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            disabled={!github}
-            onChange={(e) => setAccount(e.target.value)}
-          />
-        </div>
-        <div className={styles.editActions}>
-          <button type="submit" className="primary" disabled={!dirty || busy}>
-            {busy ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </form>
+      <h3 className={styles.sectionLabel}>Cache</h3>
+      <div className={styles.row}>
+        <span className={styles.rowLabel}>
+          Keep up to
+          <small className={styles.rowHelp}>
+            Files and file lists read from GitHub and GitLab are kept on disk,
+            so a review opens again without the network. The least recently used
+            go first.
+          </small>
+        </span>
+        <Stepper
+          label="Cache limit"
+          value={index}
+          min={0}
+          max={CACHE_LIMITS_MB.length - 1}
+          show={(i) => formatLimit(CACHE_LIMITS_MB[i])}
+          onChange={(i) => void save({ cacheLimitMb: CACHE_LIMITS_MB[i] })}
+        />
+      </div>
+      <div className={styles.row}>
+        <span className={styles.rowLabel}>
+          In use
+          <small className={styles.rowHelp} aria-live="polite">
+            {stats
+              ? `${formatBytes(stats.bytes)} in ${stats.entries} ${stats.entries === 1 ? "entry" : "entries"}`
+              : "…"}
+          </small>
+        </span>
+        <button
+          type="button"
+          disabled={clearing || !stats || stats.entries === 0}
+          onClick={() => void clear()}
+        >
+          Clear cache
+        </button>
+      </div>
     </section>
   );
 }
 
-function GitlabTab() {
-  const settings = useBackendSettingsStore((s) => s.settings);
-  const tokenPresent = useBackendSettingsStore((s) => s.tokenPresent);
-  const savedInsecure = useBackendSettingsStore(
-    (s) => !!s.status?.gitlab.insecure,
-  );
-  const save = useBackendSettingsStore((s) => s.save);
-  const storeToken = useBackendSettingsStore((s) => s.setGitlabToken);
-  const [url, setUrl] = useState("");
-  // Always starts empty: the stored token is never read back.
-  const [token, setToken] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const gitlab = settings?.gitlab;
-  useEffect(() => {
-    if (gitlab) setUrl(gitlab.baseUrl);
-  }, [gitlab]);
-
-  const urlChanged = !!gitlab && url.trim() !== gitlab.baseUrl;
-  const dirty = urlChanged || token.trim() !== "";
-
-  const submit = async () => {
-    if (!gitlab) return;
-    const trimmed = token.trim();
-    if (trimmed && !url.trim()) {
-      setError("Set the GitLab URL before its token.");
-      return;
-    }
-    setError(null);
-    setBusy(true);
-    // Settings first: the token is stored for the GitLab URL just saved.
-    let ok = true;
-    if (urlChanged) ok = await save({ gitlab: { ...gitlab, baseUrl: url } });
-    if (ok && trimmed) ok = await storeToken(trimmed);
-    setBusy(false);
-    if (ok) {
-      setToken("");
-      toastSuccess("GitLab settings saved");
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    const ok = await storeToken("");
-    setBusy(false);
-    if (ok) toastSuccess("Token removed");
-  };
-
-  return (
-    <section className={styles.section}>
-      <h3 className={styles.sectionLabel}>GitLab</h3>
-      <small className={styles.rowHelp}>
-        A self-hosted or gitlab.com instance, read with a personal access token
-        (read_api scope is enough). Leave the URL empty to turn GitLab off.
-      </small>
-      <form
-        className={styles.card}
-        aria-label="GitLab URL and token"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void submit();
-        }}
-      >
-        <div className={styles.field}>
-          <label htmlFor="gl-url">Base URL</label>
-          <input
-            id="gl-url"
-            type="text"
-            value={url}
-            placeholder="https://gitlab.example.com (empty = off)"
-            autoComplete="off"
-            autoCorrect="off"
-            autoCapitalize="off"
-            spellCheck={false}
-            disabled={!gitlab}
-            onChange={(e) => {
-              setUrl(e.target.value);
-              setError(null);
-            }}
-          />
-          {isInsecureUrl(url) && (
-            <p className={styles.warning} role="note">
-              {INSECURE_NOTE}
-            </p>
-          )}
-        </div>
-        <div className={styles.field}>
-          <div className={styles.labelRow}>
-            <label htmlFor="gl-token">Personal access token</label>
-            <span
-              className={styles.tokenState}
-              data-set={tokenPresent ? "true" : "false"}
-            >
-              {tokenPresent ? "Token set" : "Not set"}
-            </span>
-          </div>
-          <div className={styles.fieldRow}>
-            <input
-              id="gl-token"
-              type="password"
-              autoComplete="off"
-              value={token}
-              placeholder={
-                tokenPresent
-                  ? "Leave empty to keep the stored token"
-                  : "glpat-…"
-              }
-              disabled={!gitlab}
-              onChange={(e) => {
-                setToken(e.target.value);
-                setError(null);
-              }}
-            />
-            {tokenPresent && (
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void remove()}
-              >
-                Remove token
-              </button>
-            )}
-          </div>
-          {!tokenPresent && !urlChanged && savedInsecure && (
-            <p className={styles.warning} role="note">
-              {HTTP_TOKEN_NOTE}
-            </p>
-          )}
-          <small className={styles.rowHelp}>Kept in the system keychain.</small>
-        </div>
-        {error && (
-          <p className={styles.error} role="alert">
-            {error}
-          </p>
-        )}
-        <div className={styles.editActions}>
-          <button type="submit" className="primary" disabled={!dirty || busy}>
-            {busy ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </form>
-    </section>
-  );
-}
-
-function AiTab() {
+function AiTab({ onRepositories }: { onRepositories: () => void }) {
   const settings = useBackendSettingsStore((s) => s.settings);
   const save = useBackendSettingsStore((s) => s.save);
   const readOnly = useReadOnlyGuaranteed();
   const ai = settings?.ai;
   return (
-    <section className={styles.section}>
-      <h3 className={styles.sectionLabel}>AI</h3>
-      <SettingToggle
-        label="AI analysis"
-        help="Analyses new reviews and rounds with your local agent (Claude Code or auggie)."
-        value={ai?.enabled ?? false}
-        disabled={!ai}
-        onChange={(enabled) => ai && void save({ ai: { ...ai, enabled } })}
-      />
-      {!readOnly && <p className={styles.warning}>{NOT_READ_ONLY_NOTE}</p>}
-    </section>
-  );
-}
-
-/** The row being added (`original` null) or edited. */
-interface CloneDraft {
-  original: string | null;
-  repo: string;
-  path: string;
-}
-
-/** Native folder picker for a local clone. */
-async function pickFolder(): Promise<string | null> {
-  const { open } = await import("@tauri-apps/plugin-dialog");
-  const picked = await open({
-    multiple: false,
-    directory: true,
-    title: "Choose the local clone",
-  });
-  return typeof picked === "string" ? picked : null;
-}
-
-function ClonesSection() {
-  const settings = useBackendSettingsStore((s) => s.settings);
-  const save = useBackendSettingsStore((s) => s.save);
-  const [draft, setDraft] = useState<CloneDraft | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const clones = settings?.clonePaths ?? {};
-  const rows = Object.entries(clones).sort(([a], [b]) => a.localeCompare(b));
-
-  const edit = (next: CloneDraft | null) => {
-    setDraft(next);
-    setError(null);
-  };
-  const choose = async () => {
-    if (!draft) return;
-    try {
-      const path = await pickFolder();
-      if (path) setDraft({ ...draft, path });
-    } catch (e) {
-      setError(toIpcError(e).message);
-    }
-  };
-  const submit = () => {
-    if (!draft) return;
-    const repo = normalizeRepo(draft.repo);
-    const problem = cloneError(repo, draft.path, clones, draft.original);
-    if (problem) {
-      setError(problem);
-      return;
-    }
-    edit(null);
-    void save({
-      clonePaths: withClone(clones, repo, draft.path, draft.original),
-    });
-  };
-
-  return (
-    <section className={styles.section}>
-      <h3 className={styles.sectionLabel}>Local clones</h3>
-      <small className={styles.rowHelp}>
-        A local checkout per repository lets the analysis read more than the
-        diff. Recommended, never required.
-      </small>
-      {settings && rows.length === 0 && !draft && (
-        <p className={styles.empty}>No clones set.</p>
-      )}
-      {rows.map(([repo, path]) => (
-        <div key={repo} className={styles.card}>
-          <div className={styles.cardHeader}>
-            <span className={styles.cardName}>{repo}</span>
-            <div className={`${styles.cardActions} ${styles.pushRight}`}>
-              <button
-                type="button"
-                aria-label={`Edit the clone of ${repo}`}
-                onClick={() => edit({ original: repo, repo, path })}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                aria-label={`Remove the clone of ${repo}`}
-                onClick={() =>
-                  void save({ clonePaths: withoutClone(clones, repo) })
-                }
-              >
-                Remove
-              </button>
-            </div>
-          </div>
-          <span className={styles.cardDetail} title={path}>
-            {path}
-          </span>
-        </div>
-      ))}
-      {draft ? (
-        <form
-          className={styles.card}
-          aria-label={draft.original ? "Edit clone" : "New clone"}
-          onSubmit={(e) => {
-            e.preventDefault();
-            submit();
-          }}
-        >
-          <span className={styles.cardName}>
-            {draft.original ? `Edit ${draft.original}` : "New clone"}
-          </span>
-          <div className={styles.field}>
-            <label htmlFor="clone-repo">Repository</label>
-            <input
-              id="clone-repo"
-              type="text"
-              value={draft.repo}
-              placeholder="github.com/acme/widgets"
-              autoComplete="off"
-              autoCorrect="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              onChange={(e) => setDraft({ ...draft, repo: e.target.value })}
-            />
-          </div>
-          <div className={styles.field}>
-            <label htmlFor="clone-path">Folder</label>
-            <div className={styles.fieldRow}>
-              <input
-                id="clone-path"
-                type="text"
-                readOnly
-                value={draft.path}
-                placeholder="Not chosen"
-                title={draft.path}
-              />
-              <button type="button" onClick={() => void choose()}>
-                Choose…
-              </button>
-            </div>
-          </div>
-          {error && (
-            <p className={styles.error} role="alert">
-              {error}
-            </p>
-          )}
-          <div className={styles.editActions}>
-            <button type="button" onClick={() => edit(null)}>
-              Cancel
-            </button>
-            <button type="submit" className="primary">
-              Save
-            </button>
-          </div>
-        </form>
-      ) : (
-        <div className={styles.editActions}>
+    <>
+      <section className={styles.section}>
+        <h3 className={styles.sectionLabel}>AI</h3>
+        <SettingToggle
+          label="AI analysis"
+          help="Analyses new reviews and rounds with your local agent (Claude Code or auggie)."
+          value={ai?.enabled ?? false}
+          disabled={!ai}
+          onChange={(enabled) => ai && void save({ ai: { ...ai, enabled } })}
+        />
+        {!readOnly && <p className={styles.warning}>{NOT_READ_ONLY_NOTE}</p>}
+      </section>
+      <section className={styles.section}>
+        <h3 className={styles.sectionLabel}>Review language</h3>
+        <small className={styles.rowHelp}>
+          The language the analysis writes its findings, checklist and verdicts
+          in, for every repository without its own. Auto follows the merge
+          request (English when unclear). Code stays as it is.
+        </small>
+        <ReviewLanguageField
+          id="ai-review-language"
+          label="Default review language"
+          value={globalLanguage(settings)}
+          disabled={!ai}
+          onChange={(language) =>
+            ai &&
+            void save({
+              ai: { ...ai, reviewLanguage: language ?? AUTO_LANGUAGE },
+            })
+          }
+        />
+        <small className={styles.rowHelp}>
+          Per-repository setup (local clone, review skill, language):{" "}
           <button
             type="button"
-            disabled={!settings}
-            onClick={() => edit({ original: null, repo: "", path: "" })}
+            className={`ghost ${styles.inlineLink}`}
+            onClick={onRepositories}
           >
-            Add clone
+            Settings → Repositories
           </button>
-        </div>
-      )}
-    </section>
+        </small>
+      </section>
+    </>
   );
 }
 
@@ -823,9 +509,16 @@ function EditorsTab() {
       <h3 className={styles.sectionLabel}>Editors</h3>
       <small className={styles.rowHelp}>
         Open in editor opens a review&apos;s file from your local clone
-        (Settings → AI) in the application set for its extension, else the
-        default editor, else your system&apos;s default app.
+        (Settings → Repositories) in the application set for its extension, else
+        the default editor, else your system&apos;s default app.
       </small>
+      <SettingToggle
+        label="Open the repository with the file"
+        help="With an editor set, open the clone's folder too, so the editor shows the project. The system default app opens the file only."
+        value={settings?.openWithRepository ?? true}
+        disabled={!settings}
+        onChange={(openWithRepository) => void save({ openWithRepository })}
+      />
       <div className={styles.card}>
         <div className={styles.cardHeader}>
           <span className={styles.cardName}>Default editor</span>

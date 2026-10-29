@@ -5,11 +5,17 @@
  *
  * The rows are aligned: a line only one side has leaves a `pad` line on the
  * other, so the two columns stay level side by side.
+ *
+ * The timeline's notes come from the thread as the thread store holds it,
+ * not from the history (`threadTimeline`): the history is a separate, slower
+ * read (after a push every thread is walked again), so a reply shows as
+ * soon as the threads are re-read.
  */
 
 import type {
   CodeSnapshot,
   LineChange,
+  StoredThread,
   ThreadHistory,
   TimelineEntry,
 } from "../ipc/types";
@@ -231,4 +237,36 @@ export function entryKey(e: TimelineEntry, i: number): string {
     default:
       return `${e.kind}-${i}`;
   }
+}
+
+/** An entry's time for ordering: `null` (an undated commit) sorts last. */
+function entryTime(e: TimelineEntry): number {
+  if (e.at === null) return Infinity;
+  const t = Date.parse(e.at);
+  return Number.isNaN(t) ? Infinity : t;
+}
+
+/**
+ * The timeline a thread card shows: the thread's own notes (as stored now)
+ * with the history's commits and resolve events, oldest first, undated
+ * entries last; ties keep notes before the rest (the core's `merge`
+ * order). The history's own note entries are left out: they are as old as
+ * its read.
+ */
+export function threadTimeline(
+  t: Pick<StoredThread, "notes">,
+  h: Pick<ThreadHistory, "timeline">,
+): TimelineEntry[] {
+  const notes: TimelineEntry[] = t.notes.map((n, i) => ({
+    at: n.createdAt,
+    kind: "note",
+    noteId: n.id,
+    author: n.author,
+    body: n.body,
+    system: n.system,
+    root: i === 0,
+  }));
+  const rest = h.timeline.filter((e) => e.kind !== "note");
+  // Stable: equal times keep this order.
+  return [...notes, ...rest].sort((a, b) => entryTime(a) - entryTime(b));
 }

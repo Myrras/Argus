@@ -2,9 +2,9 @@
  * The header's local-clone chip: whether the review's repository has a
  * clone, and where. Three states, read from `cloneStatusStore`:
  * found (the short path; click shows the folder in Finder), configured but
- * missing or no git repository (warning tint; click opens Settings → AI,
- * where clones are set) and not configured (a quiet "No local clone", the
- * same click). The tooltip has the full path, the clone's HEAD and whether
+ * missing or no git repository (warning tint; click opens Settings →
+ * Repositories on this repository, where clones are set) and not configured
+ * (a quiet "No local clone", the same click). The tooltip has the full path, the clone's HEAD and whether
  * it is the review's head. Nothing while the first read is under way.
  */
 
@@ -19,8 +19,9 @@ import styles from "./CloneChip.module.css";
 
 export function CloneChip({ review: r }: { review: ReviewRecord }) {
   // The clone set in Settings, so a change there re-reads the status.
+  const repo = `${r.host}/${r.repo}`;
   const setPath = useBackendSettingsStore(
-    (s) => s.settings?.clonePaths[`${r.host}/${r.repo}`] ?? null,
+    (s) => s.settings?.clonePaths[repo] ?? null,
   );
   const status = useCloneStatus(r.id, r.headSha, setPath);
   const openSettings = useSettingsRequestStore((s) => s.open);
@@ -54,7 +55,9 @@ export function CloneChip({ review: r }: { review: ReviewRecord }) {
           : cloneTitle(status)
       }
       onClick={() =>
-        state === "found" ? void revealCloneFolder(r.id) : openSettings("ai")
+        state === "found"
+          ? void revealCloneFolder(r.id)
+          : openSettings("repositories", repo)
       }
     >
       <Icon className={styles.icon} />

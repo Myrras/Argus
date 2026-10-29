@@ -296,28 +296,28 @@ describe("then/now", () => {
 
 describe("timeline", () => {
   it("interleaves replies and commits by time", () => {
-    const t = mine();
+    // The notes are the thread's; the history adds commits and resolves.
+    const t = mine({
+      notes: [
+        {
+          id: "n1",
+          author: "rev-fixture",
+          body: "Hash the key.",
+          createdAt: "2026-10-14T09:00:00Z",
+          system: false,
+        },
+        {
+          id: "n2",
+          author: "alice-fixture",
+          body: "Fixed.",
+          createdAt: "2026-10-14T10:00:00Z",
+          system: false,
+        },
+      ],
+    });
     seed(
       historyFor(t, {
         timeline: [
-          {
-            at: "2026-10-14T09:00:00Z",
-            kind: "note",
-            noteId: "n1",
-            author: "rev-fixture",
-            body: "Hash the key.",
-            system: false,
-            root: true,
-          },
-          {
-            at: "2026-10-14T10:00:00Z",
-            kind: "note",
-            noteId: "n2",
-            author: "alice-fixture",
-            body: "Fixed.",
-            system: false,
-            root: false,
-          },
           {
             at: "2026-10-15T09:00:00Z",
             kind: "commit",
@@ -353,22 +353,18 @@ describe("timeline", () => {
   });
 
   it("folds a long note behind Show more", () => {
-    const t = mine();
-    seed(
-      historyFor(t, {
-        timeline: [
-          {
-            at: "2026-10-14T09:00:00Z",
-            kind: "note",
-            noteId: "n1",
-            author: "rev-fixture",
-            body: "A paragraph.\n\n".repeat(10),
-            system: false,
-            root: true,
-          },
-        ],
-      }),
-    );
+    const t = mine({
+      notes: [
+        {
+          id: "n1",
+          author: "rev-fixture",
+          body: "A paragraph.\n\n".repeat(10),
+          createdAt: "2026-10-14T09:00:00Z",
+          system: false,
+        },
+      ],
+    });
+    seed(historyFor(t));
     show(t);
     const more = screen.getByRole("button", { name: "Show more" });
     fireEvent.click(more);

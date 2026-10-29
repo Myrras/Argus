@@ -5,22 +5,67 @@
  * draft's edit (Save) and a reply (Reply).
  *
  * Keys (`lib/keymap`, the `composer` scope): Submit comment (⌘↩ / Ctrl+↩)
- * runs the primary action, Escape cancels. Nothing runs without one of
- * those or a click.
+ * runs the primary action, Escape cancels, Insert suggestion (⌘G / Ctrl+G)
+ * inserts a suggestion block. Nothing runs without one of those or a click.
+ *
+ * Suggestions (`suggestion`, from `useComposerSuggestion`; only composers
+ * on code lines get it): the toolbar's "Insert suggestion" puts a
+ * ` ```suggestion ` block at the caret, prefilled with the comment's lines
+ * at the head, in the platform's syntax (`lib/suggestions`); when it can't,
+ * it stays off with the reason as its tooltip. Inside a suggestion's
+ * content Enter keeps the line's indentation and Tab / Shift+Tab indent by
+ * the file's step; elsewhere both behave as always. Preview shows a block
+ * as the `SuggestedChange` diff a posted one gets. A block that no longer
+ * covers the comment's lines is flagged with a fix. Inserting writes text
+ * only: nothing posts.
  *
  * Presentational: the text, busy state and error come in as props, so the
  * caller (a store) keeps the text when a post fails or the widget is
  * rebuilt.
  */
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 
 import type { PostError } from "../ipc/types";
 import { takeFocus } from "../lib/focusRequests";
-import { formatBinding, matches } from "../lib/keymap";
+import { formatBinding, matches, withHint } from "../lib/keymap";
+import { isMac } from "../lib/platform";
+import {
+  enterInSuggestion,
+  insertSuggestion,
+  rangeText,
+  retargetSuggestions,
+  suggestionMismatch,
+  tabInSuggestion,
+  type TextEdit,
+} from "../lib/suggestions";
+import type { ComposerSuggestion } from "../lib/useComposerSuggestion";
 import { currentKeymap, useKeymap } from "../lib/useKeymap";
+import { toastInfo } from "../state/toastStore";
+import { SuggestionIcon } from "./icons";
 import { Markdown } from "./Markdown";
 import styles from "./CommentComposer.module.css";
+
+/** A binding (`Mod+KeyG`) in `aria-keyshortcuts` form (`Meta+G`). */
+function ariaShortcut(binding: string | undefined): string | undefined {
+  if (!binding) return undefined;
+  return binding
+    .split("+")
+    .map((p) =>
+      p === "Mod"
+        ? isMac
+          ? "Meta"
+          : "Control"
+        : p.replace(/^(Key|Digit)/, ""),
+    )
+    .join("+");
+}
 
 export interface ComposerAction {
   label: string;
@@ -44,6 +89,7 @@ export function CommentComposer({
   placeholder = "Leave a comment (markdown)",
   onResize,
   focusKey,
+  suggestion,
 }: {
   /** What is being written, for the field's name ("Comment on line 12"). */
   label: string;
@@ -64,11 +110,93 @@ export function CommentComposer({
    * one, it focuses on every mount.
    */
   focusKey?: string;
+  /** Suggestion tools: only for a composer on code lines. */
+  suggestion?: ComposerSuggestion;
 }) {
   const [preview, setPreview] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
   const keymap = useKeymap();
   const empty = body.trim() === "";
+  // The caret to restore after an edit made through `onChange`.
+  const pendingSelection = useRef<[number, number] | null>(null);
+  // The caret while the preview hides the field.
+  const lastCaret = useRef<number | null>(null);
+
+  useLayoutEffect(() => {
+    const sel = pendingSelection.current;
+    const el = field.current;
+    if (!sel || !el) return;
+    pendingSelection.current = null;
+    el.setSelectionRange(sel[0], sel[1]);
+  }, [body, preview]);
+
+  /**
+   * Apply `edit` as typing would, so the field's own undo takes it back
+   * (`insertText`, where the webview has it); else through `onChange`.
+   */
+  const applyEdit = (edit: TextEdit) => {
+    const el = field.current;
+    if (el && !preview) {
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(edit.start, edit.end);
+      let typed = false;
+      try {
+        typed =
+          typeof document.execCommand === "function" &&
+          document.execCommand("insertText", false, edit.text);
+      } catch {
+        typed = false;
+      }
+      if (
+        typed &&
+        el.value.slice(edit.start, edit.start + edit.text.length) === edit.text
+      ) {
+        el.setSelectionRange(edit.select[0], edit.select[1]);
+        return;
+      }
+    }
+    pendingSelection.current = edit.select;
+    onChange(body.slice(0, edit.start) + edit.text + body.slice(edit.end));
+  };
+
+  const insertBlock = () => {
+    if (!suggestion || busy) return;
+    const { range, lines, blocked } = suggestion;
+    if (blocked || !range || !lines) {
+      if (blocked) toastInfo("Can't insert a suggestion", blocked);
+      return;
+    }
+    const at = preview
+      ? (lastCaret.current ?? body.length)
+      : (field.current?.selectionEnd ?? body.length);
+    const edit = insertSuggestion(body, at, suggestion.provider, range, lines);
+    if (preview) setPreview(false);
+    applyEdit(edit);
+    suggestion.onInserted?.(range);
+  };
+
+  const onFieldKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.metaKey || e.ctrlKey || e.altKey) {
+      return;
+    }
+    const el = e.currentTarget;
+    const { selectionStart: from, selectionEnd: to } = el;
+    let edit: TextEdit | null = null;
+    if (e.key === "Enter" && !e.shiftKey) {
+      edit = enterInSuggestion(body, from, to);
+    } else if (e.key === "Tab") {
+      edit = tabInSuggestion(
+        body,
+        from,
+        to,
+        suggestion?.indent ?? "    ",
+        e.shiftKey,
+      );
+    }
+    if (!edit) return;
+    e.preventDefault();
+    applyEdit(edit);
+  };
 
   // Focus on open, and back on the field when leaving the preview.
   const mounted = useRef(false);
@@ -100,8 +228,47 @@ export function CommentComposer({
       e.preventDefault();
       e.stopPropagation();
       if (!busy && !empty && !primary.disabled) primary.onClick();
+      return;
+    }
+    if (map.insertSuggestion.some((b) => matches(e, b))) {
+      // Also without suggestion tools: never the browser's "find next".
+      e.preventDefault();
+      e.stopPropagation();
+      insertBlock();
     }
   };
+
+  const range = suggestion?.blocked === null ? suggestion.range : null;
+  const mismatch =
+    suggestion && range
+      ? suggestionMismatch(
+          body,
+          suggestion.provider,
+          range,
+          suggestion.insertedFor,
+        )
+      : null;
+  const fix =
+    !mismatch || !suggestion || !range
+      ? null
+      : suggestion.provider === "gitlab"
+        ? {
+            label: "Update suggestion range",
+            title: `Make the suggestion cover ${rangeText(range)}`,
+            run: () => {
+              pendingSelection.current = null;
+              onChange(retargetSuggestions(body, range));
+            },
+          }
+        : suggestion.onUseRange
+          ? {
+              label: `Comment on ${rangeText(mismatch.covered)}`,
+              title:
+                "Put the comment back on the lines the suggestion was written for",
+              run: () => suggestion.onUseRange?.(mismatch.covered),
+            }
+          : null;
+  const suggestOff = !suggestion || suggestion.blocked !== null;
 
   const hint = keymap.submitComment[0]
     ? formatBinding(keymap.submitComment[0])
@@ -134,6 +301,29 @@ export function CommentComposer({
         >
           Preview
         </button>
+        {suggestion && (
+          <button
+            type="button"
+            className={`iconButton ${styles.tool}`}
+            aria-label="Insert suggestion"
+            aria-disabled={suggestOff || busy}
+            aria-keyshortcuts={ariaShortcut(keymap.insertSuggestion[0])}
+            title={
+              suggestion.blocked ??
+              withHint("Insert suggestion", keymap, "insertSuggestion")
+            }
+            data-testid="insert-suggestion"
+            onMouseDown={(e) => {
+              // Keep the caret where it is in the field.
+              e.preventDefault();
+            }}
+            onClick={() => {
+              if (!suggestOff && !busy) insertBlock();
+            }}
+          >
+            <SuggestionIcon />
+          </button>
+        )}
         <span className={styles.label}>{label}</span>
       </div>
       {preview ? (
@@ -141,7 +331,7 @@ export function CommentComposer({
           {empty ? (
             <p className={styles.nothing}>Nothing to preview.</p>
           ) : (
-            <Markdown>{body}</Markdown>
+            <Markdown renderFence={suggestion?.renderFence}>{body}</Markdown>
           )}
         </div>
       ) : (
@@ -154,7 +344,31 @@ export function CommentComposer({
           disabled={busy}
           rows={Math.min(14, Math.max(3, body.split("\n").length + 1))}
           onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onFieldKeyDown}
+          onBlur={(e) => {
+            lastCaret.current = e.currentTarget.selectionEnd;
+          }}
         />
+      )}
+      {mismatch && (
+        <div
+          className={styles.mismatch}
+          role="status"
+          data-testid="suggestion-mismatch"
+        >
+          <span>{mismatch.message}</span>
+          {fix && (
+            <button
+              type="button"
+              className="ghost"
+              title={fix.title}
+              disabled={busy}
+              onClick={fix.run}
+            >
+              {fix.label}
+            </button>
+          )}
+        </div>
       )}
       {error && (
         <p className={styles.error} role="alert">

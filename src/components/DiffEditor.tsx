@@ -15,15 +15,30 @@
  * included, however narrow), from CSS variables the editor keeps current
  * (`blockGeometry`).
  *
- * Commenting (`comment`): the gutter's "+" shows on the commentable lines
- * only (hover to see it). A click opens a comment on that line, shift-click
- * extends the open one, a drag over the gutter selects a range; the caller
- * clamps a range to one hunk. A click in the code marks the "focused" line
- * the Comment-on-line key (c) comments on. From the keyboard: the code is a
- * Tab stop, ↑/↓ move the focused line, Enter comments on it (Shift+Enter
- * extends the open comment). The unified view shows the head,
- * so its "+" is on new-side lines; old-side lines are commented on in the
- * side-by-side view.
+ * Commenting (`comment`): one "+" follows the pointer, beside the line
+ * under it when that line is commentable (per editor, so per side in the
+ * split view; `listenForComments`). A click opens a comment on that line,
+ * shift-click extends the open one, a drag from the "+" selects a range
+ * that stays in the anchor's region (`regionOf`: one hunk, or one stretch
+ * outside the diff), with the range marked, a floating "Comment on lines
+ * 12–18" and a refused line shown as such; Escape cancels it. A click in
+ * the code marks the "focused" line the Comment-on-line key (c) comments
+ * on. From the keyboard: the code is a Tab stop, ↑/↓ move the focused
+ * line, Enter comments on it (Shift+Enter extends the open comment). The
+ * unified view shows the head, so its "+" is on new-side lines (unchanged
+ * ones included); removed lines are commented on in the side-by-side view.
+ *
+ * Side by side, a collapsed stretch opened on one side opens on the other
+ * (`syncCollapse`, `lib/collapseSync`, by lines).
+ *
+ * Find (Cmd+F): each editor highlights the find bar's matches on its side
+ * (`lib/findHighlight`), and `revealLine` takes the bar to a match (a
+ * collapsed stretch around it opens).
+ *
+ * `hideWhitespace`: the merge views diff with `lib/whitespaceDiff`
+ * (`HIDE_WHITESPACE`), so lines that changed only in whitespace fold with
+ * the unchanged code; the documents stay as they are. Toggling rebuilds the
+ * editors like a layout switch (back to the line being read).
  */
 
 import { useEffect, useRef, type ReactNode } from "react";
@@ -31,11 +46,14 @@ import { createRoot, type Root } from "react-dom/client";
 
 import {
   getChunks,
+  getOriginalDoc,
   MergeView,
+  mergeViewSiblings,
   uncollapseUnchanged,
   unifiedMergeView,
 } from "@codemirror/merge";
 import {
+  Annotation,
   Compartment,
   EditorState,
   RangeSetBuilder,
@@ -44,6 +62,7 @@ import {
   type Extension,
 } from "@codemirror/state";
 import {
+  BlockType,
   Decoration,
   type DecorationSet,
   EditorView,
@@ -66,11 +85,24 @@ import {
   blockHeight,
   blockSignature,
   blockWidth,
+  openedStretches,
   registerDiffEditor,
   rememberBlockHeight,
+  rememberOpened,
+  stretchKey,
   threadBlockKey,
 } from "../lib/diffEditors";
+import { mirrorPositions } from "../lib/collapseSync";
+import { findHighlighting, findTarget } from "../lib/findHighlight";
+import {
+  dragLabel,
+  dragReach,
+  dragStop,
+  PLUS_HINT,
+  type LineRegionInfo,
+} from "../lib/commentDrag";
 import { pauseScrollAnchor, readingEdge } from "../lib/scrollAnchor";
+import { editorDiffConfig } from "../lib/whitespaceDiff";
 import { useLayoutStore, type DiffLayout } from "../state/layoutStore";
 import { useThemeStore } from "../state/themeStore";
 
@@ -284,12 +316,18 @@ interface CommentInfo {
   selection: { from: number; to: number } | null;
   /** The line the Comment-on-line key comments on. */
   focus: number | null;
+  /** A line's region; null when it takes no comment. */
+  region: (line: number) => LineRegionInfo | null;
+  /** What the "+" adds to its tooltip on a line outside the diff. */
+  outsideHint: string | null;
 }
 
 const NO_COMMENT: CommentInfo = {
   lines: new Set(),
   selection: null,
   focus: null,
+  region: () => null,
+  outsideHint: null,
 };
 
 const setComment = StateEffect.define<CommentInfo>();
@@ -302,43 +340,94 @@ const commentField = StateField.define<CommentInfo>({
   },
 });
 
-/** The selected range and the focused line, as line classes. */
-const commentLines = EditorView.decorations.compute([commentField], (state) => {
-  const info = state.field(commentField);
-  const doc = state.doc;
-  const builder = new RangeSetBuilder<Decoration>();
-  const marks = new Map<number, string>();
-  if (info.selection) {
-    for (let n = info.selection.from; n <= info.selection.to; n++) {
-      marks.set(n, "cm-argusSelectedLine");
-    }
-  }
-  if (info.focus !== null && !marks.has(info.focus)) {
-    marks.set(info.focus, "cm-argusFocusedLine");
-  }
-  for (const n of [...marks.keys()].sort((x, y) => x - y)) {
-    if (n < 1 || n > doc.lines) continue;
-    const at = doc.line(n).from;
-    builder.add(at, at, Decoration.line({ class: marks.get(n)! }));
-  }
-  return builder.finish();
+/** The line under the pointer that shows the "+" (null: none). */
+const setHover = StateEffect.define<number | null>();
+
+const hoverField = StateField.define<number | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setHover)) value = e.value;
+    return value;
+  },
 });
 
-/** The gutter's "+" on a commentable line. */
+/** A drag from the "+": where it started, where it reaches, and whether
+ * the pointer is over a line the range can't take. */
+interface DragState {
+  anchor: number;
+  /** The range's other end, clamped to the anchor's region. */
+  to: number;
+  /** The line under the pointer when the range can't reach it. */
+  blocked: number | null;
+}
+
+const setDrag = StateEffect.define<DragState | null>();
+
+const dragField = StateField.define<DragState | null>({
+  create: () => null,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setDrag)) value = e.value;
+    return value;
+  },
+});
+
+/**
+ * The selected range, the focused line and a drag's range (with its first
+ * and last line marked, and a line it can't reach), as line classes: no
+ * layout change, so nothing shifts while the pointer moves.
+ */
+const commentLines = EditorView.decorations.compute(
+  [commentField, dragField],
+  (state) => {
+    const info = state.field(commentField);
+    const drag = state.field(dragField);
+    const doc = state.doc;
+    const builder = new RangeSetBuilder<Decoration>();
+    const marks = new Map<number, string[]>();
+    const add = (n: number, cls: string) =>
+      marks.set(n, [...(marks.get(n) ?? []), cls]);
+    if (drag) {
+      const from = Math.min(drag.anchor, drag.to);
+      const to = Math.max(drag.anchor, drag.to);
+      for (let n = from; n <= to; n++) add(n, "cm-argusDragLine");
+      add(from, "cm-argusDragStart");
+      add(to, "cm-argusDragEnd");
+      if (drag.blocked !== null) add(drag.blocked, "cm-argusDragBlocked");
+    } else if (info.selection) {
+      for (let n = info.selection.from; n <= info.selection.to; n++) {
+        add(n, "cm-argusSelectedLine");
+      }
+    }
+    if (info.focus !== null && !marks.has(info.focus)) {
+      add(info.focus, "cm-argusFocusedLine");
+    }
+    for (const n of [...marks.keys()].sort((x, y) => x - y)) {
+      if (n < 1 || n > doc.lines) continue;
+      const at = doc.line(n).from;
+      builder.add(at, at, Decoration.line({ class: marks.get(n)!.join(" ") }));
+    }
+    return builder.finish();
+  },
+);
+
+/** The "+" beside the line under the pointer. */
 class CommentMarker extends GutterMarker {
-  constructor(readonly line: number) {
+  constructor(
+    readonly line: number,
+    readonly hint: string,
+  ) {
     super();
   }
 
   eq(other: CommentMarker): boolean {
-    return other.line === this.line;
+    return other.line === this.line && other.hint === this.hint;
   }
 
   toDOM(): Node {
     const el = document.createElement("span");
     el.className = "cm-argusCommentPlus";
     el.textContent = "+";
-    el.title = "Comment on this line (shift-click or drag for a range)";
+    el.title = this.hint;
     el.setAttribute("role", "button");
     el.setAttribute("aria-label", `Comment on line ${this.line}`);
     el.dataset.commentLine = String(this.line);
@@ -355,43 +444,82 @@ const spacer = new (class extends GutterMarker {
   }
 })();
 
+/** The "+" line: the drag's anchor while dragging, else the hovered line. */
+function plusLine(state: EditorState): number | null {
+  return state.field(dragField)?.anchor ?? state.field(hoverField);
+}
+
 const commentGutter: Extension = [
   blockGeometry,
   commentField,
+  hoverField,
+  dragField,
   commentLines,
   gutter({
     class: "cm-argusCommentGutter",
     lineMarker: (view, block) => {
       const n = view.state.doc.lineAt(block.from).number;
-      return view.state.field(commentField).lines.has(n)
-        ? new CommentMarker(n)
-        : null;
+      if (n !== plusLine(view.state)) return null;
+      const info = view.state.field(commentField);
+      if (!info.lines.has(n)) return null;
+      const outside = info.outsideHint && info.region(n)?.outside;
+      const hint = outside ? `${PLUS_HINT} (${info.outsideHint})` : PLUS_HINT;
+      return new CommentMarker(n, `${hint}. Shift-click extends a comment.`);
     },
     lineMarkerChange: (u) =>
-      u.transactions.some((tr) => tr.effects.some((e) => e.is(setComment))),
+      u.transactions.some((tr) =>
+        tr.effects.some(
+          (e) => e.is(setComment) || e.is(setHover) || e.is(setDrag),
+        ),
+      ),
     initialSpacer: () => spacer,
   }),
   EditorView.theme({
     ".cm-argusCommentGutter .cm-gutterElement": {
       width: "16px",
       textAlign: "center",
-      color: "var(--accent)",
     },
+    // One "+", beside the line under the pointer (GitHub/GitLab style). It
+    // appears without a fade: a fade restarting on every line moved over
+    // flickers.
     ".cm-argusCommentPlus": {
       display: "block",
-      opacity: "0",
-      cursor: "pointer",
+      cursor: "ns-resize",
       fontWeight: "600",
+      color: "var(--accent-contrast)",
+      background: "var(--accent)",
       borderRadius: "var(--radius-sm)",
-      transition: "opacity var(--dur-1) var(--ease-out)",
+      boxShadow: "var(--shadow-sm)",
+      transition: "background var(--dur-1) var(--ease-out)",
     },
-    ".cm-argusCommentGutter .cm-gutterElement:hover .cm-argusCommentPlus": {
-      opacity: "1",
-      background: "color-mix(in srgb, var(--accent) 18%, transparent)",
+    ".cm-argusCommentPlus:hover": {
+      background: "var(--accent-hover)",
     },
     ".cm-argusSelectedLine": {
       boxShadow: "inset 3px 0 0 var(--accent)",
       backgroundColor: "color-mix(in srgb, var(--accent) 12%, transparent)",
+    },
+    // A drag's range: the lines tinted, a bar down the left, the first and
+    // last line edged so the ends read at a glance.
+    ".cm-argusDragLine": {
+      boxShadow: "inset 3px 0 0 var(--accent)",
+      backgroundColor: "color-mix(in srgb, var(--accent) 18%, transparent)",
+    },
+    ".cm-argusDragLine.cm-argusDragStart": {
+      boxShadow: "inset 3px 0 0 var(--accent), inset 0 2px 0 var(--accent)",
+    },
+    ".cm-argusDragLine.cm-argusDragEnd": {
+      boxShadow: "inset 3px 0 0 var(--accent), inset 0 -2px 0 var(--accent)",
+    },
+    ".cm-argusDragLine.cm-argusDragStart.cm-argusDragEnd": {
+      boxShadow:
+        "inset 3px 0 0 var(--accent), inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent)",
+    },
+    // A line the range can't reach (another hunk, or across the diff's
+    // edge): marked as refused.
+    ".cm-argusDragBlocked": {
+      boxShadow: "inset 3px 0 0 var(--danger)",
+      backgroundColor: "color-mix(in srgb, var(--danger) 12%, transparent)",
     },
     ".cm-argusFocusedLine": {
       boxShadow: "inset 2px 0 0 var(--border-strong)",
@@ -422,7 +550,16 @@ export interface CommentGutter {
   /** The focused line on this file. */
   focus: { side: DiffSide; line: number } | null;
   /**
-   * A gutter click (`anchor` = `line`), drag (`anchor` where it started) or
+   * A commentable line's region: a drag's range stays in the region it
+   * started in. Without it, a run of consecutive commentable lines is one
+   * region.
+   */
+  regionOf?: (side: DiffSide, line: number) => LineRegionInfo | null;
+  /** Added to the "+"'s tooltip on a line outside the diff. */
+  outsideHint?: string | null;
+  /**
+   * A gutter click (`anchor` = `line`), drag (`anchor` where it started,
+   * `line` where it ended, already kept inside the anchor's region) or
    * shift-click (`extend`) on a commentable line.
    */
   onComment: (
@@ -440,28 +577,72 @@ function infoFor(
   side: DiffSide,
 ): CommentInfo {
   if (!c) return NO_COMMENT;
+  const lines = c.lines[side];
   return {
-    lines: c.lines[side],
+    lines,
     selection:
       c.selection?.side === side
         ? { from: c.selection.from, to: c.selection.to }
         : null,
     focus: c.focus?.side === side ? c.focus.line : null,
+    region: c.regionOf
+      ? (line) => c.regionOf!(side, line)
+      : (line) => runRegion(lines, line),
+    outsideHint: c.outsideHint ?? null,
   };
 }
 
+/** The default region: the run of consecutive commentable lines. */
+function runRegion(
+  lines: ReadonlySet<number>,
+  line: number,
+): LineRegionInfo | null {
+  if (!lines.has(line)) return null;
+  let from = line;
+  while (lines.has(from - 1)) from--;
+  return { key: `run${from}`, outside: false };
+}
+
 /**
- * Gutter clicks, shift-clicks and drags, and code clicks, on one editor:
- * native listeners on its DOM (the gutter is outside the content, and a
- * read-only editor has no cursor to read the line from). Returns the
- * cleanup.
+ * The text line at a client `y` in `view`; null over a block widget (a
+ * thread, a composer, a removed chunk of the unified view) or a collapsed
+ * stretch.
+ */
+function textLineAt(view: EditorView, y: number): number | null {
+  const block = view.elementAtHeight(y - view.documentTop);
+  if (block.type !== BlockType.Text) return null;
+  return view.state.doc.lineAt(block.from).number;
+}
+
+/** Whether line `n` sits in a collapsed stretch of unchanged code. */
+function folded(view: EditorView, n: number): boolean {
+  const doc = view.state.doc;
+  if (n < 1 || n > doc.lines) return false;
+  return view.lineBlockAt(doc.line(n).from).type === BlockType.WidgetRange;
+}
+
+/**
+ * The comment interactions of one editor: native listeners on its DOM (the
+ * gutter is outside the content, and a read-only editor has no cursor to
+ * read the line from). Returns the cleanup.
+ *
+ * - Hover: the "+" follows the pointer over commentable lines (one per
+ *   editor, so one per side in the split view); gone off the editor, over
+ *   a block widget or a collapsed stretch, or on a line that takes none.
+ * - Drag from the "+": the range follows the pointer within the anchor's
+ *   region, with a floating "Comment on lines 12–18" by the pointer; past
+ *   the region's edge the range stops, the line under the pointer and the
+ *   cursor say "not allowed". Release comments on the range; Escape
+ *   cancels. A click is a drag that never moved. Shift-click extends.
+ * - A click in the code focuses that line (the Comment-on-line key's).
+ * - Keys in the code: ↑/↓ pick a line, Enter comments on it.
  */
 function listenForComments(
   view: EditorView,
   side: DiffSide,
   get: () => CommentGutter | null | undefined,
 ): () => void {
-  const lineOf = (target: EventTarget | null): number | null => {
+  const plusAt = (target: EventTarget | null): number | null => {
     const el =
       target instanceof Element
         ? target.closest<HTMLElement>("[data-comment-line]")
@@ -470,32 +651,130 @@ function listenForComments(
     const n = Number(el.dataset.commentLine);
     return Number.isInteger(n) && n > 0 ? n : null;
   };
-  let dragFrom: number | null = null;
-  const onUp = (e: MouseEvent) => {
-    window.removeEventListener("mouseup", onUp);
-    const from = dragFrom;
-    dragFrom = null;
-    if (from === null) return;
-    get()?.onComment(side, from, lineOf(e.target) ?? from, false);
+  const hover = (line: number | null) => {
+    if (view.state.field(hoverField) !== line) {
+      view.dispatch({ effects: setHover.of(line) });
+    }
   };
+
+  // -- Hover ----------------------------------------------------------------
+  const onMove = (e: MouseEvent) => {
+    if (view.state.field(dragField)) return;
+    const t = e.target;
+    if (
+      t instanceof Element &&
+      t.closest(".cm-argusThreads, .cm-collapsedLines, .cm-deletedChunk")
+    ) {
+      hover(null);
+      return;
+    }
+    const line = textLineAt(view, e.clientY);
+    hover(
+      line !== null && view.state.field(commentField).lines.has(line)
+        ? line
+        : null,
+    );
+  };
+  const onLeave = () => {
+    if (!view.state.field(dragField)) hover(null);
+  };
+
+  // -- Drag -------------------------------------------------------------------
+  let drag: {
+    anchor: number;
+    to: number;
+    label: HTMLElement;
+  } | null = null;
+  const root = document.documentElement;
+  const endDrag = () => {
+    window.removeEventListener("mousemove", onDragMove);
+    window.removeEventListener("mouseup", onUp);
+    window.removeEventListener("keydown", onDragKey, true);
+    drag?.label.remove();
+    drag = null;
+    delete root.dataset.commentDrag;
+    if (view.state.field(dragField)) {
+      view.dispatch({ effects: setDrag.of(null) });
+    }
+  };
+  const showDrag = (x: number, y: number, target: number | null) => {
+    if (!drag) return;
+    const info = view.state.field(commentField);
+    // A folded line is no line to comment on: the range stops before it.
+    const visible = (line: number) =>
+      folded(view, line) ? null : info.region(line);
+    const reach =
+      target === null
+        ? { to: drag.to, blocked: null }
+        : dragReach(visible, drag.anchor, target);
+    drag.to = reach.to;
+    drag.label.textContent = dragLabel(
+      drag.anchor,
+      reach.to,
+      reach.blocked === null
+        ? null
+        : dragStop(info.region, drag.anchor, reach.blocked),
+    );
+    drag.label.dataset.blocked = String(reach.blocked !== null);
+    drag.label.style.left = `${x + 14}px`;
+    drag.label.style.top = `${y + 14}px`;
+    root.dataset.commentDrag = reach.blocked === null ? "ok" : "blocked";
+    view.dispatch({
+      effects: setDrag.of({
+        anchor: drag.anchor,
+        to: reach.to,
+        blocked: reach.blocked,
+      }),
+    });
+  };
+  function onDragMove(e: MouseEvent) {
+    // Over a block widget the range stays where it was.
+    showDrag(e.clientX, e.clientY, textLineAt(view, e.clientY));
+  }
+  function onUp() {
+    const d = drag;
+    endDrag();
+    if (d) get()?.onComment(side, d.anchor, d.to, false);
+  }
+  function onDragKey(e: KeyboardEvent) {
+    if (e.key !== "Escape") return;
+    // The drag's own: not the composer's or the page's Escape.
+    e.preventDefault();
+    e.stopPropagation();
+    endDrag();
+  }
+
   const onDown = (e: MouseEvent) => {
     if (e.button !== 0) return;
-    const line = lineOf(e.target);
+    const line = plusAt(e.target);
     if (line !== null) {
       e.preventDefault();
       if (e.shiftKey) {
         get()?.onComment(side, line, line, true);
         return;
       }
-      dragFrom = line;
+      endDrag();
+      const label = document.createElement("div");
+      label.className = "argus-comment-drag-label";
+      label.setAttribute("role", "status");
+      document.body.appendChild(label);
+      drag = { anchor: line, to: line, label };
+      window.addEventListener("mousemove", onDragMove);
       window.addEventListener("mouseup", onUp);
+      window.addEventListener("keydown", onDragKey, true);
+      showDrag(e.clientX, e.clientY, line);
       return;
     }
     if (!(e.target instanceof Node) || !view.contentDOM.contains(e.target)) {
       return;
     }
-    // Not in a block widget (a thread or a composer).
-    if (e.target instanceof Element && e.target.closest(".cm-argusThreads")) {
+    // Not in a block widget (a thread or a composer), nor on a collapsed
+    // stretch (its click opens it on both sides; focusing a line in it
+    // would open this side first).
+    if (
+      e.target instanceof Element &&
+      e.target.closest(".cm-argusThreads, .cm-collapsedLines")
+    ) {
       return;
     }
     const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
@@ -539,13 +818,62 @@ function listenForComments(
     }
   };
   view.dom.addEventListener("mousedown", onDown);
+  view.dom.addEventListener("mousemove", onMove);
+  view.dom.addEventListener("mouseleave", onLeave);
   view.contentDOM.addEventListener("keydown", onKey);
   return () => {
     view.dom.removeEventListener("mousedown", onDown);
+    view.dom.removeEventListener("mousemove", onMove);
+    view.dom.removeEventListener("mouseleave", onLeave);
     view.contentDOM.removeEventListener("keydown", onKey);
-    window.removeEventListener("mouseup", onUp);
+    endDrag();
   };
 }
+
+/** Marks a dispatch that mirrors the sibling's expansion (no echo back). */
+const mirrored = Annotation.define<boolean>();
+
+/** The editor → its opened-stretch key, for `noteOpened`. */
+const stretchKeys = new WeakMap<EditorView, string>();
+
+/**
+ * Note every folded stretch that opens in this editor (`lib/diffEditors`),
+ * so a diff mounted again opens it again.
+ */
+const noteOpened = EditorView.updateListener.of((u) => {
+  const key = stretchKeys.get(u.view);
+  if (!key) return;
+  const at = u.transactions.flatMap((tr) =>
+    tr.effects.filter((e) => e.is(uncollapseUnchanged)).map((e) => e.value),
+  );
+  rememberOpened(key, at);
+});
+
+/**
+ * Side by side: a collapsed stretch opened in one editor opens in the
+ * other too (`lib/collapseSync`), whoever opened it (the library's click,
+ * a thread placed in it, the focused line, the line being read), so the
+ * two sides stay aligned.
+ */
+const syncCollapse = EditorView.updateListener.of((u) => {
+  if (u.transactions.some((tr) => tr.annotation(mirrored))) return;
+  const opened = u.transactions.flatMap((tr) =>
+    tr.effects.filter((e) => e.is(uncollapseUnchanged)).map((e) => e.value),
+  );
+  if (opened.length === 0) return;
+  const pair = mergeViewSiblings(u.view);
+  const chunks = getChunks(u.state)?.chunks;
+  if (!pair || !chunks) return;
+  const fromA = pair.a === u.view;
+  const other = fromA ? pair.b : pair.a;
+  other.dispatch({
+    effects: mirrorPositions(opened, chunks, fromA, {
+      ours: u.state.doc,
+      other: other.state.doc,
+    }).map((p) => uncollapseUnchanged.of(p)),
+    annotations: mirrored.of(true),
+  });
+});
 
 function group(
   placements: readonly Placement[],
@@ -679,6 +1007,39 @@ function uncollapseAt(view: EditorView, side: DiffSide, lines: number[]) {
   }
 }
 
+/**
+ * Scroll `views` (unified: one; split: base, head) to `line` of `side`,
+ * centred in the page column, opening its collapsed stretch (`syncCollapse`
+ * opens the sibling's). A removed line in the unified view: the block above
+ * its chunk.
+ */
+function revealLine(
+  views: readonly EditorView[],
+  side: "old" | "new",
+  line: number,
+): boolean {
+  if (views.length === 0) return false;
+  const split = views.length === 2;
+  const view = split && side === "old" ? views[0] : views[views.length - 1];
+  const doc = view.state.doc;
+  let pos: number;
+  if (side === "old" && !split) {
+    const orig = getOriginalDoc(view.state);
+    const at = orig.line(Math.min(Math.max(line, 1), orig.lines)).from;
+    const chunk = getChunks(view.state)?.chunks.find(
+      (c) => at >= c.fromA && at < c.toA,
+    );
+    pos = Math.min(doc.length, chunk ? chunk.fromB : at);
+  } else {
+    const n = Math.min(Math.max(line, 1), doc.lines);
+    uncollapseAt(view, side === "old" ? "a" : "b", [n]);
+    pos = doc.line(n).from;
+  }
+  pauseScrollAnchor();
+  view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+  return true;
+}
+
 export function DiffEditor({
   path,
   original,
@@ -688,6 +1049,7 @@ export function DiffEditor({
   renderThread,
   items = NO_ITEMS,
   comment = null,
+  hideWhitespace = false,
 }: {
   /** For the language. */
   path: string;
@@ -702,6 +1064,8 @@ export function DiffEditor({
   items?: readonly LineItem[];
   /** Commenting from the gutter; null for none. */
   comment?: CommentGutter | null;
+  /** Lines that changed only in whitespace count as unchanged. */
+  hideWhitespace?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const mode = useThemeStore((s) => s.mode);
@@ -715,7 +1079,10 @@ export function DiffEditor({
   useEffect(
     () =>
       useLayoutStore.subscribe((s, prev) => {
-        if (s.diffLayout !== prev.diffLayout) {
+        if (
+          s.diffLayout !== prev.diffLayout ||
+          s.hideWhitespace !== prev.hideWhitespace
+        ) {
           reading.current = readingLine(views.current);
         }
       }),
@@ -732,27 +1099,34 @@ export function DiffEditor({
     const parent = host.current;
     if (!parent) return;
     const { mode: m } = latest.current;
-    const common = (): Extension[] => [
+    const unifiedView = layout !== "split";
+    const common = (side: "old" | "new"): Extension[] => [
       theme.current.of(baseExtensions(m)),
       language.current.of([]),
       blockField,
       commentGutter,
+      noteOpened,
+      findHighlighting,
+      findTarget.of({ kind: "diff", path, side, unified: unifiedView }),
       // A Tab stop for the keyboard line picking.
       EditorView.contentAttributes.of({
         tabindex: "0",
         "aria-label": `${path}: arrow keys pick a line, Enter comments on it`,
       }),
     ];
+    // Lines first for large files (`lib/lineDiff`), whitespace hidden or not.
+    const diffConfig = { diffConfig: editorDiffConfig(hideWhitespace) };
     let merge: MergeView | null = null;
     let unified: EditorView | null = null;
     if (layout === "split") {
       merge = new MergeView({
-        a: { doc: original, extensions: common() },
-        b: { doc: modified, extensions: common() },
+        a: { doc: original, extensions: [...common("old"), syncCollapse] },
+        b: { doc: modified, extensions: [...common("new"), syncCollapse] },
         parent,
         gutter: true,
         highlightChanges: true,
         collapseUnchanged: COLLAPSE,
+        ...diffConfig,
       });
       views.current = [merge.a, merge.b];
     } else {
@@ -761,7 +1135,7 @@ export function DiffEditor({
         state: EditorState.create({
           doc: modified,
           extensions: [
-            ...common(),
+            ...common("new"),
             unifiedMergeView({
               original,
               mergeControls: false,
@@ -769,6 +1143,7 @@ export function DiffEditor({
               highlightChanges: true,
               syntaxHighlightDeletions: true,
               collapseUnchanged: COLLAPSE,
+              ...diffConfig,
             }),
           ],
         }),
@@ -779,6 +1154,21 @@ export function DiffEditor({
     const unlisten = views.current.map((v, i) =>
       listenForComments(v, sides[i], () => latest.current.comment),
     );
+    // Open again what was open when this diff was last mounted, then keep
+    // noting what opens (`lib/diffEditors`).
+    const keys = views.current.map((_, i) =>
+      stretchKey(path, i, layout, hideWhitespace, original, modified),
+    );
+    views.current.forEach((v, i) => {
+      stretchKeys.set(v, keys[i]);
+      const again = openedStretches(keys[i]);
+      if (again.length) {
+        v.dispatch({
+          effects: again.map((p) => uncollapseUnchanged.of(p)),
+          annotations: mirrored.of(true),
+        });
+      }
+    });
 
     let cancelled = false;
     void languageFor(path).then((lang) => {
@@ -795,7 +1185,7 @@ export function DiffEditor({
       unified?.destroy();
       views.current = [];
     };
-  }, [path, original, modified, layout]);
+  }, [path, original, modified, layout, hideWhitespace]);
 
   // Place the threads and items (again whenever they change).
   useEffect(() => {
@@ -847,7 +1237,7 @@ export function DiffEditor({
       });
       holdLine(head, at, keep.offset);
     }
-  }, [placements, items, original, modified, layout]);
+  }, [placements, items, original, modified, layout, hideWhitespace]);
 
   // A keyboard move to a block far down: CodeMirror renders only lines
   // near the viewport, so scroll there first (`lib/revealItem`). The
@@ -869,6 +1259,8 @@ export function DiffEditor({
           });
           return true;
         },
+        revealLine: (side, line) => revealLine(views.current, side, line),
+        readingLine: () => readingLine(views.current)?.line ?? null,
       }),
     [path],
   );
@@ -884,7 +1276,7 @@ export function DiffEditor({
       if (info.selection) uncollapseAt(v, sides[i], [info.selection.from]);
       if (info.focus !== null) uncollapseAt(v, sides[i], [info.focus]);
     });
-  }, [comment, original, modified, layout]);
+  }, [comment, original, modified, layout, hideWhitespace]);
 
   // Theme switches reconfigure in place.
   useEffect(() => {
@@ -893,7 +1285,14 @@ export function DiffEditor({
     }
   }, [mode]);
 
-  return <div ref={host} className="argus-diff-editor" data-layout={layout} />;
+  return (
+    <div
+      ref={host}
+      className="argus-diff-editor"
+      data-layout={layout}
+      data-hide-whitespace={hideWhitespace || undefined}
+    />
+  );
 }
 
 const NO_ITEMS: readonly LineItem[] = [];

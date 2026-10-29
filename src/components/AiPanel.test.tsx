@@ -336,7 +336,7 @@ describe("AiPanel", () => {
 
   it("warns when the agent cannot be held to reading only (auggie)", () => {
     const warning =
-      "Auggie can still use MCP tools from your own Auggie setup and read local secret files in the clone (.env files, keys); Argus cannot guarantee this run only reads.";
+      "Argus turns off Auggie's MCP and tools beyond reading, but Auggie has no path rules, so its read tool can open any file on your machine, and your own Auggie hooks still run; Argus cannot guarantee this run only reads.";
     const { unmount } = render(<AiPanel />);
     expect(screen.queryByText(warning)).toBeNull();
     unmount();

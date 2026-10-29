@@ -3,12 +3,16 @@
 //! every read and write. The token may be redacted, the message shortened
 //! or replaced by Argus' own text; it is never forwarded.
 //!
-//! Fictitious tokens only; no network (a fake `gh`, a local HTTP double).
+//! GitLab's token is glab's: Argus never knows it, so it cannot redact it
+//! by value. The fake `glab` (`support::glab`) holds a fictitious one (a
+//! `glpat-` and a 64-hex OAuth-shaped one), sends it to the double, and
+//! echoes every failed response body on stderr as glab does; the errors
+//! must come out clean all the same.
+//!
+//! Fictitious tokens only; no network (a fake `gh`, a fake `glab`, a local
+//! HTTP double).
 
 #![cfg_attr(windows, allow(dead_code))]
-
-#[path = "support/script.rs"]
-mod script;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -19,13 +23,20 @@ use std::sync::{Arc, Mutex};
 use argus_core::post::{DiffLine, LineKind, PlacedComment};
 use argus_core::provider::{
     DiffRange, GithubProvider, GitlabProvider, ProviderId, ReviewProvider, ReviewRef,
-    ReviewVerdict, Side, StaticToken,
+    ReviewVerdict, Side,
 };
 use argus_core::store::Store;
 use argus_core::Core;
 
+mod support;
+
+use support::glab::FakeGlab;
+use support::script;
+
 const GH_TOKEN: &str = "ghp_fixtureTOKENnotreal0123456789";
 const GL_TOKEN: &str = "glpat-fixtureTOKENnotreal";
+/// The shape of glab's OAuth login (64 hex digits, no prefix).
+const GL_OAUTH_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const HEAD: &str = "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2";
 const BASE: &str = "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0";
 
@@ -77,6 +88,8 @@ fn placed(path: &str) -> PlacedComment {
         side: Side::New,
         line: row(LineKind::Added, 3, 3),
         start: None,
+        in_diff: true,
+        excerpt: None,
         head_sha: HEAD.into(),
         base_sha: BASE.into(),
         body: "Why three?".into(),
@@ -422,34 +435,107 @@ fn gitlab_mr(base: &str) -> ReviewRef {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn gitlab_errors_never_carry_the_token() {
+    gitlab_errors_never_carry(
+        GL_TOKEN,
+        &[
+            "400 Bad Request",
+            "401 Unauthorized",
+            "403 Forbidden",
+            "404 Not Found",
+            "409 Conflict",
+            "422 Unprocessable Entity",
+            "429 Too Many Requests",
+            "500 Internal Server Error",
+            "502 Bad Gateway",
+        ],
+    );
+}
+
+#[test]
+#[cfg_attr(windows, ignore)]
+fn gitlab_errors_never_carry_an_oauth_token() {
+    // The same shapes, fewer statuses: what matters is the token's shape.
+    gitlab_errors_never_carry(
+        GL_OAUTH_TOKEN,
+        &[
+            "401 Unauthorized",
+            "409 Conflict",
+            "500 Internal Server Error",
+        ],
+    );
+}
+
+/// Every body under each of `statuses` through every call, the fake glab
+/// logged in with `token`.
+fn gitlab_errors_never_carry(token: &str, statuses: &[&str]) {
     let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
     let base = serve(route.clone());
-    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
-    let statuses = [
-        "400 Bad Request",
-        "401 Unauthorized",
-        "403 Forbidden",
-        "404 Not Found",
-        "409 Conflict",
-        "422 Unprocessable Entity",
-        "429 Too Many Requests",
-        "500 Internal Server Error",
-        "502 Bad Gateway",
-    ];
+    let fake = FakeGlab::with_token(token);
+    let gl = fake.provider(&base);
     let mut checked = 0;
     for body in bodies() {
         for status in statuses {
-            *route.lock().unwrap() = (status.to_string(), body.replace("{T}", GL_TOKEN));
+            *route.lock().unwrap() = (status.to_string(), body.replace("{T}", token));
             let errors = every_error(&gl, &gitlab_mr(&base));
             assert!(errors.len() >= 9, "{status} {body}: {errors:?}");
             for (what, text) in errors {
-                assert_clean(GL_TOKEN, what, &text);
+                assert_clean(token, what, &text);
                 checked += 1;
             }
         }
     }
-    assert!(checked > 1000);
+    assert!(checked > statuses.len() * bodies().len() * 9);
+    // The token went out on every request, from glab, never from Argus.
+    assert!(fake.log().contains("env-token=0"));
+    assert!(!fake.calls().iter().any(|c| c.contains(token)));
+}
+
+/// glab failing before any response, with the token in what it prints (a
+/// debug line, a proxy's echo): stdout and stderr are never forwarded.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn glabs_own_output_never_reaches_an_error() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let glab = dir.path().join("glab");
+        for (out, err) in [
+            ("", "glab: 401 Unauthorized {T} (HTTP 401)"),
+            (
+                "PRIVATE-TOKEN: {T}",
+                "Post \"http://x/api/v4\": dial tcp: lookup x: no such host {T}",
+            ),
+            ("{T}", "Bearer {T}"),
+            ("not http {T}", "panic: {T}"),
+        ] {
+            let script = format!(
+                "#!/bin/sh\ncat > /dev/null\nprintf '%s' '{}'\nprintf '%s' '{}' >&2\nexit 1\n",
+                out.replace("{T}", GL_TOKEN),
+                err.replace("{T}", GL_TOKEN)
+            );
+            script::write_executable(&glab, &script);
+            let gl =
+                GitlabProvider::with_binary(glab.to_string_lossy(), "https://gitlab.example.test")
+                    .unwrap()
+                    .with_connect_retries(&[std::time::Duration::ZERO]);
+            let errors = every_error(&gl, &gitlab_mr("http://gitlab.example.test"));
+            assert!(errors.len() >= 9, "{errors:?}");
+            for (what, text) in errors {
+                assert_clean(GL_TOKEN, what, &text);
+            }
+            // Its `auth status` answer, the same text: no account message.
+            let accounts = argus_core::Core::with_cli(
+                argus_core::store::Store::in_memory().unwrap(),
+                argus_core::Settings::default(),
+                "/nonexistent/argus-fixture/gh",
+                glab.to_string_lossy(),
+            )
+            .list_accounts(true);
+            assert_clean(GL_TOKEN, "list_accounts", &format!("{accounts:?}"));
+        }
+    }
 }
 
 /// Submit review's own GitLab path past its reads: the instance and the
@@ -458,6 +544,7 @@ fn gitlab_errors_never_carry_the_token() {
 /// token in the body (or GitLab's 202 summary, or a GraphQL error, echoes
 /// it).
 #[test]
+#[cfg_attr(windows, ignore)]
 fn gitlab_submit_errors_never_carry_the_token() {
     let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
     let fail = route.clone();
@@ -505,8 +592,9 @@ fn gitlab_submit_errors_never_carry_the_token() {
             let _ = sock.write_all(out.as_bytes());
         }
     });
-    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into()))
-        .unwrap()
+    let fake = FakeGlab::with_token(GL_TOKEN);
+    let gl = fake
+        .provider(&base)
         .with_reviewer_recheck(&[std::time::Duration::ZERO]);
     let mut checked = 0;
     let mut cases: Vec<(String, String)> = Vec::new();
@@ -574,13 +662,15 @@ fn gitlab_submit_errors_never_carry_the_token() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn refresh_reports_never_carry_the_token() {
     let route: Route = Arc::new(Mutex::new((
         "500 Internal Server Error".into(),
         format!(r#"{{"message":"boom {GL_TOKEN}"}}"#),
     )));
     let base = serve(route.clone());
-    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let fake = FakeGlab::with_token(GL_TOKEN);
+    let gl = fake.provider(&base);
     let core = Core::with_providers(Store::in_memory().unwrap(), vec![Arc::new(gl)]);
     for status in [
         "401 Unauthorized",
@@ -656,10 +746,12 @@ fn refreshing_one_github_review_never_carries_the_token() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore)]
 fn refreshing_one_gitlab_review_never_carries_the_token() {
     let route: Route = Arc::new(Mutex::new((String::new(), String::new())));
     let base = serve(route.clone());
-    let gl = GitlabProvider::new(&base, StaticToken(GL_TOKEN.into())).unwrap();
+    let fake = FakeGlab::with_token(GL_TOKEN);
+    let gl = fake.provider(&base);
     let core = core_holding(gitlab_mr(&base), Arc::new(gl));
     let id = gitlab_mr(&base).id();
     let mut checked = 0;
@@ -687,4 +779,61 @@ fn refreshing_one_gitlab_review_never_carries_the_token() {
     assert!(e.is_rate_limited(), "{e}");
     assert_clean(GL_TOKEN, "429", &format!("{e} / {e:?}"));
     assert!(checked > 50);
+}
+
+/// `gh auth status` and `glab auth status` answers with tokens in them (a
+/// `token` field, an error echoing one, a text answer printing one): no
+/// account row, message or hint ever carries it.
+#[test]
+#[cfg_attr(windows, ignore)]
+fn account_status_output_never_carries_a_token() {
+    #[cfg(unix)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            script::write_executable(&path, &format!("#!/bin/sh\n{body}\n"));
+            path.to_string_lossy().into_owned()
+        };
+        let gh_answers = [
+            // A `token` field and the token in gh's error.
+            format!(
+                r#"echo '{{"hosts":{{"github.com":[{{"state":"error","error":"Bad credentials {GH_TOKEN}","active":true,"host":"github.com","login":"rev-fixture","token":"{GH_TOKEN}"}},{{"state":"timeout","error":"{GH_TOKEN}","active":false,"host":"github.com","login":"work-fixture"}}]}}}}'"#
+            ),
+            // A gh without --json whose text prints the token.
+            format!(
+                r#"case "$*" in *--json*) echo 'unknown flag: --json' >&2; exit 1 ;; esac
+printf 'github.com\n  X Failed to log in to github.com account rev-fixture (keyring)\n  - Token: {GH_TOKEN}\n  - {GH_TOKEN}\n' >&2; exit 1"#
+            ),
+            // Garbage with the token.
+            format!("echo '{GH_TOKEN}'"),
+        ];
+        let glab_answers = [
+            format!(
+                r#"echo '{{"hosts":[{{"host":"gitlab.example.test","state":"error","error":"PRIVATE-TOKEN: {GL_TOKEN} rejected by proxy","token_source":"{GL_TOKEN}"}},{{"host":"gitlab.two.test","state":"error","error":"Bearer {GL_OAUTH_TOKEN}"}}]}}'; exit 1"#
+            ),
+            format!(
+                r#"case "$*" in *--all*) echo 'unknown flag: --all' >&2; exit 1 ;; esac
+case "$*" in *--output*) echo 'unknown flag: --output' >&2; exit 1 ;; esac
+printf 'gitlab.example.test\n  x gitlab.example.test: API call failed: {GL_TOKEN}\n  Token: {GL_TOKEN}\n'"#
+            ),
+            format!("echo '{GL_TOKEN}' >&2; exit 1"),
+        ];
+        for (i, (gh, glab)) in gh_answers.iter().zip(glab_answers.iter()).enumerate() {
+            let gh = write(&format!("gh{i}"), gh);
+            let glab = write(&format!("glab{i}"), glab);
+            let core = Core::with_cli(
+                Store::in_memory().unwrap(),
+                argus_core::Settings::default(),
+                gh,
+                glab,
+            );
+            let accounts = core.list_accounts(true);
+            assert!(!accounts.is_empty(), "{i}");
+            let text = format!("{accounts:?} {}", serde_json::to_string(&accounts).unwrap());
+            assert_clean(GH_TOKEN, "list_accounts (gh)", &text);
+            assert_clean(GL_TOKEN, "list_accounts (glab)", &text);
+            assert_clean(GL_OAUTH_TOKEN, "list_accounts (glab oauth)", &text);
+        }
+    }
 }

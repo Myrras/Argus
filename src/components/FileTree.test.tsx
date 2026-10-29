@@ -133,3 +133,36 @@ describe("FileTree", () => {
     expect(screen.queryByText(/No /)).toBeNull();
   });
 });
+
+describe("FileTree with a thousand files", () => {
+  const many = Array.from({ length: 1000 }, (_, i) =>
+    file({ path: `src/m${i % 20}/file${i}.rs` }),
+  );
+
+  it.each(["tree", "flat"] as const)(
+    "re-renders only the rows that changed (%s)",
+    (mode) => {
+      // `fileAction` runs once per row render.
+      const fileAction = vi.fn(() => null);
+      const base = props({ files: many, mode, fileAction, counts: new Map() });
+      const { rerender } = render(<FileTree {...base} />);
+      expect(fileAction).toHaveBeenCalledTimes(1000);
+      fileAction.mockClear();
+      // j moves the selection: the old and the new row.
+      rerender(<FileTree {...base} selected={many[10].path} />);
+      expect(fileAction).toHaveBeenCalledTimes(1);
+      rerender(<FileTree {...base} selected={many[11].path} />);
+      expect(fileAction).toHaveBeenCalledTimes(3);
+      // A thread count on one file.
+      fileAction.mockClear();
+      rerender(
+        <FileTree
+          {...base}
+          selected={many[11].path}
+          counts={new Map([[many[500].path, 1]])}
+        />,
+      );
+      expect(fileAction).toHaveBeenCalledTimes(1);
+    },
+  );
+});

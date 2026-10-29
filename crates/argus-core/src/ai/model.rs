@@ -12,7 +12,8 @@
 //!   context: RunContext | null;
 //! }
 //! interface RunContext {
-//!   rulesFiles: string[]; skill: UsedSkill | null; worktree: boolean; notes: string[];
+//!   rulesFiles: string[]; skill: UsedSkill | null; worktree: boolean;
+//!   language: ReviewLanguage | null; notes: string[];
 //! }
 //! interface UsedSkill { name: string; source: "user" | "plugin" | "project" }
 //! type Severity = "high" | "medium" | "low";
@@ -167,8 +168,8 @@ pub struct AiRunState {
     /// reason (stored, listed apart like the findings).
     pub skipped_checklist: u32,
     /// Whether Argus can guarantee the configured agent only reads. False
-    /// for `auggie`: its user-configured MCP tools cannot be turned off, so
-    /// the UI warns.
+    /// for `auggie`: it has no path rules and runs the user's hooks, so the
+    /// UI warns.
     pub read_only_guaranteed: bool,
     /// What the latest successful run was given besides the diff: the
     /// repository's rules, its review skill, the worktree. `None` before
@@ -189,6 +190,10 @@ pub struct RunContext {
     /// The agent read a worktree checked out at the review's head (else
     /// the diff, and the clone as it is checked out, if one is set).
     pub worktree: bool,
+    /// The language the answer was asked in, resolved for the repository
+    /// (its own, else the global default); `None` for a run from before
+    /// languages.
+    pub language: Option<crate::settings::ReviewLanguage>,
     /// What did not go as set up, in Argus' own words: no worktree (and
     /// why), a chosen skill that is gone, rules the merge request changes.
     pub notes: Vec<String>,

@@ -1,10 +1,11 @@
 /** Fictitious wire objects for tests. */
 
 import type {
+  Account,
   FileEntry,
-  ProviderStatus,
   ReviewFiles,
   ReviewRecord,
+  ScriptDraft,
   Settings,
   StoredThread,
 } from "../ipc/types";
@@ -75,6 +76,7 @@ export function thread(overrides: Partial<StoredThread> = {}): StoredThread {
       headSha: "c".repeat(40),
       diffHunk: null,
       currentLine: null,
+      outsideDiff: false,
     },
     notes: [
       {
@@ -123,8 +125,7 @@ export function reviewFiles(overrides: Partial<ReviewFiles> = {}): ReviewFiles {
 
 export function settings(overrides: Partial<Settings> = {}): Settings {
   return {
-    github: { enabled: true, host: "github.com", account: null },
-    gitlab: { baseUrl: "" },
+    accounts: {},
     pollIntervalSecs: 180,
     ai: { enabled: true, adapter: "claude", args: [], binary: null },
     clonePaths: {},
@@ -132,25 +133,33 @@ export function settings(overrides: Partial<Settings> = {}): Settings {
   };
 }
 
-export function status(
-  overrides: Partial<ProviderStatus> = {},
-): ProviderStatus {
+/** One account row (`list_accounts`): github.com, logged in. */
+export function account(overrides: Partial<Account> = {}): Account {
+  const provider = overrides.provider ?? "github";
+  const host = overrides.host ?? "github.com";
+  const cli = provider === "github" ? "gh" : "glab";
   return {
-    github: {
-      enabled: true,
-      host: "github.com",
-      installed: true,
-      loggedIn: true,
-    },
-    gitlab: {
-      configured: true,
-      baseUrl: "https://gitlab.example.test",
-      tokenPresent: true,
-      problem: null,
-      insecure: false,
-    },
+    key: `${provider}:${host}`,
+    provider,
+    host,
+    user: "rev-fixture",
+    state: { kind: "loggedIn" },
+    active: provider === "github" ? "rev-fixture" : null,
+    accounts: provider === "github" ? ["rev-fixture"] : [],
+    account: null,
+    enabled: true,
+    scheme: provider === "gitlab" ? "https" : null,
+    loginCommand: `${cli} auth login --hostname ${host}`,
     ...overrides,
   };
+}
+
+/** The accounts of a user logged in to github.com and a GitLab host. */
+export function accounts(): Account[] {
+  return [
+    account(),
+    account({ provider: "gitlab", host: "gitlab.example.test" }),
+  ];
 }
 
 /**
@@ -173,5 +182,34 @@ export function fakeEvents() {
       for (const h of handlers.get(name) ?? []) h({ payload });
     },
     count: (name: string) => handlers.get(name)?.length ?? 0,
+  };
+}
+
+/** A "Write with AI" draft with one request under way. */
+export function scriptDraft(overrides: Partial<ScriptDraft> = {}): ScriptDraft {
+  seq += 1;
+  return {
+    id: uuid(seq),
+    scriptId: null,
+    title: "Tick every checklist item",
+    base: null,
+    turns: [
+      {
+        prompt: "Tick every checklist item",
+        at: "2026-10-16T10:00:00Z",
+        result: null,
+        error: null,
+        attachments: [],
+        notes: [],
+      },
+    ],
+    status: "running",
+    waiting: false,
+    error: null,
+    progress: null,
+    createdAt: "2026-10-16T10:00:00Z",
+    updatedAt: "2026-10-16T10:00:00Z",
+    revision: seq,
+    ...overrides,
   };
 }

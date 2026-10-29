@@ -1,19 +1,20 @@
 /**
- * A ` ```suggestion ` block in a comment as a small diff ("Suggested
- * change"): the lines it replaces as removed, its body as added, in the
- * diff colours. The replaced lines come from the file at the comment's
- * commit (`file_contents`, cached), GitHub's `diff_hunk` until then or when
- * that fails; without either, only the added lines show, with a note.
- * Read-only: Argus never applies a suggestion.
+ * A ` ```suggestion ` block as a small diff ("Suggested change"): the lines
+ * it replaces as removed, its body as added, in the diff colours. The
+ * replaced lines come from the file at `source` (`file_contents`, cached):
+ * a thread's own commit (`originalSource`), or the review head for a
+ * composer's preview of a suggestion not yet posted; GitHub's `diff_hunk`
+ * until then or when that fails; without either, only the added lines
+ * show, with a note. Read-only: Argus never applies a suggestion.
  */
 
 import { useEffect, useState } from "react";
 
-import type { ProviderId, StoredThread } from "../ipc/types";
+import type { Anchor, ProviderId, ReviewId } from "../ipc/types";
 import {
   buildSuggestion,
-  originalSource,
   suggestionRange,
+  type SuggestionAnchor,
   type SuggestionSpec,
 } from "../lib/suggestions";
 import { loadContents } from "../state/codeViewStore";
@@ -22,28 +23,32 @@ import styles from "./SuggestedChange.module.css";
 export function SuggestedChange({
   spec,
   body,
-  thread: t,
+  reviewId,
+  anchor,
+  source,
   provider,
   onResize,
 }: {
   spec: SuggestionSpec;
   body: string;
-  thread: StoredThread;
+  reviewId: ReviewId;
+  /** The lines the comment is on (`null`: a thread on the whole review). */
+  anchor: (SuggestionAnchor & Pick<Anchor, "diffHunk">) | null;
+  /** Where the replaced lines are read; `null`: nowhere. */
+  source: { sha: string; path: string } | null;
   provider: ProviderId;
   /** The height may change once the file is in. */
   onResize?: () => void;
 }) {
-  const anchor = t.anchor;
   const [contents, setContents] = useState<string | null>(null);
 
   const hasRange = suggestionRange(spec, anchor, provider) !== null;
-  const source = anchor && hasRange ? originalSource(anchor) : null;
-  const sha = source?.sha ?? null;
-  const path = source?.path ?? null;
+  const sha = hasRange ? (source?.sha ?? null) : null;
+  const path = hasRange ? (source?.path ?? null) : null;
   useEffect(() => {
     if (!sha || !path) return;
     let live = true;
-    loadContents(t.reviewId, sha, path).then(
+    loadContents(reviewId, sha, path).then(
       (text) => {
         if (!live) return;
         setContents(text);
@@ -57,7 +62,7 @@ export function SuggestedChange({
     };
     // onResize is a fresh closure per render; the fetch is per file.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t.reviewId, sha, path]);
+  }, [reviewId, sha, path]);
 
   const s = buildSuggestion(spec, body, anchor, provider, contents);
   const range = s.range;

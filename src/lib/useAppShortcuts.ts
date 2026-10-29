@@ -19,6 +19,13 @@
  * Those are ignored while typing in a field or inside a dialog (also while
  * a modal is open, wherever the focus is).
  *
+ * Find (Mod+F, `findStore`) works from anywhere outside a dialog, fields
+ * and the code included: it opens the review page's find bar (from the
+ * sidebar, the list's filter when it has one). While the bar is open its
+ * keys (Mod+G / Mod+Shift+G) go to the next / previous match from anywhere
+ * too, unless the focused element handled the key (a composer's own).
+ * Escape outside a field closes the bar.
+ *
  * It also swallows the browser's own shortcuts (reload, print, find, save):
  * a desktop app must never reload its webview, wherever the focus is.
  */
@@ -30,6 +37,7 @@ import { useAiStore } from "../state/aiStore";
 import { useCodeViewStore } from "../state/codeViewStore";
 import { useLayoutStore } from "../state/layoutStore";
 import { useCommentStore } from "../state/commentStore";
+import { useFindStore } from "../state/findStore";
 import { useFocusStore } from "../state/focusStore";
 import { useHistoryStore } from "../state/historyStore";
 import { useOverlayStore } from "../state/overlayStore";
@@ -132,6 +140,10 @@ function runFilesAction(
       if (!useAiStore.getState().runs[review]?.enabled) return false;
       useLayoutStore.getState().toggleAiPanel();
       return true;
+    case "toggleWhitespace":
+      // A view setting: every diff redraws, nothing is written.
+      useLayoutStore.getState().toggleHideWhitespace();
+      return true;
     case "toggleFindingSelected":
       if (!useAiStore.getState().runs[review]?.enabled) return false;
       return useAiStore.getState().toggleFocused(review);
@@ -152,6 +164,15 @@ function runFilesAction(
   }
 }
 
+/** The find bar's next / previous: false while it is closed. */
+function runFindAction(action: ActionId): boolean {
+  const find = useFindStore.getState();
+  if (!find.open) return false;
+  if (action === "findNext") return find.next() || true;
+  if (action === "findPrevious") return find.prev() || true;
+  return false;
+}
+
 /**
  * Run `action` as its key would, outside any key event (the command
  * palette); false when there is nothing to act on.
@@ -163,9 +184,12 @@ export function runShortcut(action: ActionId): boolean {
     case "list":
       return runListAction(action, null);
     case "app":
+      if (action === "find") return useFindStore.getState().openBar();
       if (action !== "openSettings") return false;
       useSettingsRequestStore.getState().open("general");
       return true;
+    case "find":
+      return runFindAction(action);
     default:
       return false;
   }
@@ -178,10 +202,35 @@ export function useAppShortcuts(options?: { onOpenSettings?: () => void }) {
       if (!e.defaultPrevented) {
         const keymap = currentKeymap();
         // Settings opens from a field too, as the native ⌘, does.
-        if (findAction(e, keymap, "app") === "openSettings" && onOpenSettings) {
+        const appAction = findAction(e, keymap, "app");
+        if (appAction === "openSettings" && onOpenSettings) {
           e.preventDefault();
           onOpenSettings();
           return;
+        }
+        // Find: from fields and the code too; a dialog keeps its keys.
+        if (appAction === "find" && !inDialog(e.target)) {
+          e.preventDefault();
+          useFindStore.getState().openBar({ target: e.target });
+          return;
+        }
+        if (useFindStore.getState().open && !inDialog(e.target)) {
+          const findKey = findAction(e, keymap, "find");
+          if (findKey && runFindAction(findKey)) {
+            e.preventDefault();
+            return;
+          }
+          if (
+            e.key === "Escape" &&
+            !isEditableTarget(e.target) &&
+            !(
+              e.target instanceof Element && e.target.closest("[data-find-bar]")
+            )
+          ) {
+            e.preventDefault();
+            useFindStore.getState().close();
+            return;
+          }
         }
         if (!isEditableTarget(e.target) && !inDialog(e.target)) {
           // A held key repeats the moves only: a toggle (viewed, dismiss)
