@@ -1302,7 +1302,7 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
   `Core::set_claude_dir`), never the real `~/.claude`.
 - **Integration tests** (`crates/argus-core/tests/github_integration.rs`):
   the GitHub provider against the real API, read-only, on the public repo
-  `RobbieMinderhoud/ci-workflows` (merged PRs #1 and #2). All `#[ignore]`d;
+  `RobbieMinderhoud/rust-base` (merged PRs #1 and #2). All `#[ignore]`d;
   `just test-integration` runs only that binary with `--ignored` (never
   `--workspace -- --ignored`: that would also run measurements such as
   `big_review_timings`). Needs the `gh` CLI and `INTEGRATION_TOKEN` (a token
