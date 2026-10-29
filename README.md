@@ -1,8 +1,8 @@
 # Argus
 
 A desktop review cockpit for GitLab merge requests and GitHub pull requests.
-Rust + Tauri 2 + React + TypeScript + Vite. Forked from
-[rust-application-boilerplate](https://github.com/RobbieMinderhoud/rust-application-boilerplate).
+Rust + Tauri 2 + React + TypeScript + Vite. Built on the shared
+skeleton [`rust-base`](https://github.com/Myrras/rust-base).
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ Rust + Tauri 2 + React + TypeScript + Vite. Forked from
 - Node 22 + `pnpm` 10
 - Tauri 2 system prerequisites: <https://tauri.app/start/prerequisites/>
 - `just` (`brew install just`)
-- A clone of [`rust-base`](https://github.com/RobbieMinderhoud/rust-base), symlinked as `~/.rust-base` (for the shared recipes: `just dev`, `just ci`, `just build`, …)
+- A clone of [`rust-base`](https://github.com/Myrras/rust-base), symlinked as `~/.rust-base` (for the shared recipes: `just dev`, `just ci`, `just build`, …)
 
 ## Get started
 

@@ -5,7 +5,7 @@
 ## Shared CI and recipes (rust-base)
 
 CI, release and installer builds come from
-<https://github.com/RobbieMinderhoud/rust-base>. `.github/workflows/` holds thin
+<https://github.com/Myrras/rust-base>. `.github/workflows/` holds thin
 callers (`ci.yml`, `pr-checks.yml`, `build.yml`, `integration.yml`) of its
 reusable workflows, pinned `@v2`. The callers and the shared config files
 (`.gitattributes`, `.editorconfig`, `rust-toolchain.toml`, `.prettierrc.json`,
@@ -90,14 +90,12 @@ macOS-first; Windows kept in mind.
 
 The skeleton — Cargo workspace shape, `justfile`, `scripts/`, CI, shared config
 files, design tokens, layering/IPC conventions — comes from
-<https://github.com/RobbieMinderhoud/rust-application-boilerplate>
-(`../rust-application-boilerplate` locally). CI, release and the shared
-recipes and scripts come from
-<https://github.com/RobbieMinderhoud/rust-base> (see Versioning, CI &
+<https://github.com/Myrras/rust-base>. CI, release and the shared
+recipes and scripts also come from there (see Versioning, CI &
 releases).
 
 - **Rule:** a change to the **shared skeleton or conventions** (not Argus
-  domain code) also goes as a **PR against the boilerplate**.
+  domain code) also goes as a **PR against rust-base**.
 
 ## Status
 
@@ -1306,7 +1304,7 @@ No network, no real tokens, fictitious data only (`acme-fixture/*`,
   `Core::set_claude_dir`), never the real `~/.claude`.
 - **Integration tests** (`crates/argus-core/tests/github_integration.rs`):
   the GitHub provider against the real API, read-only, on the public repo
-  `RobbieMinderhoud/rust-base` (merged PRs #1 and #2). All `#[ignore]`d;
+  `Myrras/rust-base` (merged PRs #1 and #2). All `#[ignore]`d;
   `just test-integration` runs only that binary with `--ignored` (never
   `--workspace -- --ignored`: that would also run measurements such as
   `big_review_timings`). Needs the `gh` CLI and `INTEGRATION_TOKEN` (a token
