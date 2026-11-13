@@ -170,9 +170,14 @@
 }
 
 /* Glass themes: the sticky bar blurs the page scrolling under its translucent
-   fill; the skipped-files popover is frosted. */
-:global(:root[data-theme^="glass"]) .bar,
-:global(:root[data-theme^="glass"]) .skippedList {
+   fill. The skipped-files popover hangs outside the bar, which is a backdrop
+   root, so it can't blur the diff below: a near-opaque fill instead (Canvas
+   follows the theme's color-scheme). */
+:global(:root[data-theme^="glass"]) .bar {
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
   backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+}
+
+:global(:root[data-theme^="glass"]) .skippedList {
+  background: color-mix(in srgb, var(--pop-surface) 30%, Canvas);
 }
