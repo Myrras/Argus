@@ -221,3 +221,10 @@
   font-size: var(--fs-sm);
   color: var(--text-faint);
 }
+
+/* Glass themes: the sticky header blurs the page scrolling under its
+   translucent fill. */
+:global(:root[data-theme^="glass"]) .toolbar {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+}

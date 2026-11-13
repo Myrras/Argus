@@ -180,3 +180,10 @@ button.groupHead {
   background: var(--danger-bg);
   border-radius: var(--radius-sm);
 }
+
+/* Glass themes: the sticky header blurs the page scrolling under its
+   translucent fill. */
+:global(:root[data-theme^="glass"]) .header {
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
+}

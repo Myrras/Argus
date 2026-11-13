@@ -195,7 +195,7 @@ releases).
     `ProvidersSection`), resizer, the work column (the detail island;
     `WelcomeScreen` without a selection), `Modal`, `Toasts` (`toastStore`), `ContextMenu`, lucide
     `icons.tsx`. UI prefs are localStorage-only: `themeStore` → `argus.theme`
-    (dark/light/retro), `layoutStore` → `argus.layout`.
+    (dark/light/retro/glass-dark/glass-light), `layoutStore` → `argus.layout`.
   - Settings as in Iris: `SettingsModal` (tabs General / Accounts / AI /
     Repositories / Editors / Scripts / Shortcuts; switches, steppers and
     choices apply at once, text fields in a form with its own Save, failures

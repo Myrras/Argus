@@ -2,7 +2,8 @@
  * Design tokens for Argus (copied from Iris / Podium so the apps look the same;
  * the violet accent is the only brand difference).
  * Dark-theme-first: the defaults on :root are the dark palette;
- * `:root[data-theme="light"]` and `:root[data-theme="retro"]` override them.
+ * `:root[data-theme="light"]`, `"retro"`, `"glass-dark"` and `"glass-light"`
+ * override them.
  * Components only ever reference these variables, never hard-coded colors,
  * durations or easings.
  */
@@ -127,6 +128,15 @@
   --on-danger: #ffffff; /* text/icons on a --danger fill */
   --swatch-border: rgba(0, 0, 0, 0.12);
 
+  /* Glass themes: blur and saturation behind the islands and popovers, the
+     inset top highlight, and the popover/menu/modal fill. Neutral here so the
+     solid themes render unchanged; backdrop-filter itself is only set under
+     `[data-theme^="glass"]` (it would re-anchor position: fixed children). */
+  --glass-blur: 0px;
+  --glass-sat: 100%;
+  --glass-hi: transparent;
+  --pop-surface: var(--surface);
+
   /* Theme-picker previews (background / accent / text of each theme). The
      picker shows every theme at once, so these stay fixed across themes —
      keep them in step with the palettes above and below. */
@@ -139,6 +149,12 @@
   --swatch-retro-bg: #f2e5bc;
   --swatch-retro-accent: #b16286;
   --swatch-retro-text: #3c3836;
+  --swatch-glass-dark-bg: linear-gradient(135deg, #2c5cff, #9b4dff);
+  --swatch-glass-dark-accent: #7a45d8;
+  --swatch-glass-dark-text: #f5f7fb;
+  --swatch-glass-light-bg: linear-gradient(135deg, #ffc9a8, #a9c8ff);
+  --swatch-glass-light-accent: #6e3fd0;
+  --swatch-glass-light-text: #1d1d1f;
 }
 
 :root[data-theme="light"] {
@@ -213,4 +229,105 @@
   --shadow-sm: 0 1px 2px rgba(60, 56, 54, 0.12);
   --shadow-md: 0 4px 16px rgba(60, 56, 54, 0.18);
   --shadow-lg: 0 12px 40px rgba(60, 56, 54, 0.24);
+}
+
+/* Glass dark: smoked glass islands over a blue / violet / teal canvas. The
+   island fill is darker than the design's 8% white so body text keeps 4.5:1
+   over the brightest part of the canvas. */
+:root[data-theme="glass-dark"] {
+  color-scheme: dark;
+
+  --canvas:
+    radial-gradient(55% 65% at 12% 18%, #2c5cff 0%, rgba(44, 92, 255, 0) 70%),
+    radial-gradient(45% 55% at 88% 22%, #9b4dff 0%, rgba(155, 77, 255, 0) 70%),
+    radial-gradient(55% 55% at 62% 100%, #0fb8a5 0%, rgba(15, 184, 165, 0) 70%),
+    #060912;
+  --bg: rgba(6, 9, 18, 0.4);
+  --surface: rgba(34, 38, 50, 0.62);
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --surface-hover: rgba(255, 255, 255, 0.1);
+  --border: rgba(255, 255, 255, 0.14);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  --text: #f5f7fb;
+  --text-muted: rgba(240, 244, 255, 0.76);
+  --text-faint: rgba(240, 244, 255, 0.6);
+
+  --accent: #7a45d8;
+  --accent-hover: #8653e0;
+  --accent-contrast: #ffffff;
+  --selection: rgba(255, 255, 255, 0.14);
+  --selection-inactive: rgba(255, 255, 255, 0.1);
+
+  --danger: #f85149;
+  --danger-bg: rgba(248, 81, 73, 0.16);
+  --warning: #d29922;
+  --warning-bg: rgba(210, 153, 34, 0.16);
+  --success: #3fb950;
+  --info: #4493f8;
+  --diff-add-bg: color-mix(in srgb, var(--success) 16%, transparent);
+  --diff-del-bg: color-mix(in srgb, var(--danger) 16%, transparent);
+
+  --shadow-md: 0 10px 40px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 30px 80px rgba(0, 0, 0, 0.45);
+  --overlay: rgba(4, 6, 14, 0.35);
+
+  --glass-blur: 40px;
+  --glass-sat: 180%;
+  --glass-hi: rgba(255, 255, 255, 0.22);
+  --pop-surface: rgba(44, 48, 62, 0.74);
+}
+
+/* Glass light: frosted white islands over a peach / blue / mint canvas. */
+:root[data-theme="glass-light"] {
+  color-scheme: light;
+
+  --canvas:
+    radial-gradient(50% 60% at 10% 12%, #ffc9a8 0%, rgba(255, 201, 168, 0) 70%),
+    radial-gradient(50% 60% at 92% 18%, #a9c8ff 0%, rgba(169, 200, 255, 0) 70%),
+    radial-gradient(
+      60% 55% at 55% 100%,
+      #bfeedd 0%,
+      rgba(191, 238, 221, 0) 70%
+    ),
+    #eef1f6;
+  --bg: rgba(255, 255, 255, 0.72);
+  --surface: rgba(255, 255, 255, 0.55);
+  --surface-2: rgba(255, 255, 255, 0.45);
+  --surface-hover: rgba(255, 255, 255, 0.65);
+  --border: rgba(20, 30, 60, 0.09);
+  --border-strong: rgba(20, 30, 60, 0.16);
+
+  --text: #1d1d1f;
+  --text-muted: rgba(29, 29, 31, 0.74);
+  --text-faint: rgba(29, 29, 31, 0.62);
+
+  --accent: #6e3fd0;
+  --accent-hover: #5f33bb;
+  --accent-contrast: #ffffff;
+  --selection: rgba(255, 255, 255, 0.78);
+  --selection-inactive: rgba(20, 30, 60, 0.07);
+
+  --danger: #cf222e;
+  --danger-bg: rgba(207, 34, 46, 0.1);
+  --warning: #9a6700;
+  --warning-bg: rgba(154, 103, 0, 0.12);
+  --success: #1a7f37;
+  --info: #0969da;
+  --diff-add-bg: color-mix(in srgb, var(--success) 16%, transparent);
+  --diff-del-bg: color-mix(in srgb, var(--danger) 16%, transparent);
+
+  --find-match: rgba(212, 167, 44, 0.32);
+  --find-current: rgba(251, 143, 68, 0.6);
+  --find-current-ring: #bc4c00;
+
+  --shadow-sm: 0 1px 3px rgba(20, 30, 60, 0.08);
+  --shadow-md: 0 10px 30px rgba(40, 50, 90, 0.12);
+  --shadow-lg: 0 30px 80px rgba(40, 50, 90, 0.25);
+  --overlay: rgba(30, 40, 70, 0.18);
+
+  --glass-blur: 30px;
+  --glass-sat: 160%;
+  --glass-hi: rgba(255, 255, 255, 0.95);
+  --pop-surface: rgba(255, 255, 255, 0.7);
 }

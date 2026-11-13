@@ -18,6 +18,12 @@
   position: relative;
 }
 
+/* Glass themes: body paints the canvas gradient once for the whole window. */
+:global(:root[data-theme^="glass"]) .titlebar,
+:global(:root[data-theme^="glass"]) .body {
+  background: transparent;
+}
+
 /* Windows: the strip IS the (custom) title bar, so the controls run flush to the
    top-right corner — drop the right padding the macOS brand strip uses. */
 .titlebarWindows {

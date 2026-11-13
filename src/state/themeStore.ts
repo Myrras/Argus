@@ -4,7 +4,8 @@ import { create } from "zustand";
 
 import { prefersReducedMotion } from "../lib/motion";
 
-export type ThemeMode = "dark" | "light" | "retro";
+export type ThemeMode =
+  "dark" | "light" | "retro" | "glass-dark" | "glass-light";
 
 /** `document` augmented with the (still newish) View Transitions API. */
 type ViewTransitionDocument = Document & {
@@ -20,7 +21,13 @@ function initialTheme(): ThemeMode {
   } catch {
     // No storage (private mode, blocked): the default theme.
   }
-  if (stored === "light" || stored === "retro") return stored;
+  if (
+    stored === "light" ||
+    stored === "retro" ||
+    stored === "glass-dark" ||
+    stored === "glass-light"
+  )
+    return stored;
   return "dark";
 }
 
