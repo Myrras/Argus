@@ -16,7 +16,7 @@ tracing.workspace = true
 # Parsing the GitLab instance URL (its host is what `glab` is asked for).
 url = "2.5"
 # GitHub's contents API returns files base64-encoded.
-base64 = "0.22"
+base64 = "0.23"
 # GitLab line codes (`<sha1 of the path>_<old>_<new>`) for multi-line
 # comments. Already in the tree through `uuid`.
 sha1_smol = "1"
