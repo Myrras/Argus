@@ -232,26 +232,40 @@
 }
 
 /* Glass dark: smoked glass islands over a blue / violet / teal canvas. The
-   island fill is darker than the design's 8% white so body text keeps 4.5:1
-   over the brightest part of the canvas. */
+   recipe is shared with Podium, Iris and Selene: canvas patches at half
+   strength and a dark island fill keep text and accent text at 4.5:1 or
+   more over the brightest patch (the fill is .8, not the shared .75, because
+   the 180% saturation brightens the teal patch). */
 :root[data-theme="glass-dark"] {
   color-scheme: dark;
 
   --canvas:
-    radial-gradient(55% 65% at 12% 18%, #2c5cff 0%, rgba(44, 92, 255, 0) 70%),
-    radial-gradient(45% 55% at 88% 22%, #9b4dff 0%, rgba(155, 77, 255, 0) 70%),
-    radial-gradient(55% 55% at 62% 100%, #0fb8a5 0%, rgba(15, 184, 165, 0) 70%),
+    radial-gradient(
+      55% 65% at 12% 18%,
+      rgba(44, 92, 255, 0.5) 0%,
+      rgba(44, 92, 255, 0) 70%
+    ),
+    radial-gradient(
+      45% 55% at 88% 22%,
+      rgba(155, 77, 255, 0.5) 0%,
+      rgba(155, 77, 255, 0) 70%
+    ),
+    radial-gradient(
+      55% 55% at 62% 100%,
+      rgba(15, 184, 165, 0.5) 0%,
+      rgba(15, 184, 165, 0) 70%
+    ),
     #060912;
   --bg: rgba(6, 9, 18, 0.4);
-  --surface: rgba(34, 38, 50, 0.62);
+  --surface: rgba(18, 22, 38, 0.8);
   --surface-2: rgba(255, 255, 255, 0.06);
   --surface-hover: rgba(255, 255, 255, 0.1);
   --border: rgba(255, 255, 255, 0.14);
   --border-strong: rgba(255, 255, 255, 0.22);
 
   --text: #f5f7fb;
-  --text-muted: rgba(240, 244, 255, 0.76);
-  --text-faint: rgba(240, 244, 255, 0.6);
+  --text-muted: rgba(240, 244, 255, 0.84);
+  --text-faint: rgba(240, 244, 255, 0.68);
 
   --accent: #a371f7;
   --accent-hover: #bc8cff;
@@ -275,7 +289,7 @@
   --glass-blur: 40px;
   --glass-sat: 180%;
   --glass-hi: rgba(255, 255, 255, 0.22);
-  --pop-surface: rgba(44, 48, 62, 0.74);
+  --pop-surface: rgba(22, 26, 44, 0.85);
 }
 
 /* Glass light: frosted white islands over a peach / blue / mint canvas. */
