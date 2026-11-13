@@ -150,7 +150,7 @@
   --swatch-retro-accent: #b16286;
   --swatch-retro-text: #3c3836;
   --swatch-glass-dark-bg: linear-gradient(135deg, #2c5cff, #9b4dff);
-  --swatch-glass-dark-accent: #7a45d8;
+  --swatch-glass-dark-accent: #a371f7;
   --swatch-glass-dark-text: #f5f7fb;
   --swatch-glass-light-bg: linear-gradient(135deg, #ffc9a8, #a9c8ff);
   --swatch-glass-light-accent: #6e3fd0;
@@ -253,8 +253,8 @@
   --text-muted: rgba(240, 244, 255, 0.76);
   --text-faint: rgba(240, 244, 255, 0.6);
 
-  --accent: #7a45d8;
-  --accent-hover: #8653e0;
+  --accent: #a371f7;
+  --accent-hover: #bc8cff;
   --accent-contrast: #ffffff;
   --selection: rgba(255, 255, 255, 0.14);
   --selection-inactive: rgba(255, 255, 255, 0.1);
