@@ -9,6 +9,19 @@ async function freshStore() {
   return (await import("./themeStore")).useThemeStore;
 }
 
+describe("isDarkTheme", () => {
+  it.each([
+    ["dark", true],
+    ["glass-dark", true],
+    ["light", false],
+    ["glass-light", false],
+    ["retro", false],
+  ] as const)("%s -> %s", async (mode, dark) => {
+    const { isDarkTheme } = await import("./themeStore");
+    expect(isDarkTheme(mode)).toBe(dark);
+  });
+});
+
 describe("themeStore", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -27,6 +40,16 @@ describe("themeStore", () => {
     expect(store.getState().mode).toBe("retro");
     expect(document.documentElement.getAttribute("data-theme")).toBe("retro");
   });
+
+  it.each(["glass-dark", "glass-light"])(
+    "restores the %s theme",
+    async (mode) => {
+      localStorage.setItem("argus.theme", mode);
+      const store = await freshStore();
+      expect(store.getState().mode).toBe(mode);
+      expect(document.documentElement.getAttribute("data-theme")).toBe(mode);
+    },
+  );
 
   it("ignores an unknown stored value", async () => {
     localStorage.setItem("argus.theme", "neon");

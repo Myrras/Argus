@@ -11,6 +11,12 @@ when it merges.
 
 ## [Unreleased]
 
+### Added
+
+- Two glass themes, Glass dark and Glass light (Settings → General →
+  Appearance): translucent, blurred islands, menus and dialogs over a soft
+  colour gradient, with Argus' violet accent.
+
 ## [1.1.1] - 2026-10-29
 
 ### Security

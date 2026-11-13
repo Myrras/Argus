@@ -16,6 +16,7 @@
 }
 
 .header {
+  composes: glass from global; /* frosted on the glass themes */
   position: sticky;
   top: var(--page-sticky-top, var(--tabbar-h));
   z-index: 2;

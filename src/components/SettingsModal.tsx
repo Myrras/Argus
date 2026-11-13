@@ -124,6 +124,24 @@ const THEMES: {
       "var(--swatch-retro-text)",
     ],
   },
+  {
+    mode: "glass-dark",
+    label: "Glass dark",
+    swatches: [
+      "var(--swatch-glass-dark-bg)",
+      "var(--swatch-glass-dark-accent)",
+      "var(--swatch-glass-dark-text)",
+    ],
+  },
+  {
+    mode: "glass-light",
+    label: "Glass light",
+    swatches: [
+      "var(--swatch-glass-light-bg)",
+      "var(--swatch-glass-light-accent)",
+      "var(--swatch-glass-light-text)",
+    ],
+  },
 ];
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {

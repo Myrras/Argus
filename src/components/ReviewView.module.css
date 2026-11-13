@@ -98,6 +98,7 @@
 
 /* The toolbar is a container so it can drop words before it overflows. */
 .toolbar {
+  composes: glass from global; /* frosted on the glass themes */
   container-type: inline-size;
   position: sticky;
   top: 0;

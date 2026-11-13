@@ -1,6 +1,7 @@
 /* Pinned under the page toolbar, in the flow: the cards' sticky headers
    move down by its height (`--page-sticky-top` on the column). */
 .bar {
+  composes: glass from global; /* frosted on the glass themes */
   container-type: inline-size;
   position: sticky;
   top: var(--tabbar-h);
@@ -136,10 +137,12 @@
   margin: var(--sp-1) 0 0;
   padding: var(--sp-2) var(--sp-3);
   list-style: none;
-  background: var(--surface);
+  background: var(--pop-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-md);
+  box-shadow:
+    inset 0 1px 0 var(--glass-hi),
+    var(--shadow-md);
   font-size: var(--fs-xs);
 }
 
@@ -165,4 +168,10 @@
   .scope {
     display: none;
   }
+}
+/* The skipped-files popover hangs outside the bar, which is a backdrop root,
+   so it can't blur the diff below: a near-opaque fill instead (Canvas follows
+   the theme's color-scheme). */
+:global(:root[data-theme^="glass"]) .skippedList {
+  background: color-mix(in srgb, var(--pop-surface) 30%, Canvas);
 }

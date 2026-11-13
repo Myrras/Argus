@@ -1,6 +1,7 @@
 /* The AI island: same chrome as the detail island, at a fixed width
    (Iris's preview island). */
 .panel {
+  composes: glass from global; /* frosted on the glass themes */
   flex: 0 0 var(--ai-panel-w);
   width: var(--ai-panel-w);
   min-width: 0;
@@ -10,7 +11,9 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-md);
+  box-shadow:
+    inset 0 1px 0 var(--glass-hi),
+    var(--shadow-md);
   overflow: hidden;
   animation: aiIslandIn var(--dur-3) var(--ease-out);
 }

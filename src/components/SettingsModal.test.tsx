@@ -113,6 +113,14 @@ describe("SettingsModal — General tab", () => {
     );
   });
 
+  it("offers the glass themes", () => {
+    render(<SettingsModal open onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "Glass light" }));
+    expect(useThemeStore.getState().mode).toBe("glass-light");
+    fireEvent.click(screen.getByRole("button", { name: "Glass dark" }));
+    expect(useThemeStore.getState().mode).toBe("glass-dark");
+  });
+
   it("toggles reduced motion", () => {
     render(<SettingsModal open onClose={() => undefined} />);
     fireEvent.click(screen.getByRole("switch", { name: "Reduce motion" }));
