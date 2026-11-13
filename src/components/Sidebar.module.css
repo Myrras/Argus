@@ -3,6 +3,7 @@
 
 /* A floating island: rounded, bordered, elevated; clips its sections. */
 .sidebar {
+  composes: glass from global; /* frosted on the glass themes */
   height: 100%;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -135,10 +136,4 @@
 .sectionBodyInner {
   overflow: hidden;
   min-height: 0;
-}
-
-/* Glass themes: frosted (only there: backdrop-filter re-anchors position: fixed children). */
-:global(:root[data-theme^="glass"]) .sidebar {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }

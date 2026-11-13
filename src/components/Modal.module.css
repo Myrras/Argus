@@ -17,6 +17,7 @@
 }
 
 .card {
+  composes: glass from global; /* frosted on the glass themes */
   background: var(--pop-surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -112,10 +113,4 @@
     transform: translateY(6px) scale(0.98);
     opacity: 0;
   }
-}
-
-/* Glass themes: frosted (only there: backdrop-filter re-anchors position: fixed children). */
-:global(:root[data-theme^="glass"]) .card {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }

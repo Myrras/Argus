@@ -1,6 +1,7 @@
 /* The AI island: same chrome as the detail island, at a fixed width
    (Iris's preview island). */
 .panel {
+  composes: glass from global; /* frosted on the glass themes */
   flex: 0 0 var(--ai-panel-w);
   width: var(--ai-panel-w);
   min-width: 0;
@@ -99,10 +100,4 @@
   color: var(--danger);
   background: var(--danger-bg);
   border-radius: var(--radius-sm);
-}
-
-/* Glass themes: frosted (only there: backdrop-filter re-anchors position: fixed children). */
-:global(:root[data-theme^="glass"]) .panel {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }

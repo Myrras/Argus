@@ -98,6 +98,7 @@
 
 /* The toolbar is a container so it can drop words before it overflows. */
 .toolbar {
+  composes: glass from global; /* frosted on the glass themes */
   container-type: inline-size;
   position: sticky;
   top: 0;
@@ -220,11 +221,4 @@
   padding: var(--sp-3);
   font-size: var(--fs-sm);
   color: var(--text-faint);
-}
-
-/* Glass themes: the sticky header blurs the page scrolling under its
-   translucent fill. */
-:global(:root[data-theme^="glass"]) .toolbar {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }

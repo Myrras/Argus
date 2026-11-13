@@ -1,5 +1,6 @@
 /* The detail island: rounded, bordered, elevated, like Iris's pane islands. */
 .island {
+  composes: glass from global; /* frosted on the glass themes */
   flex: 1;
   min-width: 0;
   min-height: 0;
@@ -372,10 +373,4 @@
   .facts {
     flex-basis: auto;
   }
-}
-
-/* Glass themes: frosted (only there: backdrop-filter re-anchors position: fixed children). */
-:global(:root[data-theme^="glass"]) .island {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }

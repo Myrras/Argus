@@ -17,6 +17,7 @@
 /* The header stays in view (under the Files toolbar) while its file
    scrolls by. */
 .header {
+  composes: glass from global; /* frosted on the glass themes */
   position: sticky;
   top: var(--page-sticky-top, var(--tabbar-h));
   z-index: 2;
@@ -192,11 +193,4 @@
 
 .body :global(.cm-mergeViewEditor) {
   min-width: 0;
-}
-
-/* Glass themes: the sticky header blurs the page scrolling under its
-   translucent fill. */
-:global(:root[data-theme^="glass"]) .header {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }

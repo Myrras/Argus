@@ -130,8 +130,9 @@
 
   /* Glass themes: blur and saturation behind the islands and popovers, the
      inset top highlight, and the popover/menu/modal fill. Neutral here so the
-     solid themes render unchanged; backdrop-filter itself is only set under
-     `[data-theme^="glass"]` (it would re-anchor position: fixed children). */
+     solid themes render unchanged. Not usable in backdrop-filter: WebKit treats
+     any var() there as `none`, so the `.glass` class in global.css repeats the
+     literal values. */
   --glass-blur: 0px;
   --glass-sat: 100%;
   --glass-hi: transparent;

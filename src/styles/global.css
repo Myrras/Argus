@@ -377,3 +377,17 @@ mark.argus-find-match[data-find-current="true"] {
 ::highlight(argus-find-current) {
   background-color: var(--find-current);
 }
+
+/* Glass themes: the frosted backdrop behind islands and popovers. Literal
+   values: WebKit (Safari 18, Tauri's macOS WebView) treats any var() inside
+   backdrop-filter as `none`. Keep in sync with --glass-blur/--glass-sat. Only
+   set here (it would re-anchor position: fixed children on other themes). */
+:root[data-theme="glass-dark"] .glass {
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(40px) saturate(180%);
+}
+
+:root[data-theme="glass-light"] .glass {
+  -webkit-backdrop-filter: blur(30px) saturate(160%);
+  backdrop-filter: blur(30px) saturate(160%);
+}

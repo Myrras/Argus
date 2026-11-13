@@ -7,6 +7,7 @@
 }
 
 .menu {
+  composes: glass from global; /* frosted on the glass themes */
   position: fixed;
   z-index: 61;
   min-width: 180px;
@@ -76,10 +77,4 @@
 .shortcut {
   font-size: var(--fs-xs);
   color: var(--text-faint);
-}
-
-/* Glass themes: frosted (only there: backdrop-filter re-anchors position: fixed children). */
-:global(:root[data-theme^="glass"]) .menu {
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-sat));
 }
