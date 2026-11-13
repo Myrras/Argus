@@ -9,6 +9,19 @@ async function freshStore() {
   return (await import("./themeStore")).useThemeStore;
 }
 
+describe("isDarkTheme", () => {
+  it.each([
+    ["dark", true],
+    ["glass-dark", true],
+    ["light", false],
+    ["glass-light", false],
+    ["retro", false],
+  ] as const)("%s -> %s", async (mode, dark) => {
+    const { isDarkTheme } = await import("./themeStore");
+    expect(isDarkTheme(mode)).toBe(dark);
+  });
+});
+
 describe("themeStore", () => {
   beforeEach(() => {
     localStorage.clear();

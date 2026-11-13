@@ -31,9 +31,16 @@ import {
   highlightSpecialChars,
   lineNumbers,
 } from "@codemirror/view";
-import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
+import {
+  githubDark,
+  githubDarkInit,
+  githubDarkStyle,
+  githubLight,
+  githubLightInit,
+  githubLightStyle,
+} from "@uiw/codemirror-theme-github";
 
-import type { ThemeMode } from "../state/themeStore";
+import { isDarkTheme, type ThemeMode } from "../state/themeStore";
 import { findKeys } from "./findHighlight";
 
 /** Selene's editor look, on the Argus tokens (every theme). */
@@ -98,10 +105,49 @@ const tokenTheme = Prec.highest(
   }),
 );
 
+/**
+ * Glass themes: the editor and gutters go transparent so the code sits on
+ * the glass card, whose fill is what the syntax colours need 4.5:1 on. The
+ * GitHub colours miss that on the pastel canvas (light) and the teal patch
+ * (dark comments), so those get darker / lighter twins.
+ */
+const glassClear = Prec.highest(
+  EditorView.theme({
+    "&": { background: "transparent" },
+    ".cm-gutters": { background: "transparent" },
+  }),
+);
+/** The GitHub styles with some colours swapped (`from` hex -> `to`). */
+function recolor(
+  base: typeof githubLightStyle,
+  swap: Record<string, string>,
+): typeof githubLightStyle {
+  return base.map((r) => ({ ...r, color: swap[r.color ?? ""] ?? r.color }));
+}
+const glassLight = githubLightInit({
+  styles: recolor(githubLightStyle, {
+    "#6a737d": "#57606a", // comment, bracket
+    "#d73a49": "#b31d28", // keyword, type
+    "#cb2431": "#b31d28", // invalid
+    "#22863a": "#116329", // name, quote
+    "#e36209": "#a14100", // atom, bool
+  }),
+});
+const glassDark = githubDarkInit({
+  styles: recolor(githubDarkStyle, { "#8b949e": "#9aa4af" }), // comment
+});
+
+/** The CodeMirror theme for `mode`: GitHub dark/light, tuned on glass. */
+function themeFor(mode: ThemeMode): Extension {
+  if (mode === "glass-dark") return [glassDark, glassClear];
+  if (mode === "glass-light") return [glassLight, glassClear];
+  return isDarkTheme(mode) ? githubDark : githubLight;
+}
+
 /** The read-only base every diff editor gets. */
 export function baseExtensions(mode: ThemeMode): Extension[] {
   return [
-    mode === "dark" ? githubDark : githubLight,
+    themeFor(mode),
     tokenTheme,
     findKeys,
     lineNumbers(),
@@ -124,7 +170,7 @@ const codeBlockTheme = Prec.highest(
 /** The read-only base of a comment's code block. */
 export function codeBlockExtensions(mode: ThemeMode): Extension[] {
   return [
-    mode === "dark" ? githubDark : githubLight,
+    themeFor(mode),
     tokenTheme,
     codeBlockTheme,
     findKeys,

@@ -7,6 +7,11 @@ import { prefersReducedMotion } from "../lib/motion";
 export type ThemeMode =
   "dark" | "light" | "retro" | "glass-dark" | "glass-light";
 
+/** Whether the mode has a dark palette (dark and glass-dark). */
+export function isDarkTheme(mode: ThemeMode): boolean {
+  return mode === "dark" || mode === "glass-dark";
+}
+
 /** `document` augmented with the (still newish) View Transitions API. */
 type ViewTransitionDocument = Document & {
   startViewTransition?: (callback: () => void) => unknown;
